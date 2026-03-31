@@ -36,7 +36,7 @@ void CharacterDatabaseConnection::DoPrepareStatements()
     PrepareStatement(CHAR_DEL_CHARACTER_BAN, "DELETE cb FROM character_banned cb INNER JOIN characters c ON c.guid = cb.guid WHERE c.account = ?", CONNECTION_ASYNC);
     PrepareStatement(CHAR_DEL_ACCOUNT_TRANSMOG, "DELETE FROM custom_account_transmog WHERE accountid = ?", CONNECTION_ASYNC);
     PrepareStatement(CHAR_SEL_ACCOUNT_TRANSMOG, "SELECT `type`, entry FROM custom_account_transmog WHERE accountid = ? ORDER BY entry", CONNECTION_ASYNC);
-    PrepareStatement(CHAR_INS_ACCOUNT_TRANSMOG, "INSERT INTO custom_account_transmog (`accountid`, `type`, `entry`) VALUES (?, ?, ?)", CONNECTION_ASYNC);
+    PrepareStatement(CHAR_INS_ACCOUNT_TRANSMOG, "INSERT IGNORE INTO custom_account_transmog (`accountid`, `type`, `entry`) VALUES (?, ?, ?)", CONNECTION_ASYNC);
     PrepareStatement(CHAR_DEL_TRANSMOG_SETS, "DELETE FROM `custom_transmogrification_sets` WHERE owner = ?", CONNECTION_ASYNC);
     PrepareStatement(CHAR_SEL_TRANSMOG_SETS, "SELECT `presetid`, `setname`, `setdata` FROM `custom_transmogrification_sets` WHERE owner = ?", CONNECTION_ASYNC);
     PrepareStatement(CHAR_REP_TRANSMOG_SETS, "REPLACE INTO `custom_transmogrification_sets` (`owner`, `presetid`, `setname`, `setdata`) VALUES (?, ?, ?, ?)", CONNECTION_ASYNC);

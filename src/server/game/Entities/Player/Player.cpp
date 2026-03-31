@@ -19263,6 +19263,7 @@ void Player::SaveToDB(bool create /*=false*/)
 
 void Player::SaveToDB(CharacterDatabaseTransaction trans, bool create /* = false */)
 {
+	WorldSession* session = GetSession();
     // delay auto save at any saves (manual, in code, or autosave)
     m_nextSave = sWorld->getIntConfig(CONFIG_INTERVAL_SAVE);
 
@@ -19297,7 +19298,7 @@ void Player::SaveToDB(CharacterDatabaseTransaction trans, bool create /* = false
         /// @todo: Filter out more redundant fields that can take their default value at player create
         stmt = CharacterDatabase.GetPreparedStatement(CHAR_INS_CHARACTER);
         stmt->setUInt32(index++, GetGUID().GetCounter());
-        stmt->setUInt32(index++, GetSession()->GetAccountId());
+		stmt->setUInt32(index++, session ? session->GetAccountId() : 0);
         stmt->setString(index++, GetName());
         stmt->setUInt8(index++, GetRace());
         stmt->setUInt8(index++, GetClass());
@@ -19368,7 +19369,14 @@ void Player::SaveToDB(CharacterDatabaseTransaction trans, bool create /* = false
         for (uint32 i = 0; i < MAX_POWERS; ++i)
             stmt->setUInt32(index++, GetPower(Powers(i)));
 
-        stmt->setUInt32(index++, GetSession()->GetLatency());
+        uint32 latency = 0;
+		if (session)
+		{
+			latency = session->GetLatency();
+			if (latency > 1000)
+				latency = 0;
+		}
+		stmt->setUInt32(index++, latency);
 
         stmt->setUInt8(index++, GetSpecsCount());
         stmt->setUInt8(index++, GetActiveSpec());
@@ -19493,7 +19501,14 @@ void Player::SaveToDB(CharacterDatabaseTransaction trans, bool create /* = false
         for (uint32 i = 0; i < MAX_POWERS; ++i)
             stmt->setUInt32(index++, GetPower(Powers(i)));
 
-        stmt->setUInt32(index++, GetSession()->GetLatency());
+        uint32 latency = 0;
+		if (session)
+		{
+			latency = session->GetLatency();
+			if (latency > 1000)
+				latency = 0;
+		}
+		stmt->setUInt32(index++, latency);
 
         stmt->setUInt8(index++, GetSpecsCount());
         stmt->setUInt8(index++, GetActiveSpec());
@@ -19529,7 +19544,7 @@ void Player::SaveToDB(CharacterDatabaseTransaction trans, bool create /* = false
         stmt->setUInt8(index++, GetByteValue(PLAYER_FIELD_BYTES, PLAYER_FIELD_BYTES_OFFSET_ACTION_BAR_TOGGLES));
         stmt->setUInt32(index++, m_grantableLevels);
 
-        stmt->setUInt8(index++, IsInWorld() && !GetSession()->PlayerLogout() ? 1 : 0);
+        stmt->setUInt8(index++, (IsInWorld() && session && !session->PlayerLogout()) ? 1 : 0);
         // Index
         stmt->setUInt32(index++, GetGUID().GetCounter());
     }
@@ -19582,14 +19597,18 @@ void Player::SaveToDB(CharacterDatabaseTransaction trans, bool create /* = false
     m_achievementMgr->SaveToDB(trans);
     m_reputationMgr->SaveToDB(trans);
     _SaveEquipmentSets(trans);
-    GetSession()->SaveTutorialsData(trans);                 // changed only while character in game
+
+	if (session)
+	{
+		session->SaveTutorialsData(trans);
+		session->SaveInstanceTimeRestrictions(trans);
+	}
     _SaveGlyphs(trans);
-    GetSession()->SaveInstanceTimeRestrictions(trans);
 
     // check if stats should only be saved on logout
     // save stats can be out of transaction
-    if (m_session->isLogingOut() || !sWorld->getBoolConfig(CONFIG_STATS_SAVE_ONLY_ON_LOGOUT))
-        _SaveStats(trans);
+    if (session && (session->isLogingOut() || !sWorld->getBoolConfig(CONFIG_STATS_SAVE_ONLY_ON_LOGOUT)))
+		_SaveStats(trans);
 
     // save pet (hunter pet level and experience and all type pets health/mana).
     if (Pet* pet = GetPet())

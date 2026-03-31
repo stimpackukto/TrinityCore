@@ -1,0 +1,1 @@
+ebd14b4f01c src/server/shared/Database/Implementation/CharacterDatabase.cpp   (Spp             2013-01-02 12:22:50 +0100 170)     PrepareStatement(CHAR_DEL_DECLINED_NAME, "DELETE FROM character_declinedname WHERE guid = ?", CONNECTION_ASYNC);
