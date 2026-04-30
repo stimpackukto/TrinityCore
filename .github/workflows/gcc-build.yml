@@ -32,3 +32,7 @@ jobs:
         cd bin/check_install/bin
         ./authserver --version
         ./worldserver --version
+- name: Install dependencies
+  run: |
+    sudo apt-get update
+    sudo apt-get install -y libcurl4-openssl-dev
