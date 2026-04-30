@@ -41,6 +41,41 @@ struct WintergraspObjectPositionData;
 typedef std::vector<BfWGGameObjectBuilding*> GameObjectBuildingVect;
 typedef std::vector<WintergraspWorkshop*> WorkshopVect;
 
+enum CustomWintergraspEliteDemolisher
+{
+    NPC_WG_CUSTOM_SIEGE_ELITE_DEMOLISHER = 900010,
+
+    SPELL_WG_ELITE_DEMOLISHER_MELEE  = 54107,
+    SPELL_WG_ELITE_DEMOLISHER_RANGED = 50896,
+
+    WG_ELITE_DEMOLISHER_SEARCH_TIMER = 1000,
+
+    WG_ELITE_DEMOLISHER_RANGED_SPELL_TIMER = 8000,
+    WG_ELITE_DEMOLISHER_MELEE_SPELL_TIMER  = 3000,
+
+    WG_ELITE_DEMOLISHER_TARGET_RANGE = 70,
+    WG_ELITE_DEMOLISHER_RANGED_MIN_RANGE = 10,
+    WG_ELITE_DEMOLISHER_MELEE_RANGE = 8,
+    WG_ELITE_DEMOLISHER_CHASE_DISTANCE = 4,
+
+    WG_ELITE_DEMOLISHER_OBJECT_MOVE_POINT = 900,
+
+	WG_ELITE_DEMOLISHER_DATA_WORKSHOP_ID = 1
+};
+
+enum WGEliteDemolisherTargetType
+{
+    WG_ELITE_TARGET_NONE = 0,
+    WG_ELITE_TARGET_UNIT = 1,
+    WG_ELITE_TARGET_GAMEOBJECT = 2
+};
+
+enum CustomWintergraspAssaultDemolisherWave
+{
+    WG_ASSAULT_DEMOLISHER_WORKSHOP_COUNT = 4,
+    WG_ASSAULT_DEMOLISHER_MAX_PER_WORKSHOP = 5
+};
+
 enum WintergraspSpells
 {
     // Wartime auras
@@ -141,6 +176,10 @@ class BfGraveyardWG : public BfGraveyard
     public:
         BfGraveyardWG(BattlefieldWG* Bf);
 
+        void AddPlayer(ObjectGuid playerGuid) override;
+        void RemovePlayer(ObjectGuid playerGuid) override;
+        void Resurrect() override;
+
         void SetTextId(uint32 textId) { m_GossipTextId = textId; }
         uint32 GetTextId() const { return m_GossipTextId; }
 
@@ -179,6 +218,9 @@ enum WintergraspNpcs
 
     NPC_TAUNKA_SPIRIT_GUIDE                         = 31841, // Horde spirit guide for Wintergrasp
     NPC_DWARVEN_SPIRIT_GUIDE                        = 31842, // Alliance spirit guide for Wintergrasp
+
+	NPC_WG_GOBLIN_MECHANIC  = 30400, // Horde
+    NPC_WG_GNOMISH_ENGINEER = 30499,  // Alliance
 
     NPC_WINTERGRASP_SIEGE_ENGINE_ALLIANCE           = 28312,
     NPC_WINTERGRASP_SIEGE_ENGINE_HORDE              = 32627,
@@ -355,6 +397,16 @@ class BattlefieldWG : public Battlefield
 
         uint32 GetData(uint32 data) const override;
 
+		void AddPlayerToWGResurrectQueue(ObjectGuid playerGuid);
+        void RemovePlayerFromWGResurrectQueue(ObjectGuid playerGuid);
+        void ResurrectWGTeamQueue(TeamId teamId);
+        void ClearWGResurrectQueue();
+
+		void ApplyWintergraspControlPhase(Player* player);
+		void ApplyWintergraspControlPhaseToAll();
+
+		void UpdateDefenderPortals();
+
     protected:
         bool m_isRelicInteractible;
 
@@ -364,7 +416,17 @@ class BattlefieldWG : public Battlefield
         GameObjectBuildingVect BuildingsInZone;
 
         GuidUnorderedSet m_vehicles[PVP_TEAMS_COUNT];
+		GuidUnorderedSet m_WGResurrectQueue[PVP_TEAMS_COUNT];
         GuidVector CanonList;
+		GuidVector TrashMobList;
+
+		ObjectGuid m_wgSingleEliteDemolisherGuid;
+
+		void SpawnSingleEliteDemolisher();
+		void RemoveSingleEliteDemolisher();
+
+		void HideTrashMobs();
+		void ShowTrashMobs();
 
         TeamId m_tenacityTeam;
         uint32 m_tenacityStack;
@@ -468,7 +530,10 @@ enum WintergraspText
     BATTLEFIELD_WG_TEXT_SW_KEEPTOWER_DESTROY            = 36,
 
     BATTLEFIELD_WG_TEXT_RANK_CORPORAL                   = 37,
-    BATTLEFIELD_WG_TEXT_RANK_FIRST_LIEUTENANT           = 38
+    BATTLEFIELD_WG_TEXT_RANK_FIRST_LIEUTENANT           = 38,
+	
+	BATTLEFIELD_WG_TEXT_SIEGE_WAVE_LEADY           = 39,
+	BATTLEFIELD_WG_TEXT_SIEGE_WAVE_START           = 40
 };
 
 enum WintergraspGameObject

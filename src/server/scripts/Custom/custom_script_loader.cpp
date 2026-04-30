@@ -37,6 +37,9 @@ void AddSC_icc_rental_mgr();
 void AddSC_icc_rental_npc();
 void AddSC_weekly_delivery_vendor();
 void AddSC_discord_daily_event();
+void AddSC_npc_custom_auctioneer();
+void AddSC_neukgu_event();
+void AddSC_custom_spell_script();
 
 void AddCustomScripts()
 {
@@ -58,4 +61,7 @@ void AddCustomScripts()
 	AddSC_icc_rental_npc();
 	AddSC_weekly_delivery_vendor();
 	AddSC_discord_daily_event();
+	AddSC_npc_custom_auctioneer();
+	AddSC_neukgu_event();
+	AddSC_custom_spell_script();
 }

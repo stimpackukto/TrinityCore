@@ -245,7 +245,7 @@ namespace
             return false;
 
         std::string insertSql = Trinity::StringFormat(
-            "INSERT INTO appdata.daily_emote_log "
+            "INSERT IGNORE INTO appdata.daily_emote_log "
             "(sender_guid, target_guid, emote_id, log_date) "
             "VALUES ({}, {}, {}, CURDATE())",
             senderGuid,
@@ -646,12 +646,9 @@ public:
 		if (!info)
 			return;
 
-		uint32 charGuid = player->GetGUID().GetCounter();
-		uint32 accountId = player->GetSession()->GetAccountId();
-
 		for (uint8 i = 0; i < MAX_SPELL_EFFECTS; ++i)
 		{
-			uint32 effect = info->_effects[i].Effect;
+			uint32 effect = info->_effects[i].Effect; // 🔥 수정
 
 			// 🔹 타인 부활
 			if (effect == SPELL_EFFECT_RESURRECT)
@@ -666,6 +663,13 @@ public:
 				AddDailyProgress(player, "profession_craft", 1);
 				return;
 			}
+
+			// 🔥 무두질 (추가)
+			if (effect == SPELL_EFFECT_SKINNING)
+			{
+				AddDailyProgress(player, "profession_gather", 1);
+				return;
+			}
 		}
 	}
 
@@ -678,26 +682,6 @@ public:
 			return;
 
 		AddDailyProgress(killer, "world_pvp", 1);
-	}
-
-	void OnQuestStatusChange(Player* player, uint32 questId) override
-	{
-		if (!player)
-			return;
-
-		if (player->GetQuestStatus(questId) == QUEST_STATUS_REWARDED)
-		{
-			AddDailyProgress(player, "quest_complete", 1);
-
-			if (Quest const* q = sObjectMgr->GetQuestTemplate(questId))
-			{
-				// 일일 퀘스트만
-				if (!q->IsDaily())
-					return;
-				
-				AddDailyProgress(player, "daily_quest", 1);
-			}
-		}
 	}
 
 	void OnLootItem(Player* looter, ObjectGuid const& lootGuid, uint32 itemId, uint32 count) override
@@ -727,18 +711,8 @@ public:
 			}
 		}
 
-		/* 가죽 */
-		if (!isGather)
-		{
-			if (Creature* creature = looter->GetMap()->GetCreature(lootGuid))
-			{
-				if (creature->HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_SKINNABLE))
-					isGather = true;
-			}
-		}
-
 		if (isGather)
-			AddDailyProgress(looter, "profession_gather", 1);
+			AddDailyProgress(looter, "profession_gather", 1); 
 	}
 
 	void OnSendMail(Player* sender, ObjectGuid /*receiverGuid*/, uint32 receiverAccountId, uint32 /*money*/, uint32 /*cod*/, std::vector<Item*> const& /*items*/) override
@@ -976,3 +950,12 @@ void AddSC_weekly_delivery_vendor()
 	new weekly_reset_script();
 
 }
+
+/*
+SELECT guid, account, name, level, logout_time,
+       FROM_UNIXTIME(logout_time) AS last_logout
+FROM characters.characters
+WHERE logout_time > 0
+  AND logout_time < UNIX_TIMESTAMP(DATE_SUB(NOW(), INTERVAL 6 MONTH))
+ORDER BY logout_time ASC;
+*/

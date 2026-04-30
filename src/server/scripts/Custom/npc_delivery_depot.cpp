@@ -279,6 +279,56 @@ namespace
         E(ss.str());
     }
 
+	// ─────────────────────────────────────────────
+	// 길드 테크니크 확인
+	// r1a = 납품 PT +20%
+	// ─────────────────────────────────────────────
+	static bool HasGuildTechCompleted(Player* player, std::string const& nodeId)
+	{
+		if (!player)
+			return false;
+
+		uint32 accountId = AccountId(player);
+		uint32 charGuid = static_cast<uint32>(player->GetGUID().GetCounter());
+
+		if (accountId == 0 || charGuid == 0)
+			return false;
+
+		std::ostringstream ss;
+		ss << "SELECT 1 "
+			  "FROM characters.characters c "
+			  "INNER JOIN characters.guild_member gm ON gm.guid = c.guid "
+			  "INNER JOIN appdata.guild_tech_progress gp ON gp.guild_id = gm.guildid "
+			  "WHERE c.guid = " << charGuid << " "
+			  "AND c.account = " << accountId << " "
+			  "AND gp.node_id = '" << nodeId << "' "
+			  "AND gp.completed = 1 "
+			  "LIMIT 1";
+
+		QueryResult r = Q(ss.str());
+		return static_cast<bool>(r);
+	}
+
+	static uint32 ApplyGuildDeliveryTechBonus(Player* player, uint32 points, uint32& bonusPoints)
+	{
+		bonusPoints = 0;
+
+		if (points == 0)
+			return points;
+
+		if (!HasGuildTechCompleted(player, "r1a"))
+			return points;
+
+		uint64 bonus = (static_cast<uint64>(points) * 20ull) / 100ull;
+		uint64 total = static_cast<uint64>(points) + bonus;
+
+		if (total > 0xFFFFFFFFull)
+			total = 0xFFFFFFFFull;
+
+		bonusPoints = static_cast<uint32>(bonus);
+		return static_cast<uint32>(total);
+	}
+
     // ─────────────────────────────────────────────
     // 보정 계산
     // ─────────────────────────────────────────────
@@ -614,12 +664,20 @@ namespace
 
             uint32 finalPts = ApplyAll(base, classMult, qualityMult, personalMult, factionMult, serverMult, repeatMult);
 
+			uint32 guildBonusPts = 0;
+			uint32 displayPts = ApplyGuildDeliveryTechBonus(player, finalPts, guildBonusPts);
+
             uint8 slotIndex = slot - BACKPACK_SLOT_START;
 
             std::ostringstream line;
             line << proto->Name1
-                 << " x" << qty
-                 << " (기본 " << base << " -> +" << finalPts << "pt)";
+				 << " x" << qty
+				 << " (기본 " << base << " -> +" << displayPts << "pt";
+
+			if (guildBonusPts > 0)
+				line << " / 길드 +" << guildBonusPts << "pt";
+
+			line << ")";
 
             AddGossipItemFor(player, GOSSIP_ICON_VENDOR, line.str(), GOSSIP_SENDER_MAIN, ACT_CONFIRM_BASE + slotIndex);
             any = true;
@@ -667,6 +725,9 @@ namespace
 
         uint32 finalPts = ApplyAll(base, classMult, qualityMult, personalMult, factionMult, serverMult, repeatMult);
 
+		uint32 guildBonusPts = 0;
+		uint32 displayPts = ApplyGuildDeliveryTechBonus(player, finalPts, guildBonusPts);
+
         ClearGossipMenuFor(player);
 
         {
@@ -678,7 +739,10 @@ namespace
                << "기본 " << base << "\n"
                << "종류 x" << classMult << ", 품질 x" << qualityMult << "\n"
                << "개인 x" << personalMult << ", 진영 x" << factionMult << ", 서버 x" << serverMult << ", 반복 x" << repeatMult << "\n"
-               << "예상 적립: " << finalPts << "pt";
+               << "예상 적립: " << displayPts << "pt";
+
+				if (guildBonusPts > 0)
+					ss << "\n길드 테크니크 적용: 기여의 확장 +" << guildBonusPts << "pt";
             AddGossipItemFor(player, GOSSIP_ICON_CHAT, ss.str(), GOSSIP_SENDER_MAIN, ACT_CONFIRM_BASE + slotIndex);
         }
 
@@ -727,7 +791,10 @@ namespace
         float repeatMult   = CalcRepeatMult(weekId, accountId, proto->ItemId);
 
         uint32 base = CalcBasePoints(proto, qty);
-        uint32 finalPts = ApplyAll(base, classMult, qualityMult, personalMult, factionMult, serverMult, repeatMult);
+		uint32 finalPts = ApplyAll(base, classMult, qualityMult, personalMult, factionMult, serverMult, repeatMult);
+
+		uint32 guildBonusPts = 0;
+		finalPts = ApplyGuildDeliveryTechBonus(player, finalPts, guildBonusPts);
 
         if (finalPts == 0)
         {
@@ -773,8 +840,12 @@ namespace
         AddWeeklyServerPoints(weekId, finalPts);
 
         std::ostringstream ss;
-        ss << "납품 완료: " << finalPts << "pt 적립 (" << proto->Name1 << " x" << qty << ")";
-        ChatHandler(player->GetSession()).PSendSysMessage("%s", ss.str().c_str());
+		ss << "납품 완료: " << finalPts << "pt 적립 (" << proto->Name1 << " x" << qty << ")";
+
+		if (guildBonusPts > 0)
+			ss << " / 길드 테크니크 기여의 확장 +" << guildBonusPts << "pt 적용";
+
+		ChatHandler(player->GetSession()).PSendSysMessage("%s", ss.str().c_str());
 
         ShowList(player, me);
     }

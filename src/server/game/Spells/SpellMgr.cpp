@@ -717,15 +717,21 @@ bool SpellArea::IsFitToRequirements(Player const* player, uint32 newZone, uint32
             break;
         }
         case 58730: // No fly Zone - Wintergrasp
-        {
-            if (!player)
-                return false;
+		{
+			if (!player)
+				return false;
 
-            Battlefield* Bf = sBattlefieldMgr->GetBattlefieldToZoneId(player->GetZoneId());
-            if (!Bf || Bf->CanFlyIn() || (!player->HasAuraType(SPELL_AURA_MOD_INCREASE_MOUNTED_FLIGHT_SPEED) && !player->HasAuraType(SPELL_AURA_FLY)))
-                return false;
-            break;
-        }
+			// 겨울손아귀 전투 중 죽은 상태/영혼 상태는 날탈 이동이 가능해야 한다.
+			// 이 상태에서 비행금지 오라가 적용되면 "탈 수 없습니다" 경고가 반복 출력된다.
+			if (!player->IsAlive())
+				return false;
+
+			Battlefield* Bf = sBattlefieldMgr->GetBattlefieldToZoneId(player->GetZoneId());
+			if (!Bf || Bf->CanFlyIn() || (!player->HasAuraType(SPELL_AURA_MOD_INCREASE_MOUNTED_FLIGHT_SPEED) && !player->HasAuraType(SPELL_AURA_FLY)))
+				return false;
+
+			break;
+		}
         case 56618: // Horde Controls Factory Phase Shift
         case 56617: // Alliance Controls Factory Phase Shift
         {
@@ -4941,6 +4947,27 @@ void SpellMgr::LoadSpellInfoCorrections()
         spellInfo->_GetEffect(EFFECT_1).ApplyAuraName   = SPELL_AURA_PERIODIC_TRIGGER_SPELL;
         spellInfo->_GetEffect(EFFECT_1).ApplyAuraPeriod = 10 * IN_MILLISECONDS;
         spellInfo->_GetEffect(EFFECT_1).TriggerSpell    = 24870;
+    });
+
+	//린의 힘 헬스크립의 노래 커스텀
+	 ApplySpellFix({ 73822, 73828 }, [](SpellInfo* spellInfo)
+    {
+        spellInfo->RequiredAreasID = 0;
+		spellInfo->DurationEntry = sSpellDurationStore.LookupEntry(527);
+		
+		spellInfo->Attributes    = 0x2C800100; // 5열
+		spellInfo->AttributesEx  = 0x88;       // 6열
+		spellInfo->AttributesEx2 = 0x0;        // 7열
+		spellInfo->AttributesEx3 = 0x100000;   // 8열
+		spellInfo->AttributesEx4 = 0x0;        // 9열
+		spellInfo->AttributesEx5 = 0x0;        // 10열
+		spellInfo->AttributesEx6 = 0x0;        // 11열
+    });
+
+	// Shadow Trap (searcher)
+    ApplySpellFix({ 51422 }, [](SpellInfo* spellInfo)
+    {
+        spellInfo->_GetEffect(EFFECT_0).RadiusEntry = sSpellRadiusStore.LookupEntry(45); // 10yd
     });
 
     for (uint32 i = 0; i < GetSpellInfoStoreSize(); ++i)

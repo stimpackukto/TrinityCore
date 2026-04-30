@@ -173,8 +173,118 @@ public:
     }
 };
 
+
+#include "ScriptMgr.h"
+#include "Creature.h"
+#include "CreatureAI.h"
+#include "MotionMaster.h"
+
+namespace
+{
+    static constexpr uint32 POINT_RANDOM_MOVE = 1001;
+
+    struct MovePos
+    {
+        uint32 mapId;
+        float x;
+        float y;
+        float z;
+        float o;
+    };
+
+    static constexpr MovePos RANDOM_POSITIONS[2] =
+    {
+        { 571, 994.286f, -5312.0f, 175.574f, 1.18682f },
+        { 571, 925.647f, -5299.53f, 175.687f, 1.90241f }
+    };
+}
+
+class npc_dragonflayer_defender_reactive : public CreatureScript
+{
+public:
+    npc_dragonflayer_defender_reactive() : CreatureScript("npc_dragonflayer_defender_reactive") { }
+
+    struct npc_dragonflayer_defender_reactiveAI : public ScriptedAI
+    {
+        npc_dragonflayer_defender_reactiveAI(Creature* creature) : ScriptedAI(creature) { }
+
+        bool _moveScheduled = false;
+        bool _moveStarted   = false;
+
+        float _targetX = 0.0f;
+        float _targetY = 0.0f;
+        float _targetZ = 0.0f;
+        float _targetO = 0.0f;
+
+        void Reset() override
+        {
+            _moveScheduled = false;
+            _moveStarted   = false;
+
+            uint32 index = urand(0, 1);
+            MovePos const& pos = RANDOM_POSITIONS[index];
+
+            if (me->GetMapId() != pos.mapId)
+                return;
+
+            _targetX = pos.x;
+            _targetY = pos.y;
+            _targetZ = pos.z;
+            _targetO = pos.o;
+
+            _moveScheduled = true;
+        }
+
+        void UpdateAI(uint32 /*diff*/) override
+        {
+            if (_moveScheduled && !_moveStarted)
+            {
+                _moveStarted = true;
+
+                me->SetWalk(false);
+                me->ClearUnitState(UNIT_STATE_ROOT);
+
+                me->GetMotionMaster()->Clear();
+                me->GetMotionMaster()->MovePoint(
+                    POINT_RANDOM_MOVE,
+                    _targetX,
+                    _targetY,
+                    _targetZ
+                );
+
+                return;
+            }
+
+            if (!UpdateVictim())
+                return;
+
+            DoMeleeAttackIfReady();
+        }
+
+        void MovementInform(uint32 type, uint32 id) override
+        {
+            if (type != POINT_MOTION_TYPE)
+                return;
+
+            if (id != POINT_RANDOM_MOVE)
+                return;
+
+            me->SetFacingTo(_targetO);
+        }
+    };
+
+    CreatureAI* GetAI(Creature* creature) const override
+    {
+        return new npc_dragonflayer_defender_reactiveAI(creature);
+    }
+};
+
+
 void AddSC_custom_quest_scripts()
 {
 	//최후의 방어
 	new npc_frostbrood_destroyer();
+
+	//섬멸
+	new npc_dragonflayer_defender_reactive();
 }

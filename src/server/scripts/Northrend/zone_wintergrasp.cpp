@@ -321,10 +321,22 @@ struct go_wg_vehicle_teleporter : public GameObjectAI
     go_wg_vehicle_teleporter(GameObject* gameObject) : GameObjectAI(gameObject), _checkTimer(0) { }
 
     bool IsFriendly(Unit* passenger)
-    {
-        return ((me->GetFaction() == FACTION_HORDE_GENERIC_WG && passenger->GetFaction() == HORDE) ||
-                (me->GetFaction() == FACTION_ALLIANCE_GENERIC_WG && passenger->GetFaction() == ALLIANCE));
-    }
+	{
+		if (!passenger)
+			return false;
+
+		Player* player = passenger->ToPlayer();
+		if (!player)
+			return false;
+
+		if (me->GetFaction() == FACTION_HORDE_GENERIC_WG)
+			return player->GetTeamId() == TEAM_HORDE;
+
+		if (me->GetFaction() == FACTION_ALLIANCE_GENERIC_WG)
+			return player->GetTeamId() == TEAM_ALLIANCE;
+
+		return false;
+	}
 
     Creature* GetValidVehicle(Creature* cVeh)
     {

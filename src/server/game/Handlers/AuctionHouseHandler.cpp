@@ -35,6 +35,10 @@
 #include "World.h"
 #include "WorldPacket.h"
 
+#include "CustomRP.h"
+#include "Chat.h"
+#include "Config.h"
+
 //void called when player click on auctioneer npc
 void WorldSession::HandleAuctionHelloOpcode(WorldPacket& recvData)
 {
@@ -52,7 +56,11 @@ void WorldSession::HandleAuctionHelloOpcode(WorldPacket& recvData)
     if (GetPlayer()->HasUnitState(UNIT_STATE_DIED))
         GetPlayer()->RemoveAurasByType(SPELL_AURA_FEIGN_DEATH);
 
-    SendAuctionHello(guid, unit);
+	uint32 accountId = GetPlayer()->GetSession()->GetAccountId();
+	uint32 rp = GetRP(accountId);
+	ChatHandler(_player->GetSession()).PSendSysMessage("경매장에 사용되는 화폐는 1코페 => 1RP 를 의미 합니다.\n1골드 1실버 는 10100RP입니다.\n무기 장비는 보증금이 5000RP 고정 입니다.\n\n현재 RP: %lld ", rp);
+
+	SendAuctionHello(guid, unit);
 }
 
 //this void causes that auction window is opened
@@ -212,6 +220,10 @@ void WorldSession::HandleAuctionSellItem(WorldPacket& recvData)
             return;
     }
 
+	uint32 realmId = sConfigMgr->GetIntDefault("RealmID", 1);
+    if (realmId != 1)
+		etime = 60;
+
     if (GetPlayer()->HasUnitState(UNIT_STATE_DIED))
         GetPlayer()->RemoveAurasByType(SPELL_AURA_FEIGN_DEATH);
 
@@ -280,12 +292,15 @@ void WorldSession::HandleAuctionSellItem(WorldPacket& recvData)
     uint32 auctionTime = uint32(etime * sWorld->getRate(RATE_AUCTION_TIME));
     AuctionHouseObject* auctionHouse = sAuctionMgr->GetAuctionsMap(creature->GetFaction());
 
+	//골드 -> RP
     uint32 deposit = sAuctionMgr->GetAuctionDeposit(auctionHouseEntry, etime, item, finalCount);
-    if (!_player->HasEnoughMoney(deposit))
-    {
-        SendAuctionCommandResult(nullptr, AUCTION_SELL_ITEM, ERR_AUCTION_NOT_ENOUGHT_MONEY);
-        return;
-    }
+	uint32 accountId = GetAccountId();
+
+	if (!HasEnoughRP(accountId, deposit))
+	{
+		SendAuctionCommandResult(nullptr, AUCTION_SELL_ITEM, ERR_AUCTION_NOT_ENOUGHT_MONEY);
+		return;
+	}
 
     AuctionEntry* AH = new AuctionEntry();
 
@@ -359,7 +374,13 @@ void WorldSession::HandleAuctionSellItem(WorldPacket& recvData)
         item->SaveToDB(trans);
 
         AH->SaveToDB(trans);
-        _player->SaveInventoryAndGoldToDB(trans);
+
+		uint32 accountId = GetAccountId();
+
+		uint32 endTime = AH->expire_time;
+	    LogAuctionHistory(accountId, _player->GetGUID().GetCounter(), AH->itemGUIDLow, AH->itemEntry, bid, buyout, deposit, "SELL", false,endTime,0);
+
+		_player->SaveInventoryAndGoldToDB(trans);
         CharacterDatabase.CommitTransaction(trans);
 
         SendAuctionCommandResult(AH, AUCTION_SELL_ITEM, ERR_AUCTION_OK);
@@ -442,12 +463,21 @@ void WorldSession::HandleAuctionSellItem(WorldPacket& recvData)
         CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
         newItem->SaveToDB(trans);
         AH->SaveToDB(trans);
+
+		uint32 accountId = GetAccountId();
+
+		uint32 endTime = AH->expire_time;
+		LogAuctionHistory(accountId, _player->GetGUID().GetCounter(), AH->itemGUIDLow, AH->itemEntry, bid, buyout, deposit, "SELL", false,endTime,0);
+
         _player->SaveInventoryAndGoldToDB(trans);
         CharacterDatabase.CommitTransaction(trans);
 
         SendAuctionCommandResult(AH, AUCTION_SELL_ITEM, ERR_AUCTION_OK);
 
         GetPlayer()->UpdateAchievementCriteria(ACHIEVEMENT_CRITERIA_TYPE_CREATE_AUCTION, 1);
+
+		uint32 rp = GetRP(accountId) - deposit;
+		ChatHandler(_player->GetSession()).PSendSysMessage("아이템등록후 현재 RP: %lld ", rp);
     }
 }
 
@@ -461,6 +491,7 @@ void WorldSession::HandleAuctionPlaceBid(WorldPacket& recvData)
     uint32 price;
     recvData >> auctioneer;
     recvData >> auctionId >> price;
+	uint32 accountId = GetAccountId();
 
     if (!auctionId || !price)
         return;                                             // check for cheaters
@@ -497,7 +528,7 @@ void WorldSession::HandleAuctionPlaceBid(WorldPacket& recvData)
         SendAuctionCommandResult(auction, AUCTION_PLACE_BID, ERR_AUCTION_BID_OWN);
         return;
     }
-
+	
     // cheating
     if (price <= auction->bid || price < auction->startbid)
         return;
@@ -511,12 +542,13 @@ void WorldSession::HandleAuctionPlaceBid(WorldPacket& recvData)
         return;
     }
 
-    if (!player->HasEnoughMoney(price))
-    {
-        // client already test it but just in case ...
-        SendAuctionCommandResult(auction, AUCTION_PLACE_BID, ERR_AUCTION_NOT_ENOUGHT_MONEY);
-        return;
-    }
+	if (!HasEnoughRP(accountId, price))
+	{
+		SendAuctionCommandResult(auction, AUCTION_PLACE_BID, ERR_AUCTION_NOT_ENOUGHT_MONEY);
+		return;
+	}
+
+	SubtractRP(accountId, price);
 
     CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
 
@@ -524,20 +556,22 @@ void WorldSession::HandleAuctionPlaceBid(WorldPacket& recvData)
     {
         if (auction->bidder)
         {
-            if (auction->bidder == player->GetGUID().GetCounter())
-                player->ModifyMoney(-int32(price - auction->bid));
-            else
+            if (auction->bidder != player->GetGUID().GetCounter())
             {
+				uint32 oldAccountId = sCharacterCache->GetCharacterAccountIdByGuid(ObjectGuid::Create<HighGuid::Player>(auction->bidder));
+				UpdateAuctionHistory(oldAccountId, auction->itemGUIDLow, "OUTBID", true);
+
                 // mail to last bidder and return money
                 sAuctionMgr->SendAuctionOutbiddedMail(auction, price, GetPlayer(), trans);
-                player->ModifyMoney(-int32(price));
             }
         }
-        else
-            player->ModifyMoney(-int32(price));
 
         auction->bidder = player->GetGUID().GetCounter();
         auction->bid = price;
+
+		uint32 endTime = 0;
+		LogAuctionHistory(accountId, player->GetGUID().GetCounter(), auction->itemGUIDLow, auction->itemEntry, price,  0, 0,  "BID", false,endTime, 0);
+
         if (HasPermission(rbac::RBAC_PERM_LOG_GM_TRADE))
             auction->Flags = AuctionEntryFlag(auction->Flags | AUCTION_ENTRY_FLAG_GM_LOG_BUYER);
         else
@@ -563,20 +597,30 @@ void WorldSession::HandleAuctionPlaceBid(WorldPacket& recvData)
         }
 
         SendAuctionCommandResult(auction, AUCTION_PLACE_BID, ERR_AUCTION_OK);
+
+		uint32 accountId = GetPlayer()->GetSession()->GetAccountId();
+		uint32 rp = GetRP(accountId) - price;
+		ChatHandler(GetPlayer()->GetSession()).PSendSysMessage("입찰 RP: %lld 입찰후 현재 RP: %lld", auction->bid, rp);
     }
     else
     {
         //buyout:
-        if (player->GetGUID().GetCounter() == auction->bidder)
-            player->ModifyMoney(-int32(auction->buyout - auction->bid));
-        else
+        if (player->GetGUID().GetCounter() != auction->bidder)
         {
-            player->ModifyMoney(-int32(auction->buyout));
-            if (auction->bidder)                          //buyout for bidded auction ..
+            if (auction->bidder)  
+			{
+				uint32 oldAccountId = sCharacterCache->GetCharacterAccountIdByGuid(ObjectGuid::Create<HighGuid::Player>(auction->bidder));
+				UpdateAuctionHistory(oldAccountId, auction->itemGUIDLow, "OUTBID", true);
+
+				//buyout for bidded auction ..
                 sAuctionMgr->SendAuctionOutbiddedMail(auction, auction->buyout, GetPlayer(), trans);
+			}
         }
         auction->bidder = player->GetGUID().GetCounter();
         auction->bid = auction->buyout;
+
+		LogAuctionHistory(accountId,  auction->bidder, auction->itemGUIDLow, auction->itemEntry, auction->buyout, auction->buyout, 0, "BID", false,0,0);
+
         if (HasPermission(rbac::RBAC_PERM_LOG_GM_TRADE))
             auction->Flags = AuctionEntryFlag(auction->Flags | AUCTION_ENTRY_FLAG_GM_LOG_BUYER);
         else
@@ -589,7 +633,15 @@ void WorldSession::HandleAuctionPlaceBid(WorldPacket& recvData)
         sAuctionMgr->SendAuctionSuccessfulMail(auction, trans);
         sAuctionMgr->SendAuctionWonMail(auction, trans);
 
+		ObjectGuid ownerGuid = ObjectGuid::Create<HighGuid::Player>(auction->owner);
+		uint32 ownerAccId = sCharacterCache->GetCharacterAccountIdByGuid(ownerGuid);
+		UpdateAuctionHistory(ownerAccId, auction->itemGUIDLow, "BUYOUT", true);
+
         SendAuctionCommandResult(auction, AUCTION_PLACE_BID, ERR_AUCTION_OK);
+
+		uint32 accountId = GetPlayer()->GetSession()->GetAccountId();
+		uint32 rp = GetRP(accountId) - price;
+		ChatHandler(GetPlayer()->GetSession()).PSendSysMessage("즉시구매후 현재 RP: %lld", rp);
 
         auction->DeleteFromDB(trans);
 
@@ -632,13 +684,11 @@ void WorldSession::HandleAuctionRemoveItem(WorldPacket& recvData)
         Item* pItem = sAuctionMgr->GetAItem(auction->itemGUIDLow);
         if (pItem)
         {
+			pItem->SetBinding(false);
             if (auction->bidder)                            // If we have a bidder, we have to send him the money he paid
             {
                 uint32 auctionCut = auction->GetAuctionCut();
-                if (!player->HasEnoughMoney(auctionCut))          //player doesn't have enough money, maybe message needed
-                    return;
                 sAuctionMgr->SendAuctionCancelledToBidderMail(auction, trans, pItem);
-                player->ModifyMoney(-int32(auctionCut));
             }
 
             // item will deleted or added to received mail list
@@ -669,6 +719,9 @@ void WorldSession::HandleAuctionRemoveItem(WorldPacket& recvData)
     player->SaveInventoryAndGoldToDB(trans);
     auction->DeleteFromDB(trans);
     CharacterDatabase.CommitTransaction(trans);
+
+	uint32 accountId = player->GetSession()->GetAccountId();
+	UpdateAuctionHistory(accountId, auction->itemGUIDLow, "CANCEL", true);
 
     sAuctionMgr->RemoveAItem(auction->itemGUIDLow);
     auctionHouse->RemoveAuction(auction);

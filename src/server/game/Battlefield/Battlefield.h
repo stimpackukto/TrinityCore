@@ -179,13 +179,13 @@ class TC_GAME_API BfGraveyard
         void SetSpirit(Creature* spirit, TeamId team);
 
         // Add a player to the graveyard
-        void AddPlayer(ObjectGuid player_guid);
+		virtual void AddPlayer(ObjectGuid player_guid);
 
-        // Remove a player from the graveyard
-        void RemovePlayer(ObjectGuid player_guid);
+		// Remove a player from the graveyard
+		virtual void RemovePlayer(ObjectGuid player_guid);
 
-        // Resurrect players
-        void Resurrect();
+		// Resurrect players
+		virtual void Resurrect();
 
         // Move players waiting to that graveyard on the nearest one
         void RelocateDeadPlayers();

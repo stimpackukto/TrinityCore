@@ -28,6 +28,10 @@
 #include "Log.h"
 #include "Random.h"
 #include "StringFormat.h"
+#include "ScriptMgr.h"
+#include "Player.h"
+#include "Channel.h"
+#include "ChannelMgr.h"
 
 #include <unordered_map>
 #include <unordered_set>
@@ -205,7 +209,7 @@ static void KickToFailSpot(Player* p, uint32 fromMap, std::string const& msg)
         p->TeleportTo(kFailMapId, kFailX, kFailY, kFailZ, kFailO);
 }
 
-static constexpr uint32 ALLIANCE_GUILD_ID = 1;
+static constexpr uint32 ALLIANCE_GUILD_ID = 4;
 static constexpr uint32 HORDE_GUILD_ID    = 2;
 
 static uint32 GetTargetGuildId(Player* player)
@@ -213,6 +217,8 @@ static uint32 GetTargetGuildId(Player* player)
     return (player->GetTeamId() == TEAM_ALLIANCE) ? ALLIANCE_GUILD_ID : HORDE_GUILD_ID;
 }
 
+
+//길드 초대
 static void SendGuildInvitePopup(Player* player, uint32 guildId, char const* notice)
     {
         if (!player || !player->GetSession())
@@ -242,6 +248,28 @@ static void SendGuildInvitePopup(Player* player, uint32 guildId, char const* not
 			ChatHandler(player->GetSession()).PSendSysMessage("%s", msg.c_str());
 		}
     }
+
+//채널 초대
+static void SendChannelInvitePopup(Player* player, char const* notice)
+{
+    if (!player || !player->GetSession())
+        return;
+
+    static std::string const channelName = "빛의수호자";
+
+    WorldPacket data(SMSG_CHANNEL_NOTIFY, 50 + channelName.size() + player->GetName().size());
+
+    // 현재 코어에 있는 초대 notice 상수로 교체
+    // 예: CHAT_INVITE_NOTICE 또는 CHAT_PLAYER_INVITED_NOTICE
+    data << uint8(CHAT_INVITE_NOTICE);
+    data << channelName;
+    data << player->GetName();
+
+    player->GetSession()->SendPacket(&data);
+
+    if (notice && *notice)
+        ChatHandler(player->GetSession()).SendSysMessage(notice);
+}
 
 /* =========================
  * 계정별 XP 모드 캐시
@@ -310,7 +338,7 @@ public:
 
 			CharacterDatabase.DirectExecute(q.c_str());
 
-			if (player->GetGuildId() == 0)
+/*			if (player->GetGuildId() == 0)
 			{
 				uint32 gid = GetTargetGuildId(player);
 				SendGuildInvitePopup(
@@ -318,9 +346,24 @@ public:
 					gid,
 					"첫 접속 자동길드초대입니다. 다음접속부터 자동초대 되지 않습니다."
 				);
-			}
+			}*/
 		}
 
+		if (!player->IsGameMaster())
+			if (player->GetGuildId() == 0)
+				{
+					uint32 gid = GetTargetGuildId(player);
+					SendGuildInvitePopup(
+						player,
+						gid,
+						" 자동길드초대입니다."
+					);
+				}
+
+		SendChannelInvitePopup(
+    player,
+    "빛의수호자 채널 초대 팝업을 보냈습니다."
+);
 		/* ============================================
 		 * 2) TaxiCheater DB 플래그 적용 (기존 로직 유지)
 		 * ============================================ */
@@ -763,7 +806,7 @@ static constexpr uint32 MIN_INCREMENT_RP         = 100;    // 최소 인상 RP
 static constexpr uint32 EXTEND_THRESHOLD_SEC     = 300;    // 종료 5분 이내
 static constexpr uint32 EXTEND_ADD_SEC           = 600;    // 10분 연장
 static constexpr uint8  EXTEND_MAX_COUNT         = 3;
-static constexpr uint32 AUCTION_VISIBLE          = 6;
+static constexpr uint32 AUCTION_VISIBLE          = 12;
 static constexpr uint32 SPAWN_DURATION_SEC       = 5400;
 static constexpr uint32 BLACKMARKET_NPC_ENTRY    = 5000064;
 static constexpr uint32 BM_BID_FEE_GOLD          = 100;    // 입찰 수수료(고정 100골드)
@@ -1396,11 +1439,12 @@ public:
     {
         BM_MODE_TEST    = 0, // 서버 기동 후 120초 뒤 테스트 스폰 (계속 반복)
         BM_MODE_MONTHLY = 1, // 한 달에 한 번 랜덤 스폰
-        BM_MODE_WEEKLY  = 2  // 일주일에 한 번 랜덤 스폰
+        BM_MODE_WEEKLY  = 2,  // 일주일에 한 번 랜덤 스폰
+		BM_MODE_MIXED   = 3   // 🔥 추가
     };
 
     // NEW: 여기서 모드 선택
-    static constexpr BMSpawnMode BM_MODE = BM_MODE_WEEKLY;
+    static constexpr BMSpawnMode BM_MODE = BM_MODE_MIXED;
 
     static constexpr uint32 BM_TEST_DELAY_SEC = 120;
 
@@ -1493,6 +1537,43 @@ public:
 		return static_cast<uint32>(ts);
 	}
 
+	static uint32 GenerateMixedSpawnTime()
+	{
+		time_t now = GameTime::GetGameTime();
+		tm lt = *localtime(&now);
+
+		// 이번 주 월요일 00:00 기준
+		int daysSinceMonday = (lt.tm_wday == 0) ? 6 : (lt.tm_wday - 1);
+		lt.tm_mday -= daysSinceMonday;
+		lt.tm_hour = 0;
+		lt.tm_min  = 0;
+		lt.tm_sec  = 0;
+
+		time_t thisMonday = mktime(&lt);
+
+		// 다음 주 월요일
+		time_t nextMonday = thisMonday + 7 * 24 * 60 * 60;
+
+		// 🔥 일~금 (0=일 ~ 5=금)
+		int addDays = urand(0, 5);
+
+		time_t baseDay = nextMonday + addDays * 24 * 60 * 60;
+
+		tm when = *localtime(&baseDay);
+
+		// 🔥 18~22시 랜덤
+		when.tm_hour = urand(18, 22);
+		when.tm_min  = urand(0, 59);
+		when.tm_sec  = 0;
+
+		time_t ts = mktime(&when);
+
+		if (ts <= now)
+			ts += 7 * 24 * 60 * 60;
+
+		return static_cast<uint32>(ts);
+	}
+
     // NEW: 공통 스케줄 생성/저장 함수
     void ScheduleNextSpawn(time_t now)
     {
@@ -1513,6 +1594,11 @@ public:
             nextTs = GenerateWeeklySpawnTime();
             TC_LOG_INFO("custom", "[BM] 다음 주간 스폰 스케줄 생성: next_spawn_time={}", nextTs);
         }
+		else if (BM_MODE == BM_MODE_MIXED)
+		{
+			nextTs = GenerateMixedSpawnTime(); // 평일 랜덤 1회
+			TC_LOG_INFO("custom", "[BM] MIXED 랜덤 스케줄 생성: {}", nextTs);
+		}
         else
         {
             nextTs = GenerateMonthlySpawnTime();
@@ -1534,7 +1620,15 @@ public:
     {
         time_t now = GameTime::GetGameTime();
 
-        // TEST 모드도 이제 "기동 후 첫 스폰"만 정하고,
+		// 🔥 TEST 모드: DB 완전 무시
+		if (BM_MODE == BM_MODE_TEST)
+		{
+			TC_LOG_INFO("custom", "[BM][TEST] DB 스케줄 무시, 테스트 타임 적용");
+
+			ScheduleNextSpawn(now); // 바로 TEST 스케줄 생성
+			return;
+		}
+
         // 그 이후는 SpawnNPC 호출 후 ScheduleNextSpawn(now)로 자동 순환
         QueryResult r = WorldDatabase.Query("SELECT next_spawn_time, status FROM blackmarket_schedule WHERE id=1");
         if (!r)
@@ -1567,13 +1661,41 @@ public:
         if (m_spawnTime == 0)
             return;
 
+		// =========================
+		// 🔥 토요일 21시 고정 (MIXED 전용)
+		// =========================
+		if (BM_MODE == BM_MODE_MIXED)
+		{
+			static uint32 lastSaturdaySpawnDay = 0;
+
+			tm lt = *localtime(&now);
+
+			if (lt.tm_wday == 6 && lt.tm_hour == 21 && lt.tm_min == 0)
+			{
+				uint32 today = lt.tm_yday;
+
+				if (today != lastSaturdaySpawnDay)
+				{
+					TC_LOG_INFO("custom", "[BM] MIXED 토요일 고정 경매 시작");
+
+					SpawnNPC();
+
+					lastSaturdaySpawnDay = today;
+				}
+			}
+		}
+
         // 1시간 전 경고
-        if (!m_warningSent && now >= (m_spawnTime - 3600))
-        {
-            (void)std::system("php /home/esotar/fcm/send_fcm_BM.php 'alert' '암거상 노사장이 1시간뒤 방문예정입니다.' > /dev/null 2>&1 &");
-			SendServerDiscordEvent("🧿 암거상 등장", "암거상 노사장이 1시간뒤 방문예정입니다.","https://stimpack.pe.kr",16753920,"home");
-            m_warningSent = true;
-        }
+		uint32 realmId = sConfigMgr->GetIntDefault("RealmID", 0);
+		if (realmId == 1)
+		{
+			if (!m_warningSent && now >= (m_spawnTime - 3600))
+			{
+				(void)std::system("php /home/esotar/fcm/send_fcm_BM.php 'alert' '암거상 노사장이 1시간뒤 경매를 시작할 예정입니다.' > /dev/null 2>&1 &");
+				SendServerDiscordEvent("🧿 암거상 등장", "암거상 노사장이 1시간뒤 경매를 시작할 예정입니다","https://stimpack.pe.kr/auth/register", 16759040, "event");
+				m_warningSent = true;
+			} 
+		}
 
         // 스폰 시도
         if (!m_spawned && now >= m_spawnTime)
@@ -1595,14 +1717,18 @@ private:
     {
         sWorld->SendServerMessage(
             SERVER_MSG_STRING,
-            "|cffFF0000[암시장 알림]|r 암시장 상인이 왔습니다. 1시간동안 거래가 가능합니다.",
+            "|cffFF0000[암시장 알림]|r 암시장 상인이 경매를 시작했습니다. 1시간동안 거래가 가능합니다.",
             0);
 
         if (npc)
             npc->DespawnOrUnsummon(Seconds(SPAWN_DURATION_SEC));
 
-        (void)std::system("php /home/esotar/fcm/send_fcm_BM.php 'alert' '암거상 노사장이 방문했습니다.'  > /dev/null 2>&1 &");
-		SendServerDiscordEvent("🧿 암거상 등장", "암거상 노사장이 방문했습니다.","https://stimpack.pe.kr",16753920,"home");
+		uint32 realmId = sConfigMgr->GetIntDefault("RealmID", 0);
+		if (realmId == 1)
+		{
+			(void)std::system("php /home/esotar/fcm/send_fcm_BM.php 'alert' '암거상 노사장이 경매를 시작했습니다.'  > /dev/null 2>&1 &");
+			SendServerDiscordEvent("🧿 암거상 등장", "암거상 노사장이 경매를 시작했습니다.","https://stimpack.pe.kr/auth/register", 16759040, "event");
+		}
     }
 
     void BroadcastSpawnGold(Creature* npc)
@@ -1613,7 +1739,7 @@ private:
 
     void SpawnNPC()
     {
-        static const std::array<std::pair<uint32, Position>, 1> kSpawns = {{
+    /*    static const std::array<std::pair<uint32, Position>, 1> kSpawns = {{
             {1, Position{-7191.6f, -3938.15f, 8.96297f, 3.50838f}},
         }};
 
@@ -1661,53 +1787,94 @@ private:
                     npc->GetGUID().GetCounter(), mapId, npc->isActiveObject());
 
         s_BlackMarketNpcGuid  = npc->GetGUID();
-        s_BlackMarketNpcMapId = mapId;
+        s_BlackMarketNpcMapId = mapId;  */
+
+		QueryResult activeCheck = WorldDatabase.PQuery("SELECT 1 FROM blackmarket_auction WHERE auction_status='active' LIMIT 1");
+
+		if (activeCheck)
+		{
+			TC_LOG_INFO("custom", "[BM] 이미 진행 중인 경매 있음 → 생성 스킵");
+			return;
+		}
+
+		WorldDatabase.PExecute("UPDATE blackmarket_auction SET auction_status='completed' WHERE auction_status='active'");
 
         uint32 groupId = static_cast<uint32>(GameTime::GetGameTime());
+
+		// ─────────────────────────
+		// 1️⃣ 카테고리별 아이템 미리 로드
+		// ─────────────────────────
+		std::unordered_map<uint32, std::vector<uint32>> itemCache;
+
+		for (uint32 catId : BM_CATEGORY_IDS)
+		{
+			std::string q = Trinity::StringFormat(
+				"SELECT game_item_id FROM appdata.shop_items WHERE category_id = {}",
+				catId
+			);
+
+			QueryResult r = WorldDatabase.Query(q.c_str());
+			if (!r)
+				continue;
+
+			std::vector<uint32>& items = itemCache[catId];
+
+			do
+			{
+				Field* f = r->Fetch();
+				items.push_back(f[0].GetUInt32());
+			}
+			while (r->NextRow());
+		}
 
         // ─────────────────────────────────────────────
         // 여기부터: AUCTION_VISIBLE 개수 채우기
         // ─────────────────────────────────────────────
-        uint32 created   = 0;
-        uint32 attempts  = 0;
-        const uint32 kMaxAttempts = AUCTION_VISIBLE * 20; // 안전 상한
+        // ─────────────────────────
+		// 2️⃣ 기존 루프
+		// ─────────────────────────
+		uint32 created   = 0;
+		uint32 attempts  = 0;
+		const uint32 kMaxAttempts = AUCTION_VISIBLE * 20;
 
-        while (created < AUCTION_VISIBLE && attempts < kMaxAttempts)
-        {
-            ++attempts;
+		for (uint32 i = 0; i < AUCTION_VISIBLE; )
+		{
+			if (++attempts > kMaxAttempts)
+				break;
 
-            uint32 catId = BM_CATEGORY_IDS[urand(0, BM_CATEGORY_IDS.size() - 1)];
+			uint32 catId = BM_CATEGORY_IDS[urand(0, BM_CATEGORY_IDS.size() - 1)];
 
-            std::string qItem = Trinity::StringFormat(
-                "SELECT s.game_item_id "
-                "FROM appdata.shop_items s "
-                "JOIN world.item_template i ON i.entry = s.game_item_id "
-                "WHERE s.category_id = {} "
-                "ORDER BY RAND() LIMIT 1",
-                catId);
+			auto it = itemCache.find(catId);
+			if (it == itemCache.end() || it->second.empty())
+				continue;
 
-            QueryResult itemR = CharacterDatabase.Query(qItem.c_str());
-            if (!itemR)
-                continue; // 이 카테고리에는 아이템 없음 → 다시 시도
+			std::vector<uint32>& items = it->second;
 
-            uint32 item = itemR->Fetch()[0].GetUInt32();
-            time_t end  = GameTime::GetGameTime() + SPAWN_DURATION_SEC;
+			// 🔥 랜덤 선택 + 즉시 제거 (중복 방지 핵심)
+			uint32 idx = urand(0, items.size() - 1);
+			uint32 item = items[idx];
 
-            uint64 minIncRP = MIN_INCREMENT_RP;
+			items[idx] = items.back();
+			items.pop_back();
 
-            std::string ins = Trinity::StringFormat(
-                "INSERT INTO blackmarket_auction "
-                "(item_id, start_price, current_bid, bidder_guid, end_time, auction_status, group_id, extend_count, min_increment, bid_count) "
-                "VALUES ({}, {}, 0, 0, {}, 'active', {}, 0, {}, 0)",
-                item,
-                static_cast<uint64_t>(MIN_START_RP),
-                static_cast<uint32_t>(end),
-                groupId,
-                static_cast<uint64_t>(minIncRP));
+			time_t end  = GameTime::GetGameTime() + SPAWN_DURATION_SEC;
 
-            WorldDatabase.Execute(ins.c_str());
-            ++created;
-        }
+			uint64 minIncRP = MIN_INCREMENT_RP;
+
+			std::string ins = Trinity::StringFormat(
+				"INSERT INTO blackmarket_auction "
+				"(item_id, start_price, current_bid, bidder_guid, end_time, auction_status, group_id, extend_count, min_increment, bid_count) "
+				"VALUES ({}, {}, 0, 0, {}, 'active', {}, 0, {}, 0)",
+				item,
+				static_cast<uint64_t>(MIN_START_RP),
+				static_cast<uint32_t>(end),
+				groupId,
+				static_cast<uint64_t>(minIncRP));
+
+			WorldDatabase.Execute(ins.c_str());
+			++created;
+			++i;
+		}
 
         if (created < AUCTION_VISIBLE)
         {
@@ -1720,7 +1887,14 @@ private:
                         created, attempts);
         }
 
-        BroadcastSpawn(npc);
+        sWorld->SendServerMessage(SERVER_MSG_STRING, "|cffFF0000[암시장 알림]|r 암시장 상인이 경매를 시작했습니다. 1시간동안 거래가 가능합니다.", 0);
+
+		uint32 realmId = sConfigMgr->GetIntDefault("RealmID", 0);
+		if (realmId == 1)
+		{
+			(void)std::system("php /home/esotar/fcm/send_fcm_BM.php 'alert' '암거상 노사장이 경매를 시작했습니다.'  > /dev/null 2>&1 &");
+			SendServerDiscordEvent("🧿 암거상 등장", "암거상 노사장이 경매를 시작했습니다.","https://stimpack.pe.kr",16753920,"event"); 
+		}
     }
 };
 
@@ -2084,6 +2258,8 @@ public:
 #include "ScriptMgr.h"
 #include "TaskScheduler.h"
 #include "DatabaseEnv.h"
+#include "Player.h"
+#include "Chat.h"
 
 class inactive_character_archive : public WorldScript
 {
@@ -2122,25 +2298,20 @@ public:
         _scheduler.Schedule(Milliseconds(delay), [this](TaskContext)
         {
             ProcessArchive();
-
-            _scheduler.Schedule(24h, [this](TaskContext)
-            {
-                ProcessArchive();
-            });
+            ScheduleNextRun();
         });
     }
 
     void ProcessArchive()
     {
-        uint32 archiveAccount = 4;
-
         QueryResult result = CharacterDatabase.PQuery(
-            "SELECT account,guid,name,logout_time "
-            "FROM characters "
-            "WHERE logout_time < UNIX_TIMESTAMP(DATE_SUB(NOW(), INTERVAL 6 MONTH)) "
-            "AND account != {} "
-            "AND online = 0",
-            archiveAccount
+            "SELECT c.account, c.guid, c.name, c.logout_time "
+            "FROM characters.characters c "
+            "LEFT JOIN appdata.character_archive_log l ON l.guid = c.guid "
+            "WHERE c.logout_time > 0 "
+            "AND c.logout_time <= UNIX_TIMESTAMP(DATE_SUB(NOW(), INTERVAL 6 MONTH)) "
+            "AND c.online = 0 "
+            "AND l.guid IS NULL"
         );
 
         if (!result)
@@ -2151,30 +2322,156 @@ public:
             Field* fields = result->Fetch();
 
             uint32 account = fields[0].GetUInt32();
-            uint32 guid = fields[1].GetUInt32();
+            uint32 guid    = fields[1].GetUInt32();
             std::string name = fields[2].GetString();
-            uint32 logout = fields[3].GetUInt32();
+            uint32 logout  = fields[3].GetUInt32();
+            uint32 now     = uint32(time(nullptr));
 
-            uint32 now = uint32(time(nullptr));
-
-            CharacterDatabase.PExecute(
-                "UPDATE characters SET account = {} WHERE guid = {}",
-                archiveAccount,
+            QueryResult exists = CharacterDatabase.PQuery(
+                "SELECT 1 "
+                "FROM appdata.inactive_character_lock "
+                "WHERE guid = {} "
+                "LIMIT 1",
                 guid
             );
 
+            CharacterDatabase.EscapeString(name);
+
             CharacterDatabase.PExecute(
-                "INSERT INTO appdata.character_archive_log "
-                "(guid,name,account_id,last_logout,archived_at) "
-                "VALUES ({},'{}',{},{},{})",
+                "INSERT INTO appdata.inactive_character_lock "
+                "(guid, account_id, name, last_logout, locked_at, active) "
+                "VALUES ({}, {}, '{}', {}, {}, 1) "
+                "ON DUPLICATE KEY UPDATE "
+                "account_id = VALUES(account_id), "
+                "name = VALUES(name), "
+                "last_logout = VALUES(last_logout), "
+                "locked_at = VALUES(locked_at), "
+                "active = 1",
                 guid,
-                name,
                 account,
+                name,
                 logout,
                 now
             );
 
+            if (!exists)
+            {
+                CharacterDatabase.PExecute(
+                    "INSERT INTO appdata.character_archive_log "
+                    "(guid, name, account_id, last_logout, archived_at) "
+                    "VALUES ({}, '{}', {}, {}, {})",
+                    guid,
+                    name,
+                    account,
+                    logout,
+                    now
+                );
+            }
+
         } while (result->NextRow());
+    }
+};
+
+class inactive_character_lock_player : public PlayerScript
+{
+public:
+    inactive_character_lock_player() : PlayerScript("inactive_character_lock_player") { }
+
+    bool IsLocked(Player* player)
+    {
+        if (!player)
+            return false;
+
+        QueryResult result = CharacterDatabase.PQuery(
+            "SELECT 1 "
+            "FROM appdata.inactive_character_lock "
+            "WHERE guid = {} "
+            "AND active = 1 "
+            "LIMIT 1",
+            player->GetGUID().GetCounter()
+        );
+
+        return result != nullptr;
+    }
+
+    void ApplyLock(Player* player)
+    {
+        if (!player)
+            return;
+
+        if (!player->HasAura(9454))
+            player->CastSpell(player, 9454, true);
+
+        ChatHandler(player->GetSession()).PSendSysMessage("장기 미접속 캐릭터로 분류되어 현재 이용이 제한되었습니다.");
+    }
+
+    void OnLogin(Player* player, bool /*firstLogin*/) override
+    {
+        if (!IsLocked(player))
+            return;
+
+        ApplyLock(player);
+    }
+
+    void OnMapChanged(Player* player) override
+    {
+        if (!IsLocked(player))
+            return;
+
+        ApplyLock(player);
+    }
+
+    void OnUpdateZone(Player* player, uint32 /*newZone*/, uint32 /*newArea*/) override
+    {
+        if (!IsLocked(player))
+            return;
+
+        ApplyLock(player);
+    }
+
+    void OnChat(Player* player, uint32 /*type*/, uint32 /*lang*/, std::string& msg) override
+    {
+        if (!IsLocked(player))
+            return;
+
+        msg.clear();
+        ChatHandler(player->GetSession()).PSendSysMessage("이 캐릭터는 장기 미접속 상태로 채팅이 제한되었습니다.");
+    }
+
+    void OnChat(Player* player, uint32 /*type*/, uint32 /*lang*/, std::string& msg, Player* /*receiver*/) override
+    {
+        if (!IsLocked(player))
+            return;
+
+        msg.clear();
+        ChatHandler(player->GetSession()).PSendSysMessage("이 캐릭터는 장기 미접속 상태로 채팅이 제한되었습니다.");
+    }
+
+    void OnChat(Player* player, uint32 /*type*/, uint32 /*lang*/, std::string& msg, Group* /*group*/) override
+    {
+        if (!IsLocked(player))
+            return;
+
+        msg.clear();
+        ChatHandler(player->GetSession()).PSendSysMessage("이 캐릭터는 장기 미접속 상태로 채팅이 제한되었습니다.");
+    }
+
+    void OnChat(Player* player, uint32 /*type*/, uint32 /*lang*/, std::string& msg, Guild* /*guild*/) override
+    {
+        if (!IsLocked(player))
+            return;
+
+        msg.clear();
+        ChatHandler(player->GetSession()).PSendSysMessage("이 캐릭터는 장기 미접속 상태로 채팅이 제한되었습니다.");
+    }
+
+    void OnChat(Player* player, uint32 /*type*/, uint32 /*lang*/, std::string& msg, Channel* /*channel*/) override
+    {
+        if (!IsLocked(player))
+            return;
+
+        msg.clear();
+        ChatHandler(player->GetSession()).PSendSysMessage("이 캐릭터는 장기 미접속 상태로 채팅이 제한되었습니다.");
     }
 };
 
@@ -2397,7 +2694,38 @@ class go_time_attack_end : public GameObjectScript
 								mapName = mapEntry->MapName[0]; // fallback
 						}
 
-						CharacterDatabase.PExecute("INSERT INTO appdata.dungeon_rank (map_id, map_name, clear_time, account_id, character_guid, start_time) VALUES ({}, '{}', {}, {}, {}, {})", map->GetId(), mapName, diff, accountId, guid, startTime);
+						time_t now = GameTime::GetGameTime();
+						tm t = *localtime(&now);
+
+						// 새벽 4시 이전이면 하루 빼기
+						if (t.tm_hour < 4)
+							now -= 86400;
+
+						t = *localtime(&now);
+
+						// 오늘 04:00으로 고정
+						t.tm_hour = 4;
+						t.tm_min = 0;
+						t.tm_sec = 0;
+
+						uint32 challengeDate = uint32(mktime(&t));
+
+					//	CharacterDatabase.PExecute("INSERT INTO appdata.dungeon_rank (map_id, map_name, clear_time, account_id, character_guid, start_time) VALUES ({}, '{}', {}, {}, {}, {})", map->GetId(), mapName, diff, accountId, guid, startTime);
+						CharacterDatabase.PExecute(
+							"INSERT INTO appdata.dungeon_rank "
+							"(map_id, map_name, clear_time, account_id, character_guid, start_time, challenge_date) "
+							"VALUES ({}, '{}', {}, {}, {}, {}, {}) "
+							"ON DUPLICATE KEY UPDATE "
+							"clear_time = IF(VALUES(clear_time) < clear_time, VALUES(clear_time), clear_time), "
+							"start_time = IF(VALUES(clear_time) < clear_time, VALUES(start_time), start_time)",
+							map->GetId(),
+							mapName,
+							diff,
+							accountId,
+							guid,
+							startTime,
+							challengeDate
+						);
 
 						uint32 min = diff / 60;
 						uint32 sec = diff % 60;
@@ -2726,7 +3054,491 @@ public:
     }
 };
 
+class item_mount_random_box : public ItemScript
+{
+public:
+    item_mount_random_box() : ItemScript("item_mount_random_box") {}
 
+    bool OnUse(Player* player, Item* item, SpellCastTargets const&) override
+    {
+        if (!player || !item)
+            return false;
+
+        uint32 accountId = player->GetSession()->GetAccountId();
+        uint32 charGuid  = player->GetGUID().GetCounter();
+
+        // 🔥 랜덤 아이템 선택
+        QueryResult result = CharacterDatabase.Query(
+            "SELECT game_item_id FROM appdata.shop_items WHERE category_id = 1 ORDER BY RAND() LIMIT 1"
+        );
+
+        if (!result)
+        {
+            ChatHandler(player->GetSession()).SendSysMessage("랜덤박스 아이템이 없습니다.");
+            return true;
+        }
+
+        Field* f = result->Fetch();
+        uint32 itemId = f[0].GetUInt32();
+
+        // 🔥 우편 지급 시작
+        MailDraft draft("랜덤박스 보상", "축하합니다! 랜덤 아이템이 지급되었습니다.");
+        CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
+
+        Item* reward = Item::CreateItem(itemId, 1, nullptr);
+
+        if (!reward)
+        {
+            ChatHandler(player->GetSession()).SendSysMessage("아이템 생성 실패");
+            return true; // ❗ 소비 안함
+        }
+
+        const ItemTemplate* proto = reward->GetTemplate();
+        if (!proto)
+        {
+            ChatHandler(player->GetSession()).SendSysMessage("아이템 템플릿 오류");
+            return true;
+        }
+
+        reward->SaveToDB(trans);
+        draft.AddItem(reward);
+
+        // 🔥 서버 알림
+        std::string msg = Trinity::StringFormat(
+            "|cffFFD700[랜덤박스]|r [{}] 획득!",
+            proto->Name1.c_str()
+        );
+        sWorld->SendServerMessage(SERVER_MSG_STRING, msg.c_str(), 0);
+
+        // 🔥 activity_log
+        std::string logMsg =
+            "🎁 랜덤박스 → " + std::string(proto->Name1) + " 획득";
+
+        CharacterDatabase.EscapeString(logMsg);
+
+        std::string q =
+            "INSERT INTO appdata.activity_log "
+            "(account_id, character_guid, type, message, item_entry) VALUES ("
+            + std::to_string(accountId) + ", "
+            + std::to_string(charGuid) + ", "
+            "'random_box', '"
+            + logMsg + "', "
+            + std::to_string(itemId) +
+            ");";
+
+        CharacterDatabase.DirectExecute(q.c_str());
+
+		draft.SendMailTo(
+            trans,
+            MailReceiver(player),
+            MailSender(MAIL_NORMAL, 0, MAIL_STATIONERY_GM)
+        );
+
+        CharacterDatabase.CommitTransaction(trans);
+
+        // 🔥 성공 시에만 소비
+        player->DestroyItemCount(item->GetEntry(), 1, true);
+
+        ChatHandler(player->GetSession()).SendSysMessage("랜덤박스 보상이 우편으로 지급되었습니다. 우편확인이 않될시 /reload 해보세요");
+
+        return true;
+    }
+};
+
+
+#include "ScriptMgr.h"
+#include "Player.h"
+#include "WorldSession.h"
+
+#include <curl/curl.h>
+#include <openssl/sha.h>
+#include <sstream>
+#include <iomanip>
+
+// 🔥 CURL 응답 저장
+static size_t WriteCallback(void* contents, size_t size, size_t nmemb, std::string* output)
+{
+    size_t totalSize = size * nmemb;
+    output->append((char*)contents, totalSize);
+    return totalSize;
+}
+
+// 🔥 PHP 공지 가져오기
+std::string GetNoticeFromPHP()
+{
+    CURL* curl = curl_easy_init();
+    std::string result;
+
+    if (!curl)
+        return "";
+
+    curl_easy_setopt(curl, CURLOPT_URL, "https://stimpack.pe.kr/api/notice.php");
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &result);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 2L);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+
+    // 🔥 리다이렉트 허용
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+
+    CURLcode res = curl_easy_perform(curl);
+    curl_easy_cleanup(curl);
+
+    if (res != CURLE_OK)
+        return "";
+
+    return result;
+}
+
+// 🔥 SHA256 생성
+std::string GetHash(const std::string& input)
+{
+    unsigned char hash[SHA256_DIGEST_LENGTH];
+    SHA256((unsigned char*)input.c_str(), input.size(), hash);
+
+    std::stringstream ss;
+    for (int i = 0; i < SHA256_DIGEST_LENGTH; i++)
+        ss << std::hex << std::setw(2) << std::setfill('0') << (int)hash[i];
+
+    return ss.str();
+}
+
+// 🔥 로그인 시 공지 전송
+class custom_server_notice : public PlayerScript
+{
+public:
+    custom_server_notice() : PlayerScript("custom_server_notice") {}
+
+    void OnLogin(Player* player, bool /*firstLogin*/) override
+    {
+        if (!player)
+            return;
+
+        std::string msg = GetNoticeFromPHP();
+
+        if (msg.empty())
+            return;
+
+        std::string hash = GetHash(msg);
+        uint32 guid = player->GetGUID().GetCounter();
+		uint32 accountId = player->GetSession()->GetAccountId();
+
+        // 🔥 기존 공지 확인
+        QueryResult result = CharacterDatabase.PQuery(
+			"SELECT notice_hash FROM appdata.account_notice_log WHERE account_id = {}",
+			accountId
+		);
+
+		if (result)
+		{
+			Field* fields = result->Fetch();
+			std::string last = fields[0].GetString();
+
+			if (last == hash)
+				return; // 이미 본 공지 → 스킵
+		}
+
+        // 🔥 색상 적용 + 가독성 강화
+		msg = "|cff66ff66" + msg + "|r";
+
+        WorldSession* session = player->GetSession();
+
+        WorldPacket data(SMSG_NOTIFICATION, msg.size() + 1);
+        data << msg;
+        session->SendPacket(&data);
+
+        // 🔥 저장 (UPSERT)
+        CharacterDatabase.PExecute(
+			"INSERT INTO appdata.account_notice_log (account_id, notice_hash) VALUES ({}, '{}') "
+			"ON DUPLICATE KEY UPDATE notice_hash = VALUES(notice_hash), seen_at = NOW()",
+			accountId, hash
+		);
+    }
+};
+
+///지엠채팅
+// chat_gm_only.cpp
+// ─────────────────────────────────────────────
+// 기능
+// 1) "gm <내용>" → GM NPC 귓말
+// 2) 기존 채팅은 완전 차단이 아니라 "무력화"
+// 3) 오류 메시지 제거
+// 4) DB 저장
+// ─────────────────────────────────────────────
+
+#include "ScriptMgr.h"
+#include "Player.h"
+#include "Chat.h"
+
+#include <thread>
+#include <sstream>
+#include <cstdlib>
+#include <algorithm>
+
+namespace
+{
+    constexpr bool kEnabled = true;
+
+    inline bool StartsWith(const std::string& s, const std::string& pfx)
+    {
+        return s.size() >= pfx.size() && std::equal(pfx.begin(), pfx.end(), s.begin());
+    }
+
+    inline std::string ShellEscapeSingleQuoted(const std::string& raw)
+    {
+        std::string out;
+        out.reserve(raw.size() + 16);
+
+        for (char c : raw)
+            out += (c == '\'' ? "'\"'\"'" : std::string(1, c));
+
+        return "'" + out + "'";
+    }
+
+    inline void AsyncLogGM(uint32 accountId, const std::string& playerName, const std::string& content)
+    {
+        std::ostringstream cmd;
+        cmd << "/usr/bin/php /home/esotar/fcm/gm_log.php"
+            << " --account=" << ShellEscapeSingleQuoted(std::to_string(accountId))
+            << " --name=" << ShellEscapeSingleQuoted(playerName)
+            << " --msg=" << ShellEscapeSingleQuoted(content)
+            << " >/dev/null 2>&1";
+
+        std::thread([c = cmd.str()]()
+        {
+            std::system(c.c_str());
+        }).detach();
+    }
+}
+
+class ChatGMOnly : public PlayerScript
+{
+public:
+    ChatGMOnly() : PlayerScript("ChatGMOnly") {}
+
+    /// 🔥 단일 훅만 사용 (중복 방지 핵심)
+    void OnChat(Player* player, uint32 type, uint32 /*lang*/, std::string& msg) override
+	{
+		if (!kEnabled || !player)
+			return;
+
+		if (msg.empty())
+			return;
+
+		if (!StartsWith(msg, "gm "))
+			return;
+
+		std::string content = msg.substr(3);
+		if (content.empty())
+			return;
+
+		/// 🔥 주변 전파되는 채팅만 차단
+		if (type == CHAT_MSG_SAY || type == CHAT_MSG_YELL)
+		{
+			msg = "";  // ← 공백 말고 완전 빈값
+		}
+
+
+        /// 🔥 DB 저장
+        if (player->GetSession())
+            AsyncLogGM(player->GetSession()->GetAccountId(), player->GetName(), content);
+    }
+};
+
+
+#include "ScriptMgr.h"
+#include "Player.h"
+#include "Item.h"
+#include "Spell.h"
+
+class item_icc_faction_buff : public ItemScript
+{
+public:
+    item_icc_faction_buff() : ItemScript("item_icc_faction_buff") { }
+
+	bool OnUse(Player* player, Item* item, SpellCastTargets const&) override
+    {
+        if (!player)
+            return false;
+
+        uint32 spellId = 0;
+
+        if (player->GetTeamId() == TEAM_HORDE)
+            spellId = 73822;
+        else
+            spellId = 73828;
+
+        player->CastSpell(player, spellId, true);
+		player->CastSpell(player, 16634, true);
+
+		if (Pet* pet = player->GetPet())
+        {
+            pet->CastSpell(pet, spellId, true);
+            pet->CastSpell(pet, 16634, true);
+        }
+
+		player->DestroyItemCount(item->GetEntry(), 1, true);
+        return true;
+    }
+};
+
+#include "ScriptMgr.h"
+#include "Player.h"
+#include "WorldSession.h"
+#include "Channel.h"
+#include "DatabaseEnv.h"
+
+class faction_channel_chat_log : public PlayerScript
+{
+public:
+    faction_channel_chat_log() : PlayerScript("faction_channel_chat_log") { }
+
+    void OnChat(Player* player, uint32 /*type*/, uint32 /*lang*/, std::string& msg, Channel* channel) override
+    {
+        if (!player || !channel)
+            return;
+
+        if (msg.empty())
+            return;
+
+        std::string channelName = channel->GetName();
+
+        // 기록할 공식 진영 채널명
+        if (channelName != "빛의수호자")
+            return;
+
+        uint32 team = player->GetTeam(); // 호드 67 / 얼라이언스 469
+        uint32 accountId = player->GetSession()->GetAccountId();
+        uint64 playerGuid = player->GetGUID().GetCounter();
+        std::string playerName = player->GetName();
+        uint32 now = uint32(time(nullptr));
+
+        LoginDatabase.EscapeString(playerName);
+        LoginDatabase.EscapeString(channelName);
+        LoginDatabase.EscapeString(msg);
+
+        LoginDatabase.PExecute(
+            "INSERT INTO appdata.faction_channel_chat_log "
+            "(team, account_id, player_guid, player_name, channel_name, message, created_at) "
+            "VALUES ({}, {}, {}, '{}', '{}', '{}', {})",
+            team,
+            accountId,
+            playerGuid,
+            playerName,
+            channelName,
+            msg,
+            now
+        );
+
+		LoginDatabase.PExecute(
+			"DELETE FROM appdata.faction_channel_chat_log "
+			"WHERE team = {} "
+			"AND channel_name = '{}' "
+			"AND id NOT IN ( "
+				"SELECT id FROM ( "
+					"SELECT id "
+					"FROM appdata.faction_channel_chat_log "
+					"WHERE team = {} "
+					"AND channel_name = '{}' "
+					"ORDER BY id DESC "
+					"LIMIT 5 "
+				") AS recent_rows "
+			")",
+			team,
+			channelName,
+			team,
+			channelName
+		);
+    }
+};
+
+#include "ScriptMgr.h"
+#include "Player.h"
+#include "WorldSession.h"
+#include "DatabaseEnv.h"
+
+class guild_login_chat_insert : public PlayerScript
+{
+public:
+    guild_login_chat_insert() : PlayerScript("guild_login_chat_insert") { }
+
+    void OnLogin(Player* player, bool /*firstLogin*/) override
+    {
+		uint32 realmId = sConfigMgr->GetIntDefault("RealmID", 0);
+		if (realmId != 1)
+			return;
+
+        if (!player)
+            return;
+
+        if (!player->GetSession())
+            return;
+
+        uint32 guildId = player->GetGuildId();
+
+        if (!guildId)
+            return;
+
+        uint32 accountId = player->GetSession()->GetAccountId();
+        uint64 characterGuid = player->GetGUID().GetCounter();
+
+        std::string characterName = player->GetName();
+        std::string message = "로그인하였습니다.";
+
+        LoginDatabase.EscapeString(characterName);
+        LoginDatabase.EscapeString(message);
+
+        LoginDatabase.PExecute(
+            "INSERT INTO appdata.guild_tech_chat "
+            "(guild_id, account_id, character_guid, character_name, message, created_at, deleted_at) "
+            "VALUES ({}, {}, {}, '{}', '{}', NOW(), NULL)",
+            guildId,
+            accountId,
+            characterGuid,
+            characterName,
+            message
+        );
+    }
+};
+
+class guild_join_chat_insert : public GuildScript
+{
+public:
+    guild_join_chat_insert() : GuildScript("guild_join_chat_insert") { }
+
+    void OnAddMember(Guild* guild, Player* player, uint8& /*plRank*/) override
+    {
+        if (!guild)
+            return;
+
+        if (!player)
+            return;
+
+        if (!player->GetSession())
+            return;
+
+        uint32 guildId = guild->GetId();
+        uint32 accountId = player->GetSession()->GetAccountId();
+        uint64 characterGuid = player->GetGUID().GetCounter();
+
+        std::string characterName = player->GetName();
+        std::string message = "길드에 가입하였습니다.";
+
+        LoginDatabase.EscapeString(characterName);
+        LoginDatabase.EscapeString(message);
+
+        LoginDatabase.PExecute(
+            "INSERT INTO appdata.guild_tech_chat "
+            "(guild_id, account_id, character_guid, character_name, message, created_at, deleted_at) "
+            "VALUES ({}, {}, {}, '{}', '{}', NOW(), NULL)",
+            guildId,
+            accountId,
+            characterGuid,
+            characterName,
+            message
+        );
+    }
+};
 
 
 
@@ -2759,7 +3571,8 @@ void AddSC_custom_scripts()
 	new account_daily_ingame();
 
 	//6개월이상 미접속 케릭터
-	new inactive_character_archive();
+    new inactive_character_archive();
+    new inactive_character_lock_player();
 
 	//솔로공격대
 	new npc_solo_raid_creator();
@@ -2776,4 +3589,19 @@ void AddSC_custom_scripts()
 
 	//랜덤 박스
 	new item_random_box();
+	new item_mount_random_box();
+
+	//접속시 뉴스
+	new custom_server_notice();
+
+	//gm채팅
+	new ChatGMOnly();
+
+	//icc 버프
+	new item_icc_faction_buff();
+
+	//팀 공식체널
+	new faction_channel_chat_log();
+	new guild_login_chat_insert();
+	new guild_join_chat_insert();
 }

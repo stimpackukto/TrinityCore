@@ -46,6 +46,7 @@ public:
             { "mail",    HandleSendMailCommand,    rbac::RBAC_PERM_COMMAND_SEND_MAIL,    Console::Yes },
             { "message", HandleSendMessageCommand, rbac::RBAC_PERM_COMMAND_SEND_MESSAGE, Console::Yes },
             { "money",   HandleSendMoneyCommand,   rbac::RBAC_PERM_COMMAND_SEND_MONEY,   Console::Yes },
+			{ "gmwhisper", HandleGmWhisperCommand, rbac::RBAC_PERM_COMMAND_SEND_MESSAGE, Console::Yes },
         };
 
         static ChatCommandTable commandTable =
@@ -259,6 +260,52 @@ public:
 
         return true;
     }
+
+	static bool HandleGmWhisperCommand(ChatHandler* handler, char const* args)
+{
+    Player* player;
+    if (!handler->extractPlayerTarget((char*)args, &player))
+        return false;
+
+    char* msgStr = strtok(nullptr, "");
+    if (!msgStr)
+        return false;
+
+    if (player->GetSession()->isLogingOut())
+    {
+        handler->SendSysMessage(LANG_PLAYER_NOT_FOUND);
+        handler->SetSentErrorMessage(true);
+        return false;
+    }
+
+    std::string message = "[GM] ";
+    message += msgStr;
+
+    /// 🔥 핵심 (entry, counter 둘다 필요)
+    ObjectGuid senderGuid = ObjectGuid::Create<HighGuid::Unit>(1, 1);
+
+    WorldPacket data;
+    ChatHandler::BuildChatPacket(
+        data,
+        CHAT_MSG_MONSTER_WHISPER,
+        LANG_UNIVERSAL,
+        senderGuid,
+        player->GetGUID(),
+        message,
+        CHAT_TAG_NONE,
+        "GM"
+    );
+
+    player->GetSession()->SendPacket(&data);
+
+    std::string nameLink = handler->GetNameLink(player);
+    handler->PSendSysMessage("GM Whisper sent to %s: %s", nameLink.c_str(), msgStr);
+
+    return true;
+}
+
+
+
 };
 
 void AddSC_send_commandscript()

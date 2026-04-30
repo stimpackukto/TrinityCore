@@ -15223,6 +15223,9 @@ void Player::RewardQuest(Quest const* quest, uint32 reward, Object* questGiver, 
     //lets remove flag for delayed teleports
     SetCanDelayTeleport(false);
 
+	if (quest->IsDaily())
+        CharacterDatabase.PExecute("INSERT INTO appdata.daily_task_log (account_id, task_id, task_date, progress, completed, rewarded) SELECT {}, 12, DATE(DATE_SUB(NOW(), INTERVAL 4 HOUR)), 1, IF(1 >= t.target_count, 1, 0), 0 FROM appdata.daily_tasks t WHERE t.task_id = 12 ON DUPLICATE KEY UPDATE progress = IF(completed = 1, progress, progress + 1), completed = IF(completed = 1, 1, IF(progress + 1 >= (SELECT t2.target_count FROM appdata.daily_tasks t2 WHERE t2.task_id = 12), 1, completed))", GetSession()->GetAccountId());
+
     sScriptMgr->OnQuestStatusChange(this, quest_id);
 }
 
@@ -23580,9 +23583,15 @@ void Player::UpdateVisibleGameobjectsOrSpellClicks()
     {
         if (itr->IsGameObject())
         {
-            if (GameObject* obj = ObjectAccessor::GetGameObject(*this, *itr))
+    /*        if (GameObject* obj = ObjectAccessor::GetGameObject(*this, *itr))
                 if (sObjectMgr->IsGameObjectForQuests(obj->GetEntry()))
+                    obj->BuildValuesUpdateBlockForPlayer(&udata, this); */
+
+			if (GameObject* obj = ObjectAccessor::GetGameObject(*this, *itr))
+            {
+                if (sObjectMgr->IsGameObjectForQuests(obj->GetEntry()) || obj->ActivateToQuest(this))
                     obj->BuildValuesUpdateBlockForPlayer(&udata, this);
+            }
         }
         else if (itr->IsCreatureOrVehicle())
         {

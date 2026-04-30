@@ -58,6 +58,9 @@
 #include "RBAC.h"
 #include "WorldSession.h"
 
+#include "Guild.h"
+#include "GuildMgr.h"
+
 
 #if TRINITY_COMPILER == TRINITY_COMPILER_GNU
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
@@ -83,6 +86,8 @@ public:
 			{ "unbind",       HandleInstanceUnbindCommand,       rbac::RBAC_PERM_COMMAND_SEND_MESSAGE,         Console::Yes },
 			{ "customlearn",       HandleInstanceCustomlearnCommand,       rbac::RBAC_PERM_COMMAND_SEND_MESSAGE,         Console::Yes },
 			{ "delivery",      HandleDeliveryGiftCommand, rbac::RBAC_PERM_COMMAND_SEND_MESSAGE, Console::Yes },
+			{ "guildsay",      HandleSendGuildSayCommand, rbac::RBAC_PERM_COMMAND_SEND_MESSAGE, Console::Yes },
+			{ "custommail",      HandleSendCustomMailCommand, rbac::RBAC_PERM_COMMAND_SEND_MESSAGE, Console::Yes },
         };
 
         static ChatCommandTable commandTable =
@@ -465,12 +470,7 @@ static bool HandleInstanceCustomlearnCommand(ChatHandler* /*handler*/, char cons
         guidLow
     );
 
-	// ─────────────────────────────────────
-    // 3) 델레포터  5804.149 624.77 647.767 1.64
-    // ─────────────────────────────────────
-	target->TeleportTo(571, 5804.149f, 624.77f, 647.767f, 1.64f); 
-
-    return true;
+	return true;
 }
 
 static bool HandleDeliveryGiftCommand(ChatHandler* handler)
@@ -515,11 +515,212 @@ static bool HandleDeliveryGiftCommand(ChatHandler* handler)
     return true;
 }
 
+static bool HandleSendGuildSayCommand(ChatHandler* handler, char const* args)
+{
+    if (!handler || !args || !*args)
+        return false;
 
+    std::string full(args);
 
+    auto trim = [](std::string& s)
+    {
+        size_t first = s.find_first_not_of(" \t\r\n");
+        if (first == std::string::npos)
+        {
+            s.clear();
+            return;
+        }
 
+        size_t last = s.find_last_not_of(" \t\r\n");
+        s = s.substr(first, last - first + 1);
+    };
 
+    trim(full);
 
+    size_t firstSpace = full.find(' ');
+    if (firstSpace == std::string::npos)
+        return false;
+
+    std::string guildIdText = full.substr(0, firstSpace);
+    std::string remain = full.substr(firstSpace + 1);
+
+    trim(guildIdText);
+    trim(remain);
+
+    size_t secondSpace = remain.find(' ');
+    if (secondSpace == std::string::npos)
+        return false;
+
+    std::string senderName = remain.substr(0, secondSpace);
+    std::string message = remain.substr(secondSpace + 1);
+
+    trim(senderName);
+    trim(message);
+
+    uint32 guildId = uint32(strtoul(guildIdText.c_str(), nullptr, 10));
+
+    if (guildId == 0 || senderName.empty() || message.empty())
+        return false;
+
+    if (message.size() >= 2 && message.front() == '"' && message.back() == '"')
+        message = message.substr(1, message.size() - 2);
+
+    trim(message);
+
+    if (message.empty())
+        return false;
+
+    Guild* guild = sGuildMgr->GetGuildById(guildId);
+    if (!guild)
+        return false;
+
+    std::string safeSenderName = senderName;
+    CharacterDatabase.EscapeString(safeSenderName);
+
+    QueryResult result = CharacterDatabase.PQuery(
+        "SELECT c.guid "
+        "FROM characters.characters c "
+        "JOIN characters.guild_member gm ON gm.guid = c.guid "
+        "WHERE gm.guildid = {} "
+        "AND c.name = '{}' "
+        "LIMIT 1",
+        guildId,
+        safeSenderName
+    );
+
+    if (!result)
+        return false;
+
+    Field* fields = result->Fetch();
+    uint32 senderGuidLow = fields[0].GetUInt32();
+
+    ObjectGuid senderGuid = ObjectGuid::Create<HighGuid::Player>(senderGuidLow);
+
+    WorldPacket data;
+    ChatHandler::BuildChatPacket(
+        data,
+        CHAT_MSG_GUILD,
+        LANG_UNIVERSAL,
+        senderGuid,
+        ObjectGuid::Empty,
+        message,
+        CHAT_TAG_NONE,
+        senderName
+    );
+
+    guild->BroadcastPacket(&data);
+
+    return true;
+}
+
+static bool HandleSendCustomMailCommand(ChatHandler* /*handler*/, char const* args)
+{
+    if (!args || !*args)
+        return true;
+
+    std::string full(args);
+
+    auto trim = [](std::string& s)
+    {
+        size_t first = s.find_first_not_of(" \t\r\n");
+        if (first == std::string::npos)
+        {
+            s.clear();
+            return;
+        }
+
+        size_t last = s.find_last_not_of(" \t\r\n");
+        s = s.substr(first, last - first + 1);
+    };
+
+    trim(full);
+
+    size_t pos1 = full.find_first_of(" \t\r\n");
+    if (pos1 == std::string::npos)
+        return true;
+
+    std::string senderName = full.substr(0, pos1);
+    std::string rest = full.substr(pos1 + 1);
+
+    trim(senderName);
+    trim(rest);
+
+    if (senderName.empty() || rest.empty())
+        return true;
+
+    size_t pos2 = rest.find_first_of(" \t\r\n");
+    if (pos2 == std::string::npos)
+        return true;
+
+    std::string receiverName = rest.substr(0, pos2);
+    std::string body = rest.substr(pos2 + 1);
+
+    trim(receiverName);
+    trim(body);
+
+    if (receiverName.empty() || body.empty())
+        return true;
+
+    if (body.size() >= 2 && body.front() == '"' && body.back() == '"')
+        body = body.substr(1, body.size() - 2);
+
+    trim(body);
+
+    if (body.empty())
+        return true;
+
+    normalizePlayerName(senderName);
+    normalizePlayerName(receiverName);
+
+    std::string senderSqlName = senderName;
+    std::string receiverSqlName = receiverName;
+
+    CharacterDatabase.EscapeString(senderSqlName);
+    CharacterDatabase.EscapeString(receiverSqlName);
+
+    std::string senderSql =
+        "SELECT guid FROM characters.characters WHERE name = '" +
+        senderSqlName +
+        "' LIMIT 1";
+
+    QueryResult senderResult = CharacterDatabase.Query(senderSql.c_str());
+
+    if (!senderResult)
+        return true;
+
+    Field* senderFields = senderResult->Fetch();
+    uint64 senderGuid = senderFields[0].GetUInt64();
+
+    std::string receiverSql =
+        "SELECT guid FROM characters.characters WHERE name = '" +
+        receiverSqlName +
+        "' LIMIT 1";
+
+    QueryResult receiverResult = CharacterDatabase.Query(receiverSql.c_str());
+
+    if (!receiverResult)
+        return true;
+
+    Field* receiverFields = receiverResult->Fetch();
+    uint64 receiverGuid = receiverFields[0].GetUInt64();
+
+    MailDraft draft(
+        "[도움 우편함] 답변이 도착했습니다",
+        body
+    );
+
+    CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
+
+    draft.SendMailTo(
+        trans,
+        MailReceiver(nullptr, receiverGuid),
+        MailSender(MAIL_NORMAL, senderGuid, MAIL_STATIONERY_DEFAULT)
+    );
+
+    CharacterDatabase.CommitTransaction(trans);
+
+    return true;
+}
 
 
 

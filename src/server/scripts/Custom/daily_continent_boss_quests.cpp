@@ -590,6 +590,6 @@ static uint32 CountDone(uint32 dateYmd, uint32 guid, uint32 questId)
 
 void AddSC_daily_continent_boss_quests()
 {
-    new DailyContinentBoss::DailyBossQuestWorldScript();
-    new DailyContinentBoss::DailyBossQuestPlayerScript();
+  //  new DailyContinentBoss::DailyBossQuestWorldScript();
+ //   new DailyContinentBoss::DailyBossQuestPlayerScript();
 }

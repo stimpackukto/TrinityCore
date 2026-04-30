@@ -24,6 +24,8 @@
 #include "Channel.h"
 #include "Chat.h"
 
+#include "CustomRP.h"
+
 /*
 Reforging by Rochet2
 http://rochet2.github.io/
@@ -32,44 +34,37 @@ http://rochet2.github.io/
 // ── 이 파일 내부 전용 RP 유틸 ────────────────────────────────────────────────
 namespace RP
 {
-    // 행 보장 (없으면 reg_point=0으로 생성)
-    static inline void EnsureRow(uint32 accountId)
-    {
-        CharacterDatabase.PExecute(
-            "INSERT INTO appdata.account_data (id, reg_point) VALUES ({}, 0) "
-            "ON DUPLICATE KEY UPDATE reg_point = reg_point",
-            accountId);
-    }
-
     static inline long long Get(uint32 accountId)
     {
-        EnsureRow(accountId);
-        if (QueryResult r = CharacterDatabase.PQuery(
-            "SELECT IFNULL(reg_point,0) FROM appdata.account_data WHERE id={}", accountId))
-        {
-            return r->Fetch()[0].GetInt64();
-        }
-        return 0;
+        if (!accountId)
+            return 0;
+
+        return static_cast<long long>(::GetRP(accountId));
     }
 
-    // RP amount 소모 시도: 성공하면 true와 잔여 RP(after)를 out으로 반환
-    // NOTE: PExecute가 affected rows를 못 받는 환경이라, before/after로 판정(동시 차감에도 안전하게 성공 판정 가능)
+    // CustomRP.h 기준 RP 차감
     static inline bool TrySpend(uint32 accountId, uint32 amount, long long& outAfter)
     {
-        EnsureRow(accountId);
-
-        long long before = Get(accountId);
-        if (before < static_cast<long long>(amount))
+        if (!accountId)
         {
-            outAfter = before;
+            outAfter = 0;
             return false;
         }
 
-        // 조건부 차감
-        CharacterDatabase.PExecute("UPDATE appdata.account_data SET reg_point = reg_point - {} WHERE id = {} AND reg_point >= {}",amount, accountId, amount);
+        if (!::HasEnoughRP(accountId, amount))
+        {
+            outAfter = Get(accountId);
+            return false;
+        }
 
-		long long after = Get(accountId);
-        return after;
+        if (!::SubtractRP(accountId, amount))
+        {
+            outAfter = Get(accountId);
+            return false;
+        }
+
+        outAfter = Get(accountId);
+        return true;
     }
 } // namespace RP
 
@@ -80,6 +75,43 @@ static constexpr uint32 RESTORE_COST_RP = 500;  // 삭제
 static inline uint32 GetAccountId(Player* player)
 {
     return (player && player->GetSession()) ? player->GetSession()->GetAccountId() : 0;
+}
+
+static inline uint32 GetPlayerGuidLow(Player* player)
+{
+    return player ? static_cast<uint32>(player->GetGUID().GetCounter()) : 0;
+}
+
+static inline uint32 GetGuildTechDiscountedCost(Player* player, uint32 baseCost, uint32& discount)
+{
+    uint32 accountId = GetAccountId(player);
+    uint32 guid = GetPlayerGuidLow(player);
+
+    return ApplyGuildTechDiscount(
+        accountId,
+        guid,
+        "r2c",
+        baseCost,
+        20,
+        discount
+    );
+}
+
+static inline std::string MakeCostText(Player* player, uint32 baseCost)
+{
+    uint32 discount = 0;
+    uint32 finalCost = GetGuildTechDiscountedCost(player, baseCost, discount);
+
+    if (discount > 0)
+    {
+        return Trinity::StringFormat(
+            "{} RP → {} RP |cFF3ECB3C(길드 테크니크 20% 할인)|r",
+            baseCost,
+            finalCost
+        );
+    }
+
+    return Trinity::StringFormat("{} RP", baseCost);
 }
 
 // Remember to add to GetStatName too
@@ -342,7 +374,12 @@ public:
 
         static bool OnGossipHello(Player* player, Creature* creature)
         {
-            AddGossipItemFor(player, GOSSIP_ICON_BATTLE, "재연마할 아이템의 슬롯을 선택하세요(10000 RP):", 0, Melt(MAIN_MENU, 0));
+            std::string reforgeCostText = Trinity::StringFormat(
+				"재연마할 아이템의 슬롯을 선택하세요({}):",
+				MakeCostText(player, REFORGE_COST_RP)
+			);
+
+			AddGossipItemFor(player, GOSSIP_ICON_BATTLE, reforgeCostText, 0, Melt(MAIN_MENU, 0));
 
             for (uint8 slot = EQUIPMENT_SLOT_START; slot < EQUIPMENT_SLOT_END; ++slot)
             {
@@ -353,7 +390,13 @@ public:
             }
 
             // [CHANGED] 삭제 비용 안내 문구
-            AddGossipItemFor(player, GOSSIP_ICON_TRAINER, "재연마 제거 (500 RP)", 0, Melt(SELECT_RESTORE, 0));
+            std::string restoreCostText = Trinity::StringFormat(
+				"재연마 제거 ({})",
+				MakeCostText(player, RESTORE_COST_RP)
+			);
+
+			AddGossipItemFor(player, GOSSIP_ICON_TRAINER, restoreCostText, 0, Melt(SELECT_RESTORE, 0));
+
             AddGossipItemFor(player, GOSSIP_ICON_CHAT, "메뉴 새로고침", 0, Melt(MAIN_MENU, 0));
             SendGossipMenuFor(player, DEFAULT_GOSSIP_MESSAGE, creature->GetGUID());
             return true;
@@ -450,7 +493,10 @@ public:
 
                                     // [CHANGED] 확인창: 비용 1000 RP 표시, gold cost 파라미터는 0
                                     std::string confirm =
-                                        "정말로 재연마하시겠습니까?\n\n" + pProto->Name1 + "\n\n비용: 10000 RP";
+									"정말로 재연마하시겠습니까?\n\n" +
+									pProto->Name1 +
+									"\n\n비용: " +
+									MakeCostText(player, REFORGE_COST_RP);
 
                                     AddGossipItemFor(
                                         player,
@@ -488,9 +534,10 @@ public:
                                         {
                                             // [CHANGED] 확인창 비용 안내
                                             std::string confirm =
-                                                "다음 아이템의 재연마를 제거하시겠습니까?\n\n" +
-                                                invItem->GetTemplate()->Name1 +
-                                                "\n\n비용: 500 RP";
+											"다음 아이템의 재연마를 제거하시겠습니까?\n\n" +
+											invItem->GetTemplate()->Name1 +
+											"\n\n비용: " +
+											MakeCostText(player, RESTORE_COST_RP);
 
                                             AddGossipItemFor(
                                                 player,
@@ -518,25 +565,58 @@ public:
                         {
                             if (!player->reforgeMap.empty() && player->reforgeMap.find(sender) != player->reforgeMap.end())
                             {
-                                // [CHANGED] 삭제 비용 100 RP 차감
+                                // [CHANGED] 삭제 비용 500 RP 차감
                                 uint32 accountId = GetAccountId(player);
                                 long long after = 0;
-								Item* invItem = GetEquippedItem(player, sender);
-								const ItemTemplate* proto = invItem->GetTemplate();
+                                Item* invItem = GetEquippedItem(player, sender);
+                                if (!invItem)
+                                {
+                                    player->GetSession()->SendNotification("잘못된 아이템이 선택되었습니다");
+                                    OnGossipHello(player, creature);
+                                    break;
+                                }
 
-                                if (accountId && RP::TrySpend(accountId, RESTORE_COST_RP, after))
-                                {
-                                    RemoveReforge(player, sender, true);
-									long long after = RP::Get(accountId) - 100 ;
-									std::string msg = Trinity::StringFormat("재연마 [|cFFA335EE{}|r] 제거되었습니다 (100 RP 소모), 잔여 RP: {}",proto->Name1,after);
+                                const ItemTemplate* proto = invItem->GetTemplate();
+
+                                uint32 guildDiscount = 0;
+								uint32 finalCost = GetGuildTechDiscountedCost(player, RESTORE_COST_RP, guildDiscount);
+
+								if (accountId && RP::TrySpend(accountId, finalCost, after))
+								{
+									RemoveReforge(player, sender, true);
+
+									if (guildDiscount > 0)
+									{
+										std::string msg = Trinity::StringFormat(
+											"재연마 [|cFFA335EE{}|r] 제거되었습니다 ({} RP 소모, 길드 테크니크 {} RP 할인), 잔여 RP: {}",
+											proto->Name1,
+											finalCost,
+											guildDiscount,
+											after
+										);
+										ChatHandler(player->GetSession()).SendSysMessage(msg.c_str());
+									}
+									else
+									{
+										std::string msg = Trinity::StringFormat(
+											"재연마 [|cFFA335EE{}|r] 제거되었습니다 ({} RP 소모), 잔여 RP: {}",
+											proto->Name1,
+											finalCost,
+											after
+										);
+										ChatHandler(player->GetSession()).SendSysMessage(msg.c_str());
+									}
+								}
+								else
+								{
+									long long currentRp = RP::Get(accountId);
+									std::string msg = Trinity::StringFormat(
+										"RP가 부족합니다 (필요: {} RP), 보유 RP: {}",
+										finalCost,
+										currentRp
+									);
 									ChatHandler(player->GetSession()).SendSysMessage(msg.c_str());
-                                }
-                                else
-                                {
-									long long after = RP::Get(accountId) ;
-									std::string msg = Trinity::StringFormat("RP가 부족합니다 (필요: 100 RP),보유 RP: {}",after);
-									ChatHandler(player->GetSession()).SendSysMessage(msg.c_str());
-                                }
+								}
                             }
                         }
                         OnGossipHello(player, creature);
@@ -558,19 +638,45 @@ public:
                                 long long after = 0;
 								const ItemTemplate* proto = invItem->GetTemplate();
 
-                                if (accountId && RP::TrySpend(accountId, REFORGE_COST_RP, after))
-                                {
-                                    UpdatePlayerReforgeStats(invItem, player, action, statTypes[menu]);
-									long long after = RP::Get(accountId) - 1000;
-									std::string msg = Trinity::StringFormat("재연마 [|cFFA335EE{}|r] 완료되었습니다 (1000 RP 소모), 잔여 RP: {}",proto->Name1,after);
+                                uint32 guildDiscount = 0;
+								uint32 finalCost = GetGuildTechDiscountedCost(player, REFORGE_COST_RP, guildDiscount);
+
+								if (accountId && RP::TrySpend(accountId, finalCost, after))
+								{
+									UpdatePlayerReforgeStats(invItem, player, action, statTypes[menu]);
+
+									if (guildDiscount > 0)
+									{
+										std::string msg = Trinity::StringFormat(
+											"재연마 [|cFFA335EE{}|r] 완료되었습니다 ({} RP 소모, 길드 테크니크 {} RP 할인), 잔여 RP: {}",
+											proto->Name1,
+											finalCost,
+											guildDiscount,
+											after
+										);
+										ChatHandler(player->GetSession()).SendSysMessage(msg.c_str());
+									}
+									else
+									{
+										std::string msg = Trinity::StringFormat(
+											"재연마 [|cFFA335EE{}|r] 완료되었습니다 ({} RP 소모), 잔여 RP: {}",
+											proto->Name1,
+											finalCost,
+											after
+										);
+										ChatHandler(player->GetSession()).SendSysMessage(msg.c_str());
+									}
+								}
+								else
+								{
+									long long currentRp = RP::Get(accountId);
+									std::string msg = Trinity::StringFormat(
+										"RP가 부족합니다 (필요: {} RP), 보유 RP: {}",
+										finalCost,
+										currentRp
+									);
 									ChatHandler(player->GetSession()).SendSysMessage(msg.c_str());
-                                }
-                                else
-                                {
-									long long after = RP::Get(accountId) ;
-									std::string msg = Trinity::StringFormat("RP가 부족합니다 (필요: 1000 RP),보유 RP: {}",after);
-									ChatHandler(player->GetSession()).SendSysMessage(msg.c_str());
-                                }
+								}
                             }
                             else
                             {

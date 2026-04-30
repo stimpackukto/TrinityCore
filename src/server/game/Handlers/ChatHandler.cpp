@@ -44,6 +44,9 @@
 #include "WorldPacket.h"
 #include <algorithm>
 
+#include "TicketMgr.h"
+#include "DatabaseEnv.h"
+
 inline bool isNasty(uint8 c)
 {
     if (c == '\t')
@@ -221,6 +224,49 @@ void WorldSession::HandleMessagechatOpcode(WorldPacket& recvData)
     if (msg.size() > 255)
         return;
 
+	/// 🔥 GM 인터셉트 + 티켓 조건
+	if (msg.rfind("gm ", 0) == 0)
+	{
+		Player* player = GetPlayer();
+		if (!player)
+			return;
+
+		/// 🔥 티켓 체크 (핵심)
+		GmTicket* ticket = sTicketMgr->GetTicketByPlayer(player->GetGUID());
+		if (!ticket)
+			return; // ❗ 티켓 없으면 gm 무시 (일반 채팅으로 진행됨)
+
+		std::string content = msg.substr(3);
+		if (content.empty())
+			return;
+
+		/// 🔥 DB 저장 (핵심)
+		CharacterDatabase.PExecute(
+			"INSERT INTO appdata.gm_chat_log (account_id, player_guid, message) VALUES ({}, {}, '{}')",
+			player->GetSession()->GetAccountId(),
+			player->GetGUID().GetCounter(),
+			content
+		);
+
+		std::string gmMsg = "[GM에게보냄] " + content;
+
+		WorldPacket data;
+		ChatHandler::BuildChatPacket(
+			data,
+			CHAT_MSG_MONSTER_WHISPER,
+			LANG_UNIVERSAL,
+			player,
+			player,
+			gmMsg,
+			0,
+			"GM"
+		);
+
+		SendPacket(&data);
+
+		return; // 🔥 기존 채팅 완전 차단
+	}
+
     // Our Warden module also uses SendAddonMessage as a way to communicate Lua check results to the server, see if this is that
     if ((type == CHAT_MSG_GUILD) && (lang == LANG_ADDON))
     {
@@ -397,18 +443,56 @@ void WorldSession::HandleMessagechatOpcode(WorldPacket& recvData)
             break;
         }
         case CHAT_MSG_GUILD:
-        {
-            if (GetPlayer()->GetGuildId())
-            {
-                if (Guild* guild = sGuildMgr->GetGuildById(GetPlayer()->GetGuildId()))
-                {
-                    sScriptMgr->OnPlayerChat(GetPlayer(), type, lang, msg, guild);
+		{
+			if (GetPlayer()->GetGuildId())
+			{
+				if (Guild* guild = sGuildMgr->GetGuildById(GetPlayer()->GetGuildId()))
+				{
+					sScriptMgr->OnPlayerChat(GetPlayer(), type, lang, msg, guild);
 
-                    guild->BroadcastToGuild(this, false, msg, lang == LANG_ADDON ? LANG_ADDON : LANG_UNIVERSAL);
-                }
-            }
-            break;
-        }
+					// 웹 길드 채팅룸 기록
+					// LANG_ADDON은 애드온 통신일 수 있으므로 기록 제외
+					if (lang != LANG_ADDON)
+					{
+						std::string dbName = GetPlayer()->GetName();
+						std::string dbMsg = msg;
+
+						CharacterDatabase.EscapeString(dbName);
+						CharacterDatabase.EscapeString(dbMsg);
+
+						CharacterDatabase.PExecute(
+							"INSERT INTO appdata.guild_tech_chat "
+							"(guild_id, account_id, character_guid, character_name, message) "
+							"VALUES ({}, {}, {}, '{}', '{}')",
+							GetPlayer()->GetGuildId(),
+							GetAccountId(),
+							GetPlayer()->GetGUID().GetCounter(),
+							dbName,
+							dbMsg
+						);
+
+							CharacterDatabase.PExecute(
+								"DELETE FROM appdata.guild_tech_chat "
+								"WHERE guild_id = {} "
+								"AND id NOT IN ("
+								"    SELECT id FROM ("
+								"        SELECT id "
+								"        FROM appdata.guild_tech_chat "
+								"        WHERE guild_id = {} "
+								"        ORDER BY id DESC "
+								"        LIMIT 30"
+								"    ) keep_rows"
+								")",
+								GetPlayer()->GetGuildId(),
+								GetPlayer()->GetGuildId()
+							);
+					}
+
+					guild->BroadcastToGuild(this, false, msg, lang == LANG_ADDON ? LANG_ADDON : LANG_UNIVERSAL);
+				}
+			}
+			break;
+		}
         case CHAT_MSG_OFFICER:
         {
             if (GetPlayer()->GetGuildId())

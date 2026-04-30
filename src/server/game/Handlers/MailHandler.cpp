@@ -34,6 +34,7 @@
 #include "WorldPacket.h"
 
 #include "ScriptMgr.h"
+#include "CustomRP.h"
 
 bool WorldSession::CanOpenMailBox(ObjectGuid guid)
 {
@@ -59,6 +60,22 @@ bool WorldSession::CanOpenMailBox(ObjectGuid guid)
         return false;
 
     return true;
+}
+
+static uint32 GetGuildIdByCharacterGuid(uint32 guid)
+{
+    if (guid == 0)
+        return 0;
+
+    QueryResult result = CharacterDatabase.PQuery(
+        "SELECT guildid FROM characters.guild_member WHERE guid = {} LIMIT 1",
+        guid
+    );
+
+    if (!result)
+        return 0;
+
+    return result->Fetch()[0].GetUInt32();
 }
 
 void WorldSession::HandleSendMail(WorldPackets::Mail::SendMail& sendMail)
@@ -275,8 +292,29 @@ void WorldSession::HandleSendMail(WorldPackets::Mail::SendMail& sendMail)
             }
         }
 
-        // If theres is an item, there is a one hour delivery delay if sent to another account's character.
-        uint32 deliver_delay = needItemDelay ? sWorld->getIntConfig(CONFIG_MAIL_DELIVERY_DELAY) : 0;
+        // If there is an item, there is a delivery delay if sent to another account's character.
+		uint32 deliver_delay = needItemDelay ? sWorld->getIntConfig(CONFIG_MAIL_DELIVERY_DELAY) : 0;
+
+		// 길드 테크니크 r2a: 결속의 전달
+		// 발신 캐릭터가 r2a 완료 길드 소속이고,
+		// 수신 캐릭터도 같은 길드일 때만 우편 딜레이 제거
+		if (deliver_delay > 0)
+		{
+			uint32 senderAccountId = player->GetSession()->GetAccountId();
+			uint32 senderGuid = static_cast<uint32>(player->GetGUID().GetCounter());
+			uint32 receiverLowGuid = receiverGuid.GetCounter();
+
+			uint32 senderGuildId = GetGuildIdByCharacterGuid(senderGuid);
+			uint32 receiverGuildId = GetGuildIdByCharacterGuid(receiverLowGuid);
+
+			if (senderGuildId > 0 &&
+				senderGuildId == receiverGuildId &&
+				HasGuildTechCompleted(senderAccountId, senderGuid, "r2a"))
+			{
+				deliver_delay = 0;
+				player->GetSession()->SendNotification("길드 테크니크 결속의 전달 적용: 같은 길드원에게 우편이 즉시 발송됩니다.");
+			}
+}
 
         // don't ask for COD if there are no items
         if (mailInfo.Attachments.empty())

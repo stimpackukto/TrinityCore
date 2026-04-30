@@ -880,6 +880,15 @@ bool VehicleJoinEvent::Execute(uint64, uint32)
             Abort(0);
             return true;
         }
+
+		if (Creature* vehicleCreature = Target->GetBase()->ToCreature())
+		{
+			if (static_cast<uint8>(vehicleCreature->GetMovementTemplate().Flight) != 0 && vehicleCreature->GetVehicleKit())
+			{
+				Target->GetBase()->SetCanFly(true);
+				Target->GetBase()->SetDisableGravity(true);
+			}
+		}
     }
 
     Passenger->SendClearTarget();                            // SMSG_BREAK_TARGET

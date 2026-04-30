@@ -117,6 +117,9 @@ void WorldSession::HandleGMTicketCreateOpcode(WorldPacket& recvData)
         sTicketMgr->AddTicket(ticket);
         sTicketMgr->UpdateLastChange();
 
+		// 🔥 GM 알림 PHP 실행
+		system("/usr/bin/php /home/esotar/fcm/send_gm.php GMInquiry > /dev/null 2>&1 &");
+
         sWorld->SendGMText(LANG_COMMAND_TICKETNEW, GetPlayer()->GetName().c_str(), ticket->GetId());
 
         response = GMTICKET_RESPONSE_CREATE_SUCCESS;

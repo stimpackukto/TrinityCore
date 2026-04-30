@@ -36,6 +36,33 @@
 #include "WorldSession.h"
 #include "WowTime.h"
 
+#include "CustomRP.h"
+#include "Chat.h"
+#include "Config.h"
+
+static bool IsCustomAuction(uint32 auctionId)
+{
+    std::string sql = Trinity::StringFormat(
+        "SELECT custom "
+        "FROM appdata.auction_bid_log "
+        "WHERE auction_id = {} "
+        "AND type = 'SELL' "
+        "ORDER BY id DESC "
+        "LIMIT 1",
+        auctionId
+    );
+
+    QueryResult result = CharacterDatabase.Query(sql.c_str());
+    if (!result)
+        return false;
+
+    Field* fields = result->Fetch();
+    if (!fields)
+        return false;
+
+    return fields[0].GetUInt8() == 1;
+}
+
 enum eAuctionHouse
 {
     AH_MINIMUM_DEPOSIT = 100
@@ -85,7 +112,7 @@ AuctionHouseObject* AuctionHouseMgr::GetAuctionsMapByHouseId(uint8 auctionHouseI
     }
 }
 
-uint32 AuctionHouseMgr::GetAuctionDeposit(AuctionHouseEntry const* entry, uint32 time, Item* pItem, uint32 count)
+/*uint32 AuctionHouseMgr::GetAuctionDeposit(AuctionHouseEntry const* entry, uint32 time, Item* pItem, uint32 count)
 {
     uint32 MSV = pItem->GetTemplate()->SellPrice;
 
@@ -116,6 +143,23 @@ uint32 AuctionHouseMgr::GetAuctionDeposit(AuctionHouseEntry const* entry, uint32
         return float(AH_MINIMUM_DEPOSIT) * sWorld->getRate(RATE_AUCTION_DEPOSIT);
     else
         return deposit;
+}*/
+
+uint32 AuctionHouseMgr::GetAuctionDeposit(AuctionHouseEntry const* entry, uint32 time, Item* pItem, uint32 count)
+{
+    uint32 timeFactor = (((time / 60) / 60) / 12);
+    if (timeFactor == 0)
+        timeFactor = 1;
+
+    uint32 itemClass = pItem->GetTemplate()->Class;
+
+    // =========================
+    // 🔥 장비 / 무기 → RP 계산
+    // =========================
+    if (itemClass == ITEM_CLASS_WEAPON || itemClass == ITEM_CLASS_ARMOR)
+        return 5000  * count;
+
+    return 500  * count;
 }
 
 //does not clear ram
@@ -124,6 +168,8 @@ void AuctionHouseMgr::SendAuctionWonMail(AuctionEntry* auction, CharacterDatabas
     Item* pItem = GetAItem(auction->itemGUIDLow);
     if (!pItem)
         return;
+
+	pItem->SetBinding(false);
 
     uint32 bidderAccId = 0;
     ObjectGuid bidderGuid = ObjectGuid::Create<HighGuid::Player>(auction->bidder);
@@ -179,6 +225,8 @@ void AuctionHouseMgr::SendAuctionWonMail(AuctionEntry* auction, CharacterDatabas
             .AddItem(pItem)
             .SendMailTo(trans, MailReceiver(bidder, auction->bidder), auction, MAIL_CHECK_MASK_COPIED);
 
+		UpdateAuctionHistory(bidderAccId, auction->itemGUIDLow, "WON", true);
+
 		if (auction->bidder && bidder)
 		{
 			uint32 itemEntry = pItem->GetEntry();
@@ -199,13 +247,17 @@ void AuctionHouseMgr::SendAuctionSalePendingMail(AuctionEntry* auction, Characte
     ObjectGuid owner_guid = ObjectGuid::Create<HighGuid::Player>(auction->owner);
     Player* owner = ObjectAccessor::FindConnectedPlayer(owner_guid);
     uint32 owner_accId = sCharacterCache->GetCharacterAccountIdByGuid(owner_guid);
-    // owner exist (online or offline)
+
+	// owner exist (online or offline)
     if ((owner || owner_accId) && !sAuctionBotConfig->IsBotChar(auction->owner))
     {
         WowTime eta = *GameTime::GetUtcWowTime();
         eta += Seconds(sWorld->getIntConfig(CONFIG_MAIL_DELIVERY_DELAY));
         if (owner)
             eta += owner->GetSession()->GetTimezoneOffset();
+
+		if (IsCustomAuction(auction->itemGUIDLow))
+			auction->deposit = 10000;
 
         MailDraft(auction->BuildAuctionMailSubject(AUCTION_SALE_PENDING),
             AuctionEntry::BuildAuctionInvoiceMailBody(ObjectGuid::Create<HighGuid::Player>(auction->bidder), auction->bid, auction->buyout, auction->deposit,
@@ -223,7 +275,7 @@ void AuctionHouseMgr::SendAuctionSuccessfulMail(AuctionEntry* auction, Character
     // owner exist
     if ((owner || owner_accId) && !sAuctionBotConfig->IsBotChar(auction->owner))
     {
-        uint32 profit = auction->bid + auction->deposit - auction->GetAuctionCut();
+        uint32 profit = auction->bid + auction->deposit - auction->deposit;
 
         //FIXME: what do if owner offline
         if (owner)
@@ -234,9 +286,17 @@ void AuctionHouseMgr::SendAuctionSuccessfulMail(AuctionEntry* auction, Character
             owner->GetSession()->SendAuctionOwnerNotification(auction);
         }
 
+		if (IsCustomAuction(auction->itemGUIDLow))
+			auction->deposit = 10000;
+
+		uint32 mail_delivery_delay = sWorld->getIntConfig(CONFIG_MAIL_DELIVERY_DELAY);
+
+		uint32 realmId = sConfigMgr->GetIntDefault("RealmID", 0);
+		if (realmId != 1)
+			mail_delivery_delay = 60;
+
         MailDraft(auction->BuildAuctionMailSubject(AUCTION_SUCCESSFUL), AuctionEntry::BuildAuctionSoldMailBody(ObjectGuid::Create<HighGuid::Player>(auction->bidder), auction->bid, auction->buyout, auction->deposit, auction->GetAuctionCut()))
-            .AddMoney(profit)
-            .SendMailTo(trans, MailReceiver(owner, auction->owner), auction, MAIL_CHECK_MASK_COPIED, sWorld->getIntConfig(CONFIG_MAIL_DELIVERY_DELAY));
+            .SendMailTo(trans, MailReceiver(owner, auction->owner), auction, MAIL_CHECK_MASK_COPIED, mail_delivery_delay); 
     }
 }
 
@@ -285,7 +345,6 @@ void AuctionHouseMgr::SendAuctionOutbiddedMail(AuctionEntry* auction, uint32 new
             oldBidder->GetSession()->SendAuctionBidderNotification(auction->GetHouseId(), auction->Id, newBidder->GetGUID(), newPrice, auction->GetAuctionOutBid(), auction->itemEntry);
 
         MailDraft(auction->BuildAuctionMailSubject(AUCTION_OUTBIDDED), "")
-            .AddMoney(auction->bid)
             .SendMailTo(trans, MailReceiver(oldBidder, auction->bidder), auction, MAIL_CHECK_MASK_COPIED);
     }
 }
@@ -295,6 +354,8 @@ void AuctionHouseMgr::SendAuctionCancelledToBidderMail(AuctionEntry* auction, Ch
 {
     ObjectGuid bidder_guid = ObjectGuid::Create<HighGuid::Player>(auction->bidder);
     Player* bidder = ObjectAccessor::FindConnectedPlayer(bidder_guid);
+
+	item->SetBinding(false);
 
     uint32 bidder_accId = 0;
     if (!bidder)
@@ -306,7 +367,6 @@ void AuctionHouseMgr::SendAuctionCancelledToBidderMail(AuctionEntry* auction, Ch
     // bidder exist
     if ((bidder || bidder_accId) && !sAuctionBotConfig->IsBotChar(auction->bidder))
         MailDraft(auction->BuildAuctionMailSubject(AUCTION_CANCELLED_TO_BIDDER), "")
-            .AddMoney(auction->bid)
             .SendMailTo(trans, MailReceiver(bidder, auction->bidder), auction, MAIL_CHECK_MASK_COPIED);
 }
 
@@ -447,7 +507,7 @@ bool AuctionHouseMgr::RemoveAItem(ObjectGuid::LowType id, bool deleteItem /*= fa
     return true;
 }
 
-bool AuctionHouseMgr::PendingAuctionAdd(Player* player, AuctionEntry* aEntry)
+/*bool AuctionHouseMgr::PendingAuctionAdd(Player* player, AuctionEntry* aEntry)
 {
     PlayerAuctions* thisAH;
     auto itr = pendingAuctionMap.find(player->GetGUID());
@@ -473,6 +533,39 @@ bool AuctionHouseMgr::PendingAuctionAdd(Player* player, AuctionEntry* aEntry)
     }
     thisAH->push_back(aEntry);
     return true;
+}*/
+
+bool AuctionHouseMgr::PendingAuctionAdd(Player* player, AuctionEntry* aEntry)
+{
+    PlayerAuctions* thisAH;
+    auto itr = pendingAuctionMap.find(player->GetGUID());
+
+    uint32 accountId = player->GetSession()->GetAccountId();
+
+    // 🔥 현재 요청 포함 전체 deposit 합산 (copper 기준)
+    uint32 totalDeposit = 0;
+
+    if (itr != pendingAuctionMap.end())
+    {
+        thisAH = itr->second.first;
+
+        for (AuctionEntry const* thisAuction : *thisAH)
+            totalDeposit += thisAuction->deposit;
+    }
+    else
+    {
+        thisAH = new PlayerAuctions;
+        pendingAuctionMap[player->GetGUID()] = AuctionPair(thisAH, 0);
+    }
+
+    totalDeposit += aEntry->deposit;
+
+    if (!HasEnoughRP(accountId, totalDeposit))
+    return false;
+
+    thisAH->push_back(aEntry);
+
+    return true;
 }
 
 uint32 AuctionHouseMgr::PendingAuctionCount(Player const* player) const
@@ -497,8 +590,8 @@ void AuctionHouseMgr::PendingAuctionProcess(Player* player)
     for (; itrAH != thisAH->end(); ++itrAH)
     {
         AuctionEntry* AH = (*itrAH);
-        if (!player->HasEnoughMoney(totaldeposit + AH->deposit))
-            break;
+    /*    if (!player->HasEnoughMoney(totaldeposit + AH->deposit))
+            break; */
 
         totaldeposit += AH->deposit;
     }
@@ -520,9 +613,27 @@ void AuctionHouseMgr::PendingAuctionProcess(Player* player)
         CharacterDatabase.CommitTransaction(trans);
     }
 
+	uint32 accountId = player->GetSession()->GetAccountId();
+
+	// 🔥 RP 부족 체크
+	if (!HasEnoughRP(accountId, totaldeposit))
+	{
+		ChatHandler(player->GetSession()).SendSysMessage("보증금에 필요한 RP가 부족합니다.");
+
+		return;
+	}
+
+	// 🔥 RP 차감
+	if (!SubtractRP(accountId, totaldeposit))
+	{
+		ChatHandler(player->GetSession()).SendSysMessage("RP 차감 실패");
+
+		return;
+	}
+
     pendingAuctionMap.erase(player->GetGUID());
     delete thisAH;
-    player->ModifyMoney(-int32(totaldeposit));
+   //player->ModifyMoney(-int32(totaldeposit));
 }
 
 void AuctionHouseMgr::UpdatePendingAuctions()
@@ -655,6 +766,9 @@ void AuctionHouseObject::Update()
         if (!auction->bidder && auction->bid == 0)
         {
             sAuctionMgr->SendAuctionExpiredMail(auction, trans);
+			ObjectGuid ownerGuid = ObjectGuid::Create<HighGuid::Player>(auction->owner);
+			uint32 ownerAccId = sCharacterCache->GetCharacterAccountIdByGuid(ownerGuid);
+			UpdateAuctionHistory(ownerAccId, auction->itemGUIDLow, "EXPIRED", true);
             sScriptMgr->OnAuctionExpire(this, auction);
         }
         ///- Or perform the transaction
@@ -665,6 +779,11 @@ void AuctionHouseObject::Update()
             //we send the money to the seller
             sAuctionMgr->SendAuctionSuccessfulMail(auction, trans);
             sAuctionMgr->SendAuctionWonMail(auction, trans);
+
+			ObjectGuid ownerGuid = ObjectGuid::Create<HighGuid::Player>(auction->owner);
+			uint32 ownerAccId = sCharacterCache->GetCharacterAccountIdByGuid(ownerGuid);
+			UpdateAuctionHistory(ownerAccId, auction->itemGUIDLow, "SOLDOUT", true);
+
             sScriptMgr->OnAuctionSuccessful(this, auction);
         }
 
@@ -882,9 +1001,20 @@ bool AuctionEntry::BuildAuctionInfo(WorldPacket& data, Item* sourceItem) const
 
 uint32 AuctionEntry::GetAuctionCut() const
 {
-    int32 cut = int32(CalculatePct(bid, auctionHouseEntry->ConsignmentRate) * sWorld->getRate(RATE_AUCTION_CUT));
+	int32 cut = int32(CalculatePct(bid, 15));
+
+    if (IsCustomAuction(itemGUIDLow))
+        cut = int32(CalculatePct(bid, 25));
+
     return std::max(cut, 0);
 }
+
+/*uint32 AuctionEntry::GetAuctionCut() const
+{
+	int32 cut = int32(CalculatePct(bid, auctionHouseEntry->ConsignmentRate) * sWorld->getRate(RATE_AUCTION_CUT));
+
+	return std::max(cut, 0);
+}*/
 
 /// the sum of outbid is (1% from current bid)*5, if bid is very small, it is 1c
 uint32 AuctionEntry::GetAuctionOutBid() const

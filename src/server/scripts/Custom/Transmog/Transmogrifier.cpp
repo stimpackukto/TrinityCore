@@ -58,6 +58,8 @@ Cant transmogrify rediculus items // Foereaper: would be fun to stab people with
 #include <tuple>
 #include <algorithm>
 
+#include "CustomRP.h"
+
 // ── 이 파일 내부 전용 RP 유틸 ────────────────────────────────────────────────
 namespace RP
 {
@@ -249,6 +251,48 @@ static uint32 CountPendingEquipmentItems(Player* player)
     return count;
 }
 
+static inline uint32 GetAccountId(Player* player)
+{
+    return (player && player->GetSession()) ? player->GetSession()->GetAccountId() : 0;
+}
+
+static inline uint32 GetPlayerGuidLow(Player* player)
+{
+    return player ? static_cast<uint32>(player->GetGUID().GetCounter()) : 0;
+}
+
+static inline uint32 GetGuildTechTransmogCost(Player* player, uint32 baseCost, uint32& discount)
+{
+    uint32 accountId = GetAccountId(player);
+    uint32 guid = GetPlayerGuidLow(player);
+
+    return ApplyGuildTechDiscount(
+        accountId,
+        guid,
+        "r2c",
+        baseCost,
+        20,
+        discount
+    );
+}
+
+static inline std::string MakeTransmogCostText(Player* player, uint32 baseCost)
+{
+    uint32 discount = 0;
+    uint32 finalCost = GetGuildTechTransmogCost(player, baseCost, discount);
+
+    if (discount > 0)
+    {
+        return Trinity::StringFormat(
+            "RP {} → RP {} |cFF3ECB3C(길드 테크니크 20% 할인)|r",
+            baseCost,
+            finalCost
+        );
+    }
+
+    return Trinity::StringFormat("RP {}", baseCost);
+}
+
 class CS_Transmogrification : public CreatureScript
 {
 public:
@@ -394,20 +438,43 @@ public:
                 const long long rpNow = RP::Get(accountId);
 
                 const uint32 pendingItems = CountPendingEquipmentItems(player);
-                const uint32 rpCost = pendingItems * RP_COST_PER_ITEM;
+				const uint32 baseRpCost = pendingItems * RP_COST_PER_ITEM;
 
-                std::string line =
-                    "|TInterface/ICONS/INV_Enchant_EssenceCosmicGreater:30:30:-18:0|t보류 중인 형상변환 저장";
+				uint32 guildDiscount = 0;
+				const uint32 rpCost = GetGuildTechTransmogCost(player, baseRpCost, guildDiscount);
 
-                line += " (RP " + std::to_string(rpCost) + " / 보유 " + std::to_string(rpNow) + ")";
+				std::string line =
+					"|TInterface/ICONS/INV_Enchant_EssenceCosmicGreater:30:30:-18:0|t보류 중인 형상변환 저장";
 
-                std::string confirm =
-                    "보류 중인 형상변환이 있는 모든 착용 장비에 외형이 저장되며,\n"
-                    "해당 아이템은 귀속 처리되고 환불/거래가 불가해집니다.\n\n"
-                    "비용: 장비 1개당 RP 7000\n"
-                    "현재 보류 장비: " + std::to_string(pendingItems) + "개\n"
-                    "총 비용: RP " + std::to_string(rpCost) + "\n\n"
-                    "계속 진행하시겠습니까?";
+				if (guildDiscount > 0)
+				{
+					line += " (" + MakeTransmogCostText(player, baseRpCost) + " / 보유 " + std::to_string(rpNow) + ")";
+				}
+				else
+				{
+					line += " (RP " + std::to_string(rpCost) + " / 보유 " + std::to_string(rpNow) + ")";
+				}
+
+				std::string confirm =
+					"보류 중인 형상변환이 있는 모든 착용 장비에 외형이 저장되며,\n"
+					"해당 아이템은 귀속 처리되고 환불/거래가 불가해집니다.\n\n"
+					"비용: 장비 1개당 RP 7000\n"
+					"현재 보류 장비: " + std::to_string(pendingItems) + "개\n";
+
+				if (guildDiscount > 0)
+				{
+					confirm +=
+						"기본 비용: RP " + std::to_string(baseRpCost) + "\n"
+						"길드 테크니크 할인: -" + std::to_string(guildDiscount) + " RP\n"
+						"최종 비용: RP " + std::to_string(rpCost) + "\n\n";
+				}
+				else
+				{
+					confirm +=
+						"총 비용: RP " + std::to_string(rpCost) + "\n\n";
+				}
+
+				confirm += "계속 진행하시겠습니까?";
 
                 AddGossipItemFor(player, GOSSIP_ICON_MONEY_BAG, line, SENDER_TRANSMOG_SAVE, 0, confirm, 0, false);
 
@@ -593,8 +660,11 @@ public:
                     // [RP] 저장 시 RP 차감 → 성공해야만 TransmogrifyPending 수행
                     // ─────────────────────────────────────────────────────────
                     const uint32 accountId = session->GetAccountId();
-                    const uint32 pendingItems = CountPendingEquipmentItems(player);
-                    const uint32 rpCost = pendingItems * RP_COST_PER_ITEM;
+					const uint32 pendingItems = CountPendingEquipmentItems(player);
+					const uint32 baseRpCost = pendingItems * RP_COST_PER_ITEM;
+
+					uint32 guildDiscount = 0;
+					const uint32 rpCost = GetGuildTechTransmogCost(player, baseRpCost, guildDiscount);
 
                     if (rpCost > 0)
                     {
@@ -615,9 +685,23 @@ public:
                     else
                         session->SendNotification("%s", CanTransmogrifyResultMessage(res));
 
-					long long after = RP::Get(accountId) - rpCost;
-					std::string msg = Trinity::StringFormat("잔여 RP: {}",after);
-					ChatHandler(player->GetSession()).SendSysMessage(msg.c_str());
+					long long currentRp = RP::Get(accountId);
+
+					if (guildDiscount > 0)
+					{
+						std::string msg = Trinity::StringFormat(
+							"형상변환 저장 완료: {} RP 소모, 길드 테크니크 장비의 관리 {} RP 할인, 잔여 RP: {}",
+							rpCost,
+							guildDiscount,
+							currentRp
+						);
+						ChatHandler(player->GetSession()).SendSysMessage(msg.c_str());
+					}
+					else
+					{
+						std::string msg = Trinity::StringFormat("잔여 RP: {}", currentRp);
+						ChatHandler(player->GetSession()).SendSysMessage(msg.c_str());
+					}
 
                     OnGossipHello(player, creature);
                 } break;

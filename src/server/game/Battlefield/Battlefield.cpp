@@ -478,23 +478,36 @@ void Battlefield::HideNpc(Creature* creature)
     creature->SetReactState(REACT_PASSIVE);
     creature->SetUnitFlag(UNIT_FLAG_NON_ATTACKABLE | UNIT_FLAG_UNINTERACTIBLE);
     creature->SetPhaseMask(2, true);
-    creature->DisappearAndDie();
+ /*   creature->DisappearAndDie();*/
     creature->SetVisible(false);
 }
 
 void Battlefield::ShowNpc(Creature* creature, bool aggressive)
 {
+    if (!creature)
+        return;
+
     creature->SetPhaseMask(1, true);
-    creature->SetVisible(true);
-    creature->RemoveUnitFlag(UNIT_FLAG_NON_ATTACKABLE | UNIT_FLAG_UNINTERACTIBLE);
+
     if (!creature->IsAlive())
         creature->Respawn(true);
+
+    creature->SetVisible(true);
+    creature->RemoveUnitFlag(UNIT_FLAG_NON_ATTACKABLE | UNIT_FLAG_UNINTERACTIBLE);
+
     if (aggressive)
+    {
         creature->SetReactState(REACT_AGGRESSIVE);
+
+        if (Unit* target = creature->SelectNearestTarget(80.0f))
+            if (creature->AI())
+                creature->AI()->AttackStart(target);
+    }
     else
     {
         creature->SetUnitFlag(UNIT_FLAG_NON_ATTACKABLE);
         creature->SetReactState(REACT_PASSIVE);
+        creature->CombatStop();
     }
 }
 
