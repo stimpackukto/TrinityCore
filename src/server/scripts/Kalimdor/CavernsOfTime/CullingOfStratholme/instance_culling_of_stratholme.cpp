@@ -7,12 +7,48 @@
  * option) any later version.
  *
  * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
- * more details.
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License along
  * with this program. If not, see <http://www.gnu.org/licenses/>.
+ */
+
+/*
+ * Custom Update - 2026-06-30
+ *
+ * Culling of Stratholme Arthas stability fix
+ *
+ * - Added Arthas watchdog event.
+ * - Arthas is checked during active dungeon progress.
+ * - If Arthas disappears or dies unexpectedly, the instance schedules a safe respawn.
+ * - Existing instance progress flow is preserved.
+ */
+
+/*
+ * Custom Update - 2026-07-17
+ *
+ * Culling of Stratholme Arthas purge transition watchdog fix
+ *
+ * - Do not respawn Arthas back into the active entrance RP.
+ * - Recover a missing Arthas at the next checkpoint instead of replaying that RP.
+ */
+
+/*
+ * Custom Update - 2026-07-17
+ *
+ * Culling of Stratholme Arthas watchdog RP replay fix
+ *
+ * - Distinguish scripted transition states from ordinary Arthas respawn states.
+ * - Never respawn Arthas directly into the middle of a scripted RP transition.
+ */
+
+/*
+ * Custom Update - 2026-07-17
+ *
+ * Culling of Stratholme Arthas transition checkpoint recovery
+ *
+ * - If Arthas is genuinely missing during either opening RP, advance to that
+ *   sequence's next stable checkpoint instead of replaying or stalling it.
  */
 
 #include "culling_of_stratholme.h"
@@ -49,6 +85,9 @@ enum COSEvents
 {
     EVENT_GUARDIAN_TICK = 1,
     EVENT_RESPAWN_ARTHAS,
+    EVENT_ARTHAS_WATCHDOG,
+    EVENT_ARTHAS_RECOVER_UTHER_RP,
+    EVENT_ARTHAS_RECOVER_PURGE_RP,
     EVENT_CRIER_CALL_TO_GATES,
     EVENT_SCOURGE_WAVE,
     EVENT_CRIER_ANNOUNCE_WAVE
@@ -161,6 +200,24 @@ COSProgressStates GetStableStateFor(COSProgressStates const state)
             return GAUNTLET_COMPLETE;
         case COMPLETE:
             return COMPLETE;
+    }
+}
+
+static bool ShouldRunArthasWatchdog(COSProgressStates state)
+{
+    switch (state)
+    {
+        case UTHER_TALK:
+        case PURGE_PENDING:
+        case PURGE_STARTING:
+        case WAVES_IN_PROGRESS:
+        case TOWN_HALL_PENDING:
+        case TOWN_HALL_COMPLETE:
+        case GAUNTLET_PENDING:
+        case GAUNTLET_COMPLETE:
+            return true;
+        default:
+            return false;
     }
 }
 
@@ -525,10 +582,78 @@ class instance_culling_of_stratholme : public InstanceMapScript
                             break;
                         }
                         case EVENT_RESPAWN_ARTHAS:
+                        {
+                            if (_currentState <= CRATES_DONE)
+                                break;
+
+                            Creature* arthas = instance->GetCreature(_arthasGUID);
+
+                            if (arthas && arthas->IsAlive())
+                            {
+                                events.CancelEvent(EVENT_RESPAWN_ARTHAS);
+                                break;
+                            }
+
+                            if (arthas)
+                                arthas->DespawnOrUnsummon();
+
                             TC_LOG_DEBUG("scripts.cos", "instance_culling_of_stratholme::Update: Spawning new Arthas for instance...");
-                            instance->SummonCreature(NPC_ARTHAS, GetArthasSnapbackFor(_currentState));
+
+                            _arthasGUID = ObjectGuid::Empty;
+
+                            if (Creature* newArthas = instance->SummonCreature(NPC_ARTHAS, GetArthasSnapbackFor(_currentState)))
+                            {
+                                _arthasGUID = newArthas->GetGUID();
+                                newArthas->setActive(true);
+                            }
+
                             events.CancelEvent(EVENT_RESPAWN_ARTHAS); // make sure we don't have two scheduled
                             break;
+                        }
+                        case EVENT_ARTHAS_RECOVER_UTHER_RP:
+                            if (_currentState == UTHER_TALK)
+                            {
+                                TC_LOG_WARN("scripts.cos", "instance_culling_of_stratholme::Update: Arthas is missing during the Uther/Jaina RP. Advancing to the purge dialogue.");
+                                SetInstanceProgress(PURGE_PENDING, true);
+                            }
+                            break;
+                        case EVENT_ARTHAS_RECOVER_PURGE_RP:
+                            if (_currentState == PURGE_STARTING)
+                            {
+                                TC_LOG_WARN("scripts.cos", "instance_culling_of_stratholme::Update: Arthas is missing during the purge transition. Advancing to the wave event.");
+                                SetInstanceProgress(WAVES_IN_PROGRESS, false);
+                            }
+                            break;
+                        case EVENT_ARTHAS_WATCHDOG:
+                        {
+                            if (ShouldRunArthasWatchdog(_currentState))
+                            {
+                                Creature* arthas = instance->GetCreature(_arthasGUID);
+
+                                if (!arthas || !arthas->IsAlive())
+                                {
+                                    _arthasGUID = ObjectGuid::Empty;
+
+                                    if (_currentState == UTHER_TALK)
+                                    {
+                                        events.RescheduleEvent(EVENT_ARTHAS_RECOVER_UTHER_RP, 1s);
+                                        break;
+                                    }
+
+                                    if (_currentState == PURGE_STARTING)
+                                    {
+                                        events.RescheduleEvent(EVENT_ARTHAS_RECOVER_PURGE_RP, 1s);
+                                        break;
+                                    }
+
+                                    TC_LOG_DEBUG("scripts.cos", "instance_culling_of_stratholme::Update: Arthas watchdog found missing Arthas. Scheduling respawn.");
+                                    events.RescheduleEvent(EVENT_RESPAWN_ARTHAS, 1s);
+                                }
+
+                                events.Repeat(Seconds(5));
+                            }
+                            break;
+                        }
                         case EVENT_CRIER_CALL_TO_GATES:
                             if (_currentState == CRATES_DONE)
                                 if (Creature* crier = instance->GetCreature(_crierGUID))
@@ -670,22 +795,44 @@ class instance_culling_of_stratholme : public InstanceMapScript
                 {   // there might be an Arthas instance in the dungeon somewhere
                     // notify him of the change so he can adjust
                     Creature* arthas = instance->GetCreature(_arthasGUID);
+
+                    if (arthas && !arthas->IsAlive())
+                    {
+                        arthas->DespawnOrUnsummon();
+                        arthas = nullptr;
+                        _arthasGUID = ObjectGuid::Empty;
+                    }
+
                     if (arthas)
                     {
                         if (force)
                         {
                             arthas->DespawnOrUnsummon();
                             arthas = nullptr;
+                            _arthasGUID = ObjectGuid::Empty;
                         }
                         else
                             arthas->AI()->DoAction(-ACTION_PROGRESS_UPDATE);
                     }
 
                     if (!arthas) // if there is currently no arthas, then we need to spawn one
-                        events.ScheduleEvent(EVENT_RESPAWN_ARTHAS, 1s);
+                        events.RescheduleEvent(EVENT_RESPAWN_ARTHAS, 1s);
+
+                    if (ShouldRunArthasWatchdog(state))
+                        events.RescheduleEvent(EVENT_ARTHAS_WATCHDOG, 5s);
+                    else
+                        events.CancelEvent(EVENT_ARTHAS_WATCHDOG);
                 }
-                else if (Creature* arthas = instance->GetCreature(_arthasGUID)) // there shouldn't be any Arthas around
-                    arthas->DespawnOrUnsummon();
+                else
+                {
+                    events.CancelEvent(EVENT_ARTHAS_WATCHDOG);
+                    events.CancelEvent(EVENT_RESPAWN_ARTHAS);
+
+                    if (Creature* arthas = instance->GetCreature(_arthasGUID)) // there shouldn't be any Arthas around
+                        arthas->DespawnOrUnsummon();
+
+                    _arthasGUID = ObjectGuid::Empty;
+                }
 
                 /* World state management */
                 // Plague crates
@@ -763,7 +910,12 @@ class instance_culling_of_stratholme : public InstanceMapScript
                     }
 
                     SpawnInfiniteCorruptor();
-                    events.RescheduleEvent(EVENT_RESPAWN_ARTHAS, 1s);
+
+                    if (_currentState > CRATES_DONE)
+                        events.RescheduleEvent(EVENT_RESPAWN_ARTHAS, 1s);
+
+                    if (ShouldRunArthasWatchdog(_currentState))
+                        events.RescheduleEvent(EVENT_ARTHAS_WATCHDOG, 5s);
                 }
 
                 SaveToDB();

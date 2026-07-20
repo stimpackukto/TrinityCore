@@ -429,6 +429,9 @@ void WorldSession::HandleLogoutCancelOpcode(WorldPackets::Character::LogoutCance
 
 void WorldSession::HandleTogglePvP(WorldPackets::Misc::TogglePvP& togglePvP)
 {
+	if (sWorld->IsPvPRealm())
+		return;
+
     // this opcode can be used in two ways: Either set explicit new status or toggle old status
     if (togglePvP.Enable)
     {

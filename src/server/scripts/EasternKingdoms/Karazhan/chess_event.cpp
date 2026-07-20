@@ -958,9 +958,10 @@ struct spell_king_primary : public SpellScript
 //pawn
 // 37406 - Heroic Blow
 // 37413 - Vicious Strike
-struct spell_chess : public SpellScript
+
+struct spell_chess_cone : public SpellScript
 {
-    PrepareSpellScript(spell_chess);
+    PrepareSpellScript(spell_chess_cone);
 
     void FilterTargets(std::list<WorldObject*>& targets)
     {
@@ -969,13 +970,40 @@ struct spell_chess : public SpellScript
             faction = GetCaster()->GetFaction();
         else
             faction = GetCaster()->GetFaction() == FACTION_ID_CHESS_ALLIANCE ? FACTION_ID_CHESS_HORDE : FACTION_ID_CHESS_ALLIANCE;
+
         targets.remove_if(FactionCheck(faction));
     }
 
     void Register() override
     {
-        OnObjectAreaTargetSelect += SpellObjectAreaTargetSelectFn(spell_chess::FilterTargets, EFFECT_0, TARGET_UNIT_CONE_ENTRY);
-        OnObjectAreaTargetSelect += SpellObjectAreaTargetSelectFn(spell_chess::FilterTargets, EFFECT_0, TARGET_UNIT_SRC_AREA_ENTRY);
+        OnObjectAreaTargetSelect += SpellObjectAreaTargetSelectFn(
+            spell_chess_cone::FilterTargets,
+            EFFECT_0,
+            TARGET_UNIT_CONE_ENTRY);
+    }
+};
+
+struct spell_chess_area : public SpellScript
+{
+    PrepareSpellScript(spell_chess_area);
+
+    void FilterTargets(std::list<WorldObject*>& targets)
+    {
+        uint32 faction;
+        if (GetSpellInfo()->Id == SPELL_HEROISM || GetSpellInfo()->Id == SPELL_BLOODLUST)
+            faction = GetCaster()->GetFaction();
+        else
+            faction = GetCaster()->GetFaction() == FACTION_ID_CHESS_ALLIANCE ? FACTION_ID_CHESS_HORDE : FACTION_ID_CHESS_ALLIANCE;
+
+        targets.remove_if(FactionCheck(faction));
+    }
+
+    void Register() override
+    {
+        OnObjectAreaTargetSelect += SpellObjectAreaTargetSelectFn(
+            spell_chess_area::FilterTargets,
+            EFFECT_0,
+            TARGET_UNIT_SRC_AREA_ENTRY);
     }
 };
 
@@ -1380,7 +1408,8 @@ void AddSC_chess_event()
     RegisterKarazhanCreatureAI(npc_chess_piece_king);
     RegisterKarazhanCreatureAI(npc_chess_move_trigger);
     RegisterSpellScript(spell_king_primary);
-    RegisterSpellScript(spell_chess);
+    RegisterSpellScript(spell_chess_cone);
+	RegisterSpellScript(spell_chess_area);
     RegisterSpellScript(spell_change_facing);
     RegisterSpellScript(spell_control_piece);
     RegisterSpellScript(spell_move_to_square);

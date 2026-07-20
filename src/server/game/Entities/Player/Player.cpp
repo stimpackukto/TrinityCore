@@ -109,6 +109,321 @@
 #include "WorldSession.h"
 #include "WorldStatePackets.h"
 
+
+namespace
+{
+    struct PlayerCombatRangeNoticeState
+    {
+        ObjectGuid lastTargetGuid;
+        bool wasInCombatRange = false;
+        uint32 checkTimer = 0;
+        uint32 notifyCooldown = 0;
+    };
+
+    static std::unordered_map<uint64, PlayerCombatRangeNoticeState> sPlayerCombatRangeNoticeStates;
+
+    static constexpr uint32 COMBAT_RANGE_NOTICE_CHECK_INTERVAL = 200;
+    static constexpr uint32 COMBAT_RANGE_NOTICE_COOLDOWN = 1500;
+
+	static bool IsAlwaysPvPRealm()
+	{
+		return sWorld->IsPvPRealm();
+	}
+
+	static bool ShouldForceAlwaysPvP(Player const* player)
+	{
+		if (!player)
+			return false;
+
+		if (player->pvpInfo.IsInNoPvPArea)
+			return false;
+
+		if (!IsAlwaysPvPRealm())
+			return false;
+
+		if (player->IsGameMaster())
+			return false;
+
+		if (player->InBattleground() || player->InArena())
+			return false;
+
+		return true;
+	}
+
+	static bool ClearAlwaysPvPInNoPvPArea(Player* player)
+	{
+		if (!player)
+			return false;
+
+		if (!IsAlwaysPvPRealm())
+			return false;
+
+		if (player->IsGameMaster())
+			return false;
+
+		if (player->InBattleground() || player->InArena())
+			return false;
+
+		if (!player->pvpInfo.IsInNoPvPArea)
+			return false;
+
+		if (!player->IsPvP() &&
+			!player->pvpInfo.IsHostile &&
+			player->pvpInfo.EndTimer == 0 &&
+			!player->HasFlag(PLAYER_FLAGS, PLAYER_FLAGS_IN_PVP) &&
+			!player->HasFlag(PLAYER_FLAGS, PLAYER_FLAGS_PVP_TIMER))
+			return true;
+
+		player->pvpInfo.IsHostile = false;
+		player->pvpInfo.EndTimer = 0;
+		player->RemoveFlag(PLAYER_FLAGS, PLAYER_FLAGS_IN_PVP);
+		player->RemoveFlag(PLAYER_FLAGS, PLAYER_FLAGS_PVP_TIMER);
+		player->UpdatePvP(false, true);
+		return true;
+	}
+
+	static void ForceAlwaysPvP(Player* player)
+	{
+		if (!ShouldForceAlwaysPvP(player))
+			return;
+
+		if (player->pvpInfo.IsHostile &&
+			player->pvpInfo.EndTimer == 0 &&
+			player->HasFlag(PLAYER_FLAGS, PLAYER_FLAGS_IN_PVP) &&
+			!player->HasFlag(PLAYER_FLAGS, PLAYER_FLAGS_PVP_TIMER))
+			return;
+
+		player->pvpInfo.IsHostile = true;
+		player->pvpInfo.EndTimer = 0;
+		player->SetFlag(PLAYER_FLAGS, PLAYER_FLAGS_IN_PVP);
+		player->RemoveFlag(PLAYER_FLAGS, PLAYER_FLAGS_PVP_TIMER);
+		player->UpdatePvP(true, true);
+	}
+
+    static uint64 GetCombatRangeNoticePlayerKey(Player const* player)
+    {
+        if (!player)
+            return 0;
+
+        return player->GetGUID().GetCounter();
+    }
+
+    static float GetPlayerCombatNoticeRange(Player const* player)
+    {
+        if (!player)
+            return 5.0f;
+
+        float range = 5.0f;
+
+        switch (player->GetClass())
+        {
+            case CLASS_HUNTER:
+                range = 35.0f;
+
+                // 매의 눈 / Hawk Eye
+                if (player->HasSpell(19500))
+                    range = 41.0f;
+                else if (player->HasSpell(19499))
+                    range = 39.0f;
+                else if (player->HasSpell(19498))
+                    range = 37.0f;
+
+                break;
+
+            case CLASS_MAGE:
+                range = 30.0f;
+
+                // Arcane Reach / Flame Throwing / Arctic Reach
+                if (player->HasSpell(12839) || player->HasSpell(12353) || player->HasSpell(16758))
+                    range = 36.0f;
+                else if (player->HasSpell(11222) || player->HasSpell(11100) || player->HasSpell(16757))
+                    range = 33.0f;
+
+                break;
+
+            case CLASS_WARLOCK:
+                range = 30.0f;
+
+                // Grim Reach / Destructive Reach
+                if (player->HasSpell(18219) || player->HasSpell(17918))
+                    range = 36.0f;
+                else if (player->HasSpell(18218) || player->HasSpell(17917))
+                    range = 33.0f;
+
+                break;
+
+            case CLASS_PRIEST:
+                range = 30.0f;
+
+                // Shadow Reach / Holy Reach
+                if (player->HasSpell(15312) || player->HasSpell(27790))
+                    range = 36.0f;
+                else if (player->HasSpell(15273) || player->HasSpell(27789))
+                    range = 33.0f;
+
+                break;
+
+            case CLASS_SHAMAN:
+                range = 30.0f;
+
+                // Elemental Reach
+                if (player->HasSpell(29000))
+                    range = 36.0f;
+                else if (player->HasSpell(28999))
+                    range = 33.0f;
+
+                break;
+
+            case CLASS_DRUID:
+                range = 30.0f;
+
+                // Nature's Reach
+                if (player->HasSpell(16820))
+                    range = 36.0f;
+                else if (player->HasSpell(16819))
+                    range = 33.0f;
+
+                break;
+
+            case CLASS_PALADIN:
+                range = 20.0f;
+
+                // Improved Judgements
+                if (player->HasSpell(25957))
+                    range = 30.0f;
+
+                break;
+
+            case CLASS_WARRIOR:
+            case CLASS_ROGUE:
+            case CLASS_DEATH_KNIGHT:
+            default:
+                range = 5.0f;
+                break;
+        }
+
+        return range;
+    }
+
+    static void ResetPlayerCombatRangeNoticeState(Player* player)
+    {
+        if (!player)
+            return;
+
+        uint64 const key = GetCombatRangeNoticePlayerKey(player);
+        if (!key)
+            return;
+
+        auto itr = sPlayerCombatRangeNoticeStates.find(key);
+        if (itr == sPlayerCombatRangeNoticeStates.end())
+            return;
+
+        itr->second.lastTargetGuid.Clear();
+        itr->second.wasInCombatRange = false;
+        itr->second.checkTimer = 0;
+        itr->second.notifyCooldown = 0;
+    }
+
+    static void ClearPlayerCombatRangeNoticeState(Player* player)
+    {
+        if (!player)
+            return;
+
+        uint64 const key = GetCombatRangeNoticePlayerKey(player);
+        if (!key)
+            return;
+
+        sPlayerCombatRangeNoticeStates.erase(key);
+    }
+
+    static bool IsValidCombatRangeNoticeTarget(Player* player, Unit* target)
+    {
+        if (!player || !target)
+            return false;
+
+        if (target == player)
+            return false;
+
+        if (!target->IsInWorld() || !target->IsAlive())
+            return false;
+
+        if (target->GetMap() != player->GetMap())
+            return false;
+
+        if (!player->IsValidAttackTarget(target))
+            return false;
+
+        return true;
+    }
+
+    static void UpdatePlayerCombatRangeNotice(Player* player, uint32 diff)
+    {
+        if (!player || !player->IsInWorld() || !player->IsAlive())
+            return;
+
+        WorldSession* session = player->GetSession();
+        if (!session)
+            return;
+
+        uint64 const key = GetCombatRangeNoticePlayerKey(player);
+        if (!key)
+            return;
+
+        PlayerCombatRangeNoticeState& state = sPlayerCombatRangeNoticeStates[key];
+
+        if (state.checkTimer > diff)
+        {
+            state.checkTimer -= diff;
+            return;
+        }
+
+        state.checkTimer = COMBAT_RANGE_NOTICE_CHECK_INTERVAL;
+
+        if (state.notifyCooldown > diff)
+            state.notifyCooldown -= diff;
+        else
+            state.notifyCooldown = 0;
+
+        ObjectGuid const targetGuid = player->GetTarget();
+
+        if (targetGuid.IsEmpty())
+        {
+            state.lastTargetGuid.Clear();
+            state.wasInCombatRange = false;
+            return;
+        }
+
+        Unit* target = ObjectAccessor::GetUnit(*player, targetGuid);
+
+        if (!IsValidCombatRangeNoticeTarget(player, target))
+        {
+            state.lastTargetGuid.Clear();
+            state.wasInCombatRange = false;
+            return;
+        }
+
+        if (state.lastTargetGuid != targetGuid)
+        {
+            state.lastTargetGuid = targetGuid;
+            state.wasInCombatRange = false;
+            state.notifyCooldown = 0;
+        }
+
+        float const noticeRange = GetPlayerCombatNoticeRange(player);
+
+        bool const nowInCombatRange = player->IsWithinDistInMap(target, noticeRange);
+
+        if (nowInCombatRange && !state.wasInCombatRange && state.notifyCooldown == 0)
+        {
+            session->SendAreaTriggerMessage("사거리 확보!");
+            state.notifyCooldown = COMBAT_RANGE_NOTICE_COOLDOWN;
+        }
+
+        state.wasInCombatRange = nowInCombatRange;
+    }
+}
+
+
 #define ZONE_UPDATE_INTERVAL (1*IN_MILLISECONDS)
 
 // corpse reclaim times
@@ -342,6 +657,8 @@ Player::Player(WorldSession* session): Unit(true)
 
 Player::~Player()
 {
+	ClearPlayerCombatRangeNoticeState(this);
+
     // it must be unloaded already in PlayerLogout and accessed only for logged in player
     //m_social = nullptr;
 
@@ -924,6 +1241,8 @@ void Player::Update(uint32 p_time)
     if (!IsInWorld())
         return;
 
+	UpdatePlayerCombatRangeNotice(this, p_time);
+
     // undelivered mail
     if (m_nextMailDelivereTime && m_nextMailDelivereTime <= GameTime::GetGameTime())
     {
@@ -948,6 +1267,9 @@ void Player::Update(uint32 p_time)
     SetCanDelayTeleport(false);
 
     time_t now = GameTime::GetGameTime();
+
+	ClearAlwaysPvPInNoPvPArea(this);
+	ForceAlwaysPvP(this);
 
     UpdatePvPFlag(now);
 
@@ -20565,6 +20887,12 @@ void Player::ResetContestedPvP()
 
 void Player::UpdatePvPFlag(time_t currTime)
 {
+	if (ShouldForceAlwaysPvP(this))
+	{
+		ForceAlwaysPvP(this);
+		return;
+	}
+
     if (!IsPvP())
         return;
 
@@ -21947,6 +22275,12 @@ void Player::UpdateHomebindTime(uint32 time)
 
 void Player::InitPvP()
 {
+	if (ShouldForceAlwaysPvP(this))
+	{
+		ForceAlwaysPvP(this);
+		return;
+	}
+
     // pvp flag should stay after relog
     if (HasFlag(PLAYER_FLAGS, PLAYER_FLAGS_IN_PVP))
         UpdatePvP(true, true);
@@ -21976,6 +22310,15 @@ void Player::UpdatePvPState(bool onlyFFA)
     if (onlyFFA)
         return;
 
+	if (ClearAlwaysPvPInNoPvPArea(this))
+		return;
+
+	if (ShouldForceAlwaysPvP(this))
+	{
+		ForceAlwaysPvP(this);
+		return;
+	}
+
     if (pvpInfo.IsHostile)                                  // in hostile area
     {
         if (!IsPvP() || pvpInfo.EndTimer)
@@ -21997,6 +22340,12 @@ void Player::SetPvP(bool state)
 
 void Player::UpdatePvP(bool state, bool _override)
 {
+	if (!state && ShouldForceAlwaysPvP(this))
+	{
+		ForceAlwaysPvP(this);
+		return;
+	}
+
     if (!state || _override)
     {
         SetPvP(state);
@@ -22642,9 +22991,24 @@ void Player::SetPhaseMask(uint32 newPhaseMask, bool update)
         UpdateObjectVisibility();
 }
 
-void Player::InitPrimaryProfessions()
+/*void Player::InitPrimaryProfessions()
 {
     SetFreePrimaryProfessions(sWorld->getIntConfig(CONFIG_MAX_PRIMARY_TRADE_SKILL));
+}*/
+
+void Player::InitPrimaryProfessions()
+{
+    uint16 primaryProfessionCount = uint16(sWorld->getIntConfig(CONFIG_MAX_PRIMARY_TRADE_SKILL));
+
+    QueryResult result = CharacterDatabase.PQuery(
+        "SELECT 1 FROM character_profession_bonus WHERE guid = {} AND enabled = 1 LIMIT 1",
+        GetGUID().GetCounter()
+    );
+
+    if (result)
+        ++primaryProfessionCount;
+
+    SetFreePrimaryProfessions(primaryProfessionCount);
 }
 
 bool Player::ModifyMoney(int32 amount, bool sendError /*= true*/)

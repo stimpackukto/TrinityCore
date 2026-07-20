@@ -63,6 +63,11 @@ class OPvPCapturePointHP : public OPvPCapturePoint
         void ChangeState() override;
         void FillInitialWorldStates(WorldPackets::WorldState::InitWorldStates& packet) override;
 
+		bool Update(uint32 diff) override;
+		void LoadSavedState();
+
+		void ResetToNeutralForWarStart();
+
     private:
         OutdoorPvPHPTowerType m_TowerType;
 };

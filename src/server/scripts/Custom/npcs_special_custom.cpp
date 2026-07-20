@@ -561,9 +561,562 @@ public:
     }
 };
 
+//지뢰
+namespace
+{
+    enum GoblinLandMineData
+    {
+        NPC_GOBLIN_LAND_MINE = 7527,
+
+        SPELL_GOBLIN_LAND_MINE_SUMMON    = 4100,
+        SPELL_GOBLIN_LAND_MINE_EXPLOSION = 4043,
+
+        SPELL_GOBLIN_LAND_MINE_STEALTH = 1784,
+
+        // creature_text GroupID 3
+        // 문구 예: 근처에 지뢰가 매설되어 있습니다.
+        TEXT_MINE_NEAR_WARNING = 3,
+
+		DATA_MINE_OWNER_TEAM = 1,
+		
+		MAP_NORTHREND = 571,
+		ZONE_WINTERGRASP = 4197,
+    };
+
+    static constexpr float WARNING_DISTANCE = 15.0f;
+	static constexpr float REVEAL_DISTANCE  = 5.0f;
+
+	static constexpr float EXPLODE_DISTANCE_NORMAL = 1.0f;
+	static constexpr float EXPLODE_DISTANCE_SIEGE  = 5.0f;
+
+    static constexpr uint32 CHECK_TIMER_MS   = 200;
+    static constexpr uint32 LIFE_TIMER_MS    = 60 * 1000;
+    static constexpr uint32 DESPAWN_AFTER_MS = 500;
+}
+
+struct npc_goblin_land_mine_7527 : public ScriptedAI
+{
+    npc_goblin_land_mine_7527(Creature* creature) : ScriptedAI(creature)
+    {
+    }
+
+    void Reset() override
+    {
+        _warned = false;
+        _exploded = false;
+        _revealed = false;
+		_battlefieldMine = false;
+		_playerMineDbSaved = false;
+		_playerMineOwnerTeam = 2;
+
+        _checkTimer = CHECK_TIMER_MS;
+        _lifeTimer = LIFE_TIMER_MS;
+
+        me->SetReactState(REACT_PASSIVE);
+        me->AttackStop();
+
+        ApplyHiddenState();
+        ApplyMineMapTracking();
+    }
+
+    void IsSummonedBy(WorldObject* summoner) override
+    {
+		Player* ownerPlayer = GetMineOwnerPlayer(summoner);
+        SetMineOwnerTeam(summoner);
+
+        ApplyMineFaction();
+        ApplyHiddenState();
+        ApplyMineMapTracking();
+
+		SavePlayerMineSnapshot(ownerPlayer);
+
+        me->UpdateObjectVisibility(true);
+    }
+
+	void SetData(uint32 type, uint32 data) override
+	{
+		if (type != DATA_MINE_OWNER_TEAM)
+			return;
+
+		DeletePlayerMineSnapshot();
+
+		_battlefieldMine = true;
+
+		// BattlefieldWG에서는 TeamId가 들어온다.
+		// TEAM_ALLIANCE = 0
+		// TEAM_HORDE    = 1
+		//
+		// 지뢰 감지 로직은 player->GetTeam() 값과 비교하므로
+		// 반드시 ALLIANCE / HORDE 값으로 변환해서 저장한다.
+		if (data == TEAM_ALLIANCE)
+		{
+			_mineTeam = ALLIANCE;
+		}
+		else if (data == TEAM_HORDE)
+		{
+			_mineTeam = HORDE;
+		}
+		else
+		{
+			_mineTeam = 0;
+		}
+
+		ApplyHiddenState();
+		ApplyMineMapTracking();
+
+		me->SetReactState(REACT_PASSIVE);
+		me->AttackStop();
+		me->UpdateObjectVisibility(true);
+
+		TC_LOG_INFO(
+			"bg.battlefield",
+			"WG defender mine registered. guid={}, data={}, mineTeam={}, faction={}",
+			me->GetGUID().ToString(),
+			uint32(data),
+			uint32(_mineTeam),
+			uint32(me->GetFaction())
+		);
+	}
+
+    void UpdateAI(uint32 diff) override
+    {
+        if (_exploded)
+            return;
+
+        UpdateLifeTimer(diff);
+        UpdateDetectTimer(diff);
+    }
+
+private:
+    bool _warned = false;
+    bool _exploded = false;
+    bool _revealed = false;
+	bool _battlefieldMine = false;
+	bool _playerMineDbSaved = false;
+
+    uint32 _checkTimer = CHECK_TIMER_MS;
+    uint32 _lifeTimer = LIFE_TIMER_MS;
+
+    uint32 _mineTeam = 0;
+	uint8 _playerMineOwnerTeam = 2;
+
+    void SetMineOwnerTeam(WorldObject* summoner)
+    {
+        _mineTeam = 0;
+
+        Unit* summonerUnit = summoner ? summoner->ToUnit() : nullptr;
+
+        if (!summonerUnit)
+            return;
+
+        if (Player* player = summonerUnit->ToPlayer())
+        {
+            _mineTeam = player->GetTeam();
+            return;
+        }
+
+        if (Player* ownerPlayer = summonerUnit->GetCharmerOrOwnerPlayerOrPlayerItself())
+        {
+            _mineTeam = ownerPlayer->GetTeam();
+            return;
+        }
+    }
+
+	Player* GetMineOwnerPlayer(WorldObject* summoner) const
+	{
+		Unit* summonerUnit = summoner ? summoner->ToUnit() : nullptr;
+
+		if (!summonerUnit)
+			return nullptr;
+
+		if (Player* player = summonerUnit->ToPlayer())
+			return player;
+
+		return summonerUnit->GetCharmerOrOwnerPlayerOrPlayerItself();
+	}
+
+	uint8 GetStatusBoardTeam(uint32 team) const
+	{
+		if (team == ALLIANCE)
+			return 0;
+
+		if (team == HORDE)
+			return 1;
+
+		return 2;
+	}
+
+	bool IsWintergraspLake() const
+	{
+		return me->GetMapId() == MAP_NORTHREND && me->GetZoneId() == ZONE_WINTERGRASP;
+	}
+
+	void SavePlayerMineSnapshot(Player* ownerPlayer)
+	{
+		if (_battlefieldMine)
+			return;
+
+		if (_playerMineDbSaved)
+			return;
+
+		if (!ownerPlayer)
+			return;
+
+		if (!IsWintergraspLake())
+			return;
+
+		uint8 ownerTeam = GetStatusBoardTeam(ownerPlayer->GetTeam());
+
+		if (ownerTeam > 1)
+			return;
+
+		_playerMineOwnerTeam = ownerTeam;
+
+		LoginDatabase.PExecute(
+			"REPLACE INTO appdata.wg_player_mines "
+			"(mine_guid, owner_guid, owner_account, owner_team, map_id, zone_id, pos_x, pos_y, pos_z, active) "
+			"VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, 1)",
+			uint64(me->GetGUID().GetCounter()),
+			uint32(ownerPlayer->GetGUID().GetCounter()),
+			uint32(ownerPlayer->GetSession()->GetAccountId()),
+			uint32(ownerTeam),
+			uint32(me->GetMapId()),
+			uint32(me->GetZoneId()),
+			me->GetPositionX(),
+			me->GetPositionY(),
+			me->GetPositionZ()
+		);
+
+		_playerMineDbSaved = true;
+
+		TC_LOG_INFO(
+			"bg.battlefield",
+			"WG player mine saved. mineGuid={}, ownerGuid={}, team={}, map={}, zone={}, x={}, y={}, z={}",
+			uint64(me->GetGUID().GetCounter()),
+			uint32(ownerPlayer->GetGUID().GetCounter()),
+			uint32(ownerTeam),
+			uint32(me->GetMapId()),
+			uint32(me->GetZoneId()),
+			me->GetPositionX(),
+			me->GetPositionY(),
+			me->GetPositionZ()
+		);
+	}
+
+	void DeletePlayerMineSnapshot()
+	{
+		if (!_playerMineDbSaved)
+			return;
+
+		LoginDatabase.PExecute(
+			"DELETE FROM appdata.wg_player_mines "
+			"WHERE mine_guid = {} "
+			"   OR (active = 1 "
+			"       AND map_id = {} "
+			"       AND owner_team = {} "
+			"       AND ABS(pos_x - {}) <= 1.0 "
+			"       AND ABS(pos_y - {}) <= 1.0 "
+			"       AND ABS(pos_z - {}) <= 3.0)",
+			uint64(me->GetGUID().GetCounter()),
+			uint32(me->GetMapId()),
+			uint32(_playerMineOwnerTeam),
+			me->GetPositionX(),
+			me->GetPositionY(),
+			me->GetPositionZ()
+		);
+
+		_playerMineDbSaved = false;
+
+		TC_LOG_INFO(
+			"bg.battlefield",
+			"WG player mine deleted. mineGuid={}, team={}, map={}, x={}, y={}, z={}",
+			uint64(me->GetGUID().GetCounter()),
+			uint32(_playerMineOwnerTeam),
+			uint32(me->GetMapId()),
+			me->GetPositionX(),
+			me->GetPositionY(),
+			me->GetPositionZ()
+		);
+	}
+
+    void ApplyMineFaction()
+    {
+        if (_mineTeam == ALLIANCE)
+        {
+            me->SetFaction(::FACTION_ALLIANCE_GENERIC);
+            return;
+        }
+
+        if (_mineTeam == HORDE)
+        {
+            me->SetFaction(::FACTION_HORDE_GENERIC);
+            return;
+        }
+    }
+
+    void ApplyHiddenState()
+    {
+        if (_revealed)
+            return;
+
+        if (!me->HasAura(SPELL_GOBLIN_LAND_MINE_STEALTH))
+            me->CastSpell(me, SPELL_GOBLIN_LAND_MINE_STEALTH, true);
+    }
+
+    void ApplyMineMapTracking()
+    {
+        me->SetFlag(UNIT_DYNAMIC_FLAGS, UNIT_DYNFLAG_TRACK_UNIT);
+    }
+
+    void RevealMine()
+    {
+        if (_revealed)
+            return;
+
+        _revealed = true;
+
+        me->RemoveAurasDueToSpell(SPELL_GOBLIN_LAND_MINE_STEALTH);
+        me->UpdateObjectVisibility(true);
+    }
+
+    bool IsValidEnemyPlayer(Player* player, float distance) const
+    {
+        if (!player)
+            return false;
+
+        if (!player->IsAlive())
+            return false;
+
+        if (player->IsGameMaster())
+            return false;
+
+        if (!me->IsWithinDistInMap(player, distance))
+            return false;
+
+        if (_mineTeam == ALLIANCE || _mineTeam == HORDE)
+            return player->GetTeam() != _mineTeam;
+
+        return false;
+    }
+
+    bool IsValidEnemyCreature(Unit* unit, float distance) const
+    {
+        if (!unit)
+            return false;
+
+        if (unit == me)
+            return false;
+
+        if (!unit->IsAlive())
+            return false;
+
+        if (!me->IsWithinDistInMap(unit, distance))
+            return false;
+
+        if (!unit->ToCreature())
+            return false;
+
+        if (Player* ownerPlayer = unit->GetCharmerOrOwnerPlayerOrPlayerItself())
+        {
+            if (_mineTeam == ALLIANCE || _mineTeam == HORDE)
+                return ownerPlayer->GetTeam() != _mineTeam;
+
+            return false;
+        }
+
+        return me->IsHostileTo(unit);
+    }
+
+	bool IsSiegeVehicle(Unit* target) const
+	{
+		if (!target)
+			return false;
+
+		Creature* creature = target->ToCreature();
+		if (!creature)
+			return false;
+
+		CreatureTemplate const* creatureTemplate = creature->GetCreatureTemplate();
+		if (!creatureTemplate)
+			return false;
+
+		return creatureTemplate->VehicleId != 0;
+	}
+
+	bool IsValidEnemySiegeCreature(Unit* unit, float distance) const
+	{
+		if (!unit)
+			return false;
+
+		if (!IsSiegeVehicle(unit))
+			return false;
+
+		return IsValidEnemyCreature(unit, distance);
+	}
+
+	bool HasEnemySiegeCreatureInRange(float distance) const
+	{
+		Unit* target = me->SelectNearestTarget(distance);
+
+		if (!target)
+			return false;
+
+		return IsValidEnemySiegeCreature(target, distance);
+	}
+
+    bool HasEnemyPlayerInRange(float distance) const
+    {
+        Map::PlayerList const& players = me->GetMap()->GetPlayers();
+
+        for (Map::PlayerList::const_iterator itr = players.begin(); itr != players.end(); ++itr)
+        {
+            Player* player = itr->GetSource();
+
+            if (IsValidEnemyPlayer(player, distance))
+                return true;
+        }
+
+        return false;
+    }
+
+    bool HasEnemyCreatureInRange(float distance) const
+    {
+        Unit* target = me->SelectNearestTarget(distance);
+
+        if (!target)
+            return false;
+
+        return IsValidEnemyCreature(target, distance);
+    }
+
+    bool HasEnemyUnitInRange(float distance) const
+    {
+        return HasEnemyPlayerInRange(distance) || HasEnemyCreatureInRange(distance);
+    }
+
+    void UpdateDetectTimer(uint32 diff)
+    {
+        if (_checkTimer > diff)
+        {
+            _checkTimer -= diff;
+            return;
+        }
+
+        _checkTimer = CHECK_TIMER_MS;
+
+        // 1야드 안으로 들어오면 즉시 폭발
+        // 공성차는 중심점 거리 문제 때문에 5야드 안으로 들어오면 즉시 폭발
+		if (HasEnemySiegeCreatureInRange(EXPLODE_DISTANCE_SIEGE))
+		{
+			Explode();
+			return;
+		}
+
+		// 플레이어 / 일반 유닛은 기존처럼 1야드 안으로 들어오면 즉시 폭발
+		if (HasEnemyUnitInRange(EXPLODE_DISTANCE_NORMAL))
+		{
+			Explode();
+			return;
+		}
+
+        // 5야드 안으로 들어오면 모습만 드러냄
+        if (HasEnemyUnitInRange(REVEAL_DISTANCE))
+        {
+            RevealMine();
+            return;
+        }
+
+        // 15야드 안으로 들어오면 모습은 숨긴 채 creature_text GroupID 3 경고 1회
+        if (!_warned && HasEnemyUnitInRange(WARNING_DISTANCE))
+        {
+            _warned = true;
+            Talk(TEXT_MINE_NEAR_WARNING);
+            return;
+        }
+    }
+
+    void UpdateLifeTimer(uint32 diff)
+    {
+        if (_lifeTimer > diff)
+        {
+            _lifeTimer -= diff;
+            return;
+        }
+
+		DeletePlayerMineSnapshot();
+
+		me->RemoveFromWorld();
+    }
+
+    void Explode()
+    {
+        if (_exploded)
+            return;
+
+        _exploded = true;
+
+		DeletePlayerMineSnapshot();
+        RevealMine();
+
+        me->CastSpell(me, SPELL_GOBLIN_LAND_MINE_EXPLOSION, true);
+        me->DespawnOrUnsummon(Milliseconds(DESPAWN_AFTER_MS));
+    }
+};
+
+class spell_goblin_land_mine_explosion_4043 : public SpellScript
+{
+    PrepareSpellScript(spell_goblin_land_mine_explosion_4043);
+
+private:
+    static constexpr int32 MINE_DAMAGE_SIEGE_BONUS = 15000;
+
+    bool IsSiegeVehicle(Unit* target) const
+    {
+        if (!target)
+            return false;
+
+        Creature* creature = target->ToCreature();
+
+        if (!creature)
+            return false;
+
+        CreatureTemplate const* creatureTemplate = creature->GetCreatureTemplate();
+
+        if (!creatureTemplate)
+            return false;
+
+        return creatureTemplate->VehicleId != 0;
+    }
+
+    void HandleDamage(SpellEffIndex /*effIndex*/)
+    {
+        Unit* target = GetHitUnit();
+
+        if (!target)
+            return;
+
+        if (!IsSiegeVehicle(target))
+            return;
+
+        SetHitDamage(GetHitDamage() + MINE_DAMAGE_SIEGE_BONUS);
+    }
+
+    void Register() override
+    {
+        OnEffectHitTarget += SpellEffectFn(
+            spell_goblin_land_mine_explosion_4043::HandleDamage,
+            EFFECT_0,
+            SPELL_EFFECT_SCHOOL_DAMAGE
+        );
+    }
+};
+//지뢰끝
+
 
 void AddSC_npcs_special_custom()
 {
     new npc_gold_bank();
 	new npc_sandbox_tiger_vehicle();
+	RegisterCreatureAI(npc_goblin_land_mine_7527);
+	RegisterSpellScript(spell_goblin_land_mine_explosion_4043);
 }

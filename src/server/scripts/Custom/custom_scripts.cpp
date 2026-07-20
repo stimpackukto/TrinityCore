@@ -32,6 +32,8 @@
 #include "Player.h"
 #include "Channel.h"
 #include "ChannelMgr.h"
+#include "DBCStores.h"
+#include "ReputationMgr.h"
 
 #include <unordered_map>
 #include <unordered_set>
@@ -44,6 +46,7 @@
 
 #include "wrathful_set_mgr.h"
 #include "DiscordEvent.h"
+#include "GameObject.h"
 
 #include "Config.h"
 /* ============================================================
@@ -192,6 +195,27 @@ namespace GearScore
 /* ============================================================
  * 입장 제한 처리
  * ============================================================ */
+static constexpr uint32 FACTION_ASHEN_VERDICT_1 = 1156;
+
+static bool HasAshenVerdictNeutralOrHigher(Player* player)
+{
+    if (!player)
+        return false;
+
+    FactionEntry const* factionEntry = sFactionStore.LookupEntry(FACTION_ASHEN_VERDICT_1);
+    if (!factionEntry)
+        return false;
+
+    FactionState const* state = player->GetReputationMgr().GetState(factionEntry);
+    if (!state)
+        return false;
+
+    if (!state->Flags.HasFlag(ReputationFlags::Visible))
+        return false;
+
+    return player->GetReputationMgr().GetRank(factionEntry) >= REP_NEUTRAL;
+}
+
 static bool HasCallOfTheCrusade(Player const* p)
 {
     return p && (p->HasAchieved(kAchCallOfTheCrusade10) ||
@@ -211,6 +235,7 @@ static void KickToFailSpot(Player* p, uint32 fromMap, std::string const& msg)
 
 static constexpr uint32 ALLIANCE_GUILD_ID = 4;
 static constexpr uint32 HORDE_GUILD_ID    = 2;
+static constexpr uint32 AUTO_GUILD_INVITE_DELAY_MS = 10 * IN_MILLISECONDS;
 
 static uint32 GetTargetGuildId(Player* player)
 {
@@ -242,33 +267,65 @@ static void SendGuildInvitePopup(Player* player, uint32 guildId, char const* not
 
         player->GetSession()->SendPacket(&data);
 
-        if (notice && *notice)
+  /*      if (notice && *notice)
 		{
 			std::string msg = Trinity::StringFormat("첫 접속 자동길드초대입니다. 다음접속부터 자동초대 되지 않습니다.");
 			ChatHandler(player->GetSession()).PSendSysMessage("%s", msg.c_str());
-		}
+		} */
     }
 
-//채널 초대
-static void SendChannelInvitePopup(Player* player, char const* notice)
+class AutoGuildInviteEvent : public BasicEvent
+{
+public:
+    explicit AutoGuildInviteEvent(ObjectGuid playerGuid)
+        : _playerGuid(playerGuid)
+    {
+    }
+
+    bool Execute(uint64 /*time*/, uint32 /*diff*/) override
+    {
+        Player* player = ObjectAccessor::FindConnectedPlayer(_playerGuid);
+        if (!player)
+            return true;
+
+        if (player->IsGameMaster())
+            return true;
+
+        if (player->GetGuildId() != 0)
+            return true;
+
+        uint32 gid = GetTargetGuildId(player);
+        if (!gid)
+            return true;
+
+        SendGuildInvitePopup(
+            player,
+            gid,
+            " 자동길드초대입니다."
+        );
+
+        return true;
+    }
+
+private:
+    ObjectGuid _playerGuid;
+};
+
+static void ScheduleAutoGuildInvite(Player* player)
 {
     if (!player || !player->GetSession())
         return;
 
-    static std::string const channelName = "빛의수호자";
+    if (player->IsGameMaster())
+        return;
 
-    WorldPacket data(SMSG_CHANNEL_NOTIFY, 50 + channelName.size() + player->GetName().size());
+    if (player->GetGuildId() != 0)
+        return;
 
-    // 현재 코어에 있는 초대 notice 상수로 교체
-    // 예: CHAT_INVITE_NOTICE 또는 CHAT_PLAYER_INVITED_NOTICE
-    data << uint8(CHAT_INVITE_NOTICE);
-    data << channelName;
-    data << player->GetName();
-
-    player->GetSession()->SendPacket(&data);
-
-    if (notice && *notice)
-        ChatHandler(player->GetSession()).SendSysMessage(notice);
+    player->m_Events.AddEvent(
+        new AutoGuildInviteEvent(player->GetGUID()),
+        player->m_Events.CalculateTime(Milliseconds(AUTO_GUILD_INVITE_DELAY_MS))
+    );
 }
 
 /* =========================
@@ -349,21 +406,8 @@ public:
 			}*/
 		}
 
-		if (!player->IsGameMaster())
-			if (player->GetGuildId() == 0)
-				{
-					uint32 gid = GetTargetGuildId(player);
-					SendGuildInvitePopup(
-						player,
-						gid,
-						" 자동길드초대입니다."
-					);
-				}
+		ScheduleAutoGuildInvite(player);
 
-		SendChannelInvitePopup(
-    player,
-    "빛의수호자 채널 초대 팝업을 보냈습니다."
-);
 		/* ============================================
 		 * 2) TaxiCheater DB 플래그 적용 (기존 로직 유지)
 		 * ============================================ */
@@ -431,7 +475,7 @@ public:
 			CleanupWrathfulItemsFromDB(player);
 		}
 
-        if (!player /*|| player->IsGameMaster()*/)
+        if (!player || player->IsGameMaster())
             return;
 
 		Map* map = player->GetMap();
@@ -464,20 +508,44 @@ public:
         if (mapId != kMapICC && mapId != kMapRS)
             return;
 
-        if (!HasCallOfTheCrusade(player))
-        {
-            KickToFailSpot(player, mapId,
-                "[입장 제한] 십자군의 부름 업적이 필요합니다.");
-            return;
-        }
+/*		if (!HasAshenVerdictNeutralOrHigher(player))
+		{
+			if (!HasCallOfTheCrusade(player))
+			{
+				KickToFailSpot(player, mapId,
+					"[입장 제한] 십자군의 부름 업적이 필요합니다.");
+				return;
+			}
 
-        uint32 gs = GearScore::Total(player);
-        if (gs < kRequireGearScore)
-        {
-            KickToFailSpot(player, mapId,
-                "[입장 제한] GearScore 5000 이상 필요 (현재: "
-                + std::to_string(gs) + ")");
-        }
+			uint32 gs = GearScore::Total(player);
+			if (gs < kRequireGearScore)
+			{
+				KickToFailSpot(player, mapId,
+					"[입장 제한] GearScore 5000 이상 필요 (현재: "
+					+ std::to_string(gs) + ")");
+			}
+		} */
+
+		uint32 gs = GearScore::Total(player);
+		if (!HasCallOfTheCrusade(player) || gs < kRequireGearScore)
+		{
+			uint32 phaseMask = player->GetPhaseMask();
+
+			phaseMask &= ~1; // 기본 1페이즈 제거
+			phaseMask |= 16384;  // 평판작업모드 페이즈 추가
+
+			player->SetPhaseMask(phaseMask, true);
+
+			ChatHandler(player->GetSession()).SendSysMessage(
+				Trinity::StringFormat(
+					"|cffff0000[평판작업모드진입]|r 필요 조건: 십자군의 부름 업적 보유 및 GearScore {} 이상 (현재: {})",
+					kRequireGearScore,
+					gs
+				).c_str()
+			);
+
+			return;
+		}
 
 		CleanupWrathfulItemsFromDB(player);
     }
@@ -772,7 +840,7 @@ public:
 		uint32 mapid = player->GetMapId();
 		uint32 zone = player->GetZoneId();
 		MapEntry const* mEntry = sMapStore.LookupEntry(mapid);
-		if (player->GetLevel() >= 64 || !player->IsAlive() || mEntry->IsBattlegroundOrArena() || player->IsInCombat() || player->HasInvisibilityAura() || player->HasStealthAura() || player->InBattleground() || player->InArena() || zone == 4197)
+		if (player->GetLevel() >= 79 || !player->IsAlive() || mEntry->IsBattlegroundOrArena() || player->IsInCombat() || player->HasInvisibilityAura() || player->HasStealthAura() || player->InBattleground() || player->InArena() || zone == 4197)
 		{
 			player->GetSession()->SendNotification("사용할수없습니다.");
 			return true;
@@ -795,1197 +863,6 @@ public:
 		}
     }
 };
-
-
-//암시장
-// 암시장 (RP 기반, 단일 입찰로그 테이블 관리)
-
-// ===== Config / Consts =====
-static constexpr uint32 MIN_START_RP             = 10000;   // 최초 입찰 최소 RP
-static constexpr uint32 MIN_INCREMENT_RP         = 100;    // 최소 인상 RP
-static constexpr uint32 EXTEND_THRESHOLD_SEC     = 300;    // 종료 5분 이내
-static constexpr uint32 EXTEND_ADD_SEC           = 600;    // 10분 연장
-static constexpr uint8  EXTEND_MAX_COUNT         = 3;
-static constexpr uint32 AUCTION_VISIBLE          = 12;
-static constexpr uint32 SPAWN_DURATION_SEC       = 5400;
-static constexpr uint32 BLACKMARKET_NPC_ENTRY    = 5000064;
-static constexpr uint32 BM_BID_FEE_GOLD          = 100;    // 입찰 수수료(고정 100골드)
-static constexpr uint64 BM_BID_FEE_COPPER        = uint64(BM_BID_FEE_GOLD) * GOLD;
-static constexpr uint32 BM_RP_REFUND_ITEM_ENTRY  = 823; // "RP 환급 토큰" 템플릿(직접 DB에 생성)
-
-// 앱 아이템 샵 카테고리 ID (하드코딩)
-static constexpr std::array<uint32, 3> BM_CATEGORY_IDS = {
-    7 // 실제 category_id 에 맞게 수정
-};
-
-// ===== Globals =====
-static ObjectGuid s_BlackMarketNpcGuid;
-static uint32     s_BlackMarketNpcMapId = 0;
-
-// ===== 유틸 =====
-static std::string EscapeShell(std::string s)
-{
-    for (char& c : s)
-        if (c == '\'' || c == '\"') c = ' ';
-    return s;
-}
-static void WritePartyChatToFile(uint32, std::string const&, uint32, uint32, std::string const&) { /* no-op */ }
-
-// ============================================================================
-//                       NPC: Auctioneer (Gossip & Bidding)
-// ============================================================================
-class npc_black_market_auctioneer : public CreatureScript
-{
-public:
-    npc_black_market_auctioneer() : CreatureScript("npc_black_market_auctioneer") {}
-
-    struct npc_black_market_auctioneerAI : public ScriptedAI
-    {
-        using GuidKey = uint64;
-        std::unordered_map<GuidKey, uint32> g_AuctionSelections;
-
-        // ★ 추가: 액션 상수/환율 상수
-        static constexpr uint32 ACTION_BID_INPUT        = 999;        // 기존 입찰 코드 입력
-        static constexpr uint32 ACTION_EXCHANGE_MENU    = 900000001;  // 골드→RP 환전 메뉴
-        static constexpr uint32 ACTION_EXCHANGE_INPUT   = 900000002;  // 환전 수량 입력
-        static constexpr uint32 GOLD_PER_RP             = 10000;       // 1 RP 당 5000골드
-        static constexpr uint32 COPPER_PER_GOLD         = 10000;      // 1골드 = 10000코퍼
-
-        npc_black_market_auctioneerAI(Creature* c) : ScriptedAI(c) {}
-
-        static void SendEndTimeWhisper(Player* player, time_t endTime)
-        {
-            if (!player) return;
-            tm* ti = localtime(&endTime);
-            if (!ti) return;
-
-            std::ostringstream timeStr;
-            timeStr << (ti->tm_year + 1900) << "년 "
-                    << (ti->tm_mon + 1)    << "월 "
-                    << ti->tm_mday        << "일 "
-                    << ti->tm_hour        << "시 "
-                    << ti->tm_min         << "분";
-
-            std::ostringstream msg;
-            msg << "|cff00ff00[암시장알림]|r " << timeStr.str() << " 종료 예정입니다.";
-            ChatHandler(player->GetSession()).SendSysMessage(msg.str().c_str());
-        }
-
-        bool OnGossipHello(Player* player) override
-        {
-            if (!player)
-                return false;
-
-            ClearGossipMenuFor(player);
-
-            if (player->GetLevel() != 80)
-            {
-                player->GetSession()->SendNotification("80레벨만 입찰할 수 있습니다.");
-                return true;
-            }
-
-            // active 경매 리스트 (current_bid: RP 기준)
-            {
-                std::string sql = Trinity::StringFormat(
-                    "SELECT a.auction_id, a.item_id, i.name, i.ItemLevel, "
-                    "       a.current_bid, IFNULL(ci.iconname,''), a.end_time, a.bid_count "
-                    "FROM blackmarket_auction a "
-                    "JOIN item_template i ON a.item_id = i.entry "
-                    "LEFT JOIN appdata.data_wotlk_itemdisplayinfo ci ON i.displayid = ci.id "
-                    "WHERE a.auction_status='active' "
-                    "ORDER BY a.auction_id ASC LIMIT {}",
-                    AUCTION_VISIBLE
-                );
-
-                QueryResult result = WorldDatabase.Query(sql.c_str());
-                if (!result)
-                {
-                    player->GetSession()->SendNotification("현재 진행 중인 경매가 없습니다.");
-                }
-                else
-                {
-                    // 첫 행 종료 예정 시간 안내
-                    {
-                        Field* f = result->Fetch();
-                        time_t endTime = time_t(f[6].GetUInt32());
-                        SendEndTimeWhisper(player, endTime);
-                    }
-
-                    // 목록
-                    do
-                    {
-                        Field* f = result->Fetch();
-                        uint32 auctionId    = f[0].GetUInt32();
-                        uint32 itemID       = f[1].GetUInt32();
-                        std::string name    = f[2].GetString();
-                        uint32 itemLevel    = f[3].GetUInt32();
-                        uint64 currentBidRP = f[4].GetUInt64();
-                        std::string icon    = f[5].GetString();
-                        uint32 timeLeft     = f[7].GetUInt32();
-
-                        std::ostringstream label;
-                        label << "|TInterface\\Icons\\" << icon << ":30:30:-18:0|t "
-                              << "[경매ID " << auctionId << "] [아이템ID " << itemID << "]\n"
-                              << name << " (Lv" << itemLevel << ")\n현재 |cffff0000"
-                              << currentBidRP << "|r RP, 입찰자 " << timeLeft;
-
-                        AddGossipItemFor(player, GOSSIP_ICON_DOT, label.str(), GOSSIP_SENDER_MAIN, auctionId);
-                    } while (result->NextRow());
-                }
-            }
-
-            // ★ 추가: 아이템 리스트 밑에 고정 환전 메뉴
-            {
-                std::ostringstream exLabel;
-                exLabel << "|TInterface\\Icons\\INV_Misc_Coin_01:30:30:-18:0|t "
-                        << "골드를 RP로 환전하기 (1 RP = " << GOLD_PER_RP << "골드)";
-                AddGossipItemFor(player, GOSSIP_ICON_INTERACT_1, exLabel.str(), GOSSIP_SENDER_MAIN, ACTION_EXCHANGE_MENU);
-            }
-
-            AddGossipItemFor(player, GOSSIP_ICON_DOT, "닫기", GOSSIP_SENDER_MAIN, 0);
-
-            player->TalkedToCreature(me->GetEntry(), me->GetGUID());
-            SendGossipMenuFor(player, player->GetGossipTextId(me), me->GetGUID());
-            return true;
-        }
-
-        bool OnGossipSelect(Player* player, uint32 /*menuId*/, uint32 gossipListId) override
-        {
-            if (!player) return false;
-
-            uint32 action = player->PlayerTalkClass->GetGossipOptionAction(gossipListId);
-            ClearGossipMenuFor(player);
-
-            if (action == 0)
-                return OnGossipHello(player);
-
-            // ★ 추가: 골드→RP 환전 메뉴 선택
-            if (action == ACTION_EXCHANGE_MENU)
-            {
-                std::ostringstream label;
-                label << "환전할 RP 수량을 입력해주세요.\n"
-                      << "1 RP당 " << GOLD_PER_RP << " 골드가 차감됩니다.\n"
-                      << "(예: 10 입력 시 " << (GOLD_PER_RP * 10) << "골드 차감)";
-
-                AddGossipItemFor(player, GOSSIP_ICON_MONEY_BAG, label.str(),
-                                 GOSSIP_SENDER_MAIN, ACTION_EXCHANGE_INPUT, "", 0, true);
-                AddGossipItemFor(player, GOSSIP_ICON_DOT, "뒤로가기", GOSSIP_SENDER_MAIN, 0);
-                SendGossipMenuFor(player, 1, me->GetGUID());
-                return true;
-            }
-
-            // ★ 기존: action = auctionId → 입찰
-            g_AuctionSelections[player->GetGUID().GetRawValue()] = action;
-
-            std::ostringstream label;
-            label << "[ID:" << action << "] 입찰 RP를 입력해주세요.\n"
-                  << "시작금액은 " << MIN_START_RP << " RP 입니다.\n"
-                  << "입찰 시 수수료로 골드 100이 차감됩니다.";
-
-            AddGossipItemFor(player, GOSSIP_ICON_DOT, label.str(), GOSSIP_SENDER_MAIN, ACTION_BID_INPUT, "", 0, true);
-            AddGossipItemFor(player, GOSSIP_ICON_DOT, "뒤로가기", GOSSIP_SENDER_MAIN, 0);
-            SendGossipMenuFor(player, 1, me->GetGUID());
-            return true;
-        }
-
-        bool OnGossipSelectCode(Player* player, uint32 /*menuId*/, uint32 gossipListId, char const* args) override
-        {
-            if (!player)
-                return false;
-
-            uint32 action = player->PlayerTalkClass->GetGossipOptionAction(gossipListId);
-            ClearGossipMenuFor(player);
-
-            // ★ 분기: 입찰 코드 입력 vs 환전 코드 입력
-            if (action == ACTION_BID_INPUT)
-            {
-                // ───────────────────────
-                // 기존 입찰 처리 로직
-                // ───────────────────────
-                GuidKey key = player->GetGUID().GetRawValue();
-                if (!g_AuctionSelections.count(key))
-                {
-                    player->GetSession()->SendNotification("세션이 만료되었거나 잘못된 접근입니다.");
-                    return true;
-                }
-
-                // 0) 입력 RP 파싱
-                uint64 bidRP = uint64(std::max<long long>(atoll(args), 0));
-                if (bidRP < MIN_START_RP)
-                {
-                    player->GetSession()->SendNotification("최소 10000 RP 이상만 입찰 가능합니다.");
-                    CloseGossipMenuFor(player);
-                    return true;
-                }
-
-                uint32 auctionId = g_AuctionSelections[key];
-                uint32 accountId = player->GetSession()->GetAccountId();
-                uint32 guidLo    = player->GetGUID().GetCounter();
-
-                // 1) 기존 내 입찰 RP 조회
-                uint32 oldBidRP = 0;
-                {
-                    std::string qOld = Trinity::StringFormat(
-                        "SELECT bid_rp FROM appdata.blackmarket_rp_bids "
-                        "WHERE auction_id={} AND account_id={}",
-                        auctionId, accountId
-                    );
-                    if (QueryResult rOld = CharacterDatabase.Query(qOld.c_str()))
-                        oldBidRP = rOld->Fetch()[0].GetUInt32();
-                }
-
-                if (bidRP <= oldBidRP)
-                {
-                    player->GetSession()->SendNotification("이전 입찰 RP보다 더 높게 입력해야 합니다.");
-                    CloseGossipMenuFor(player);
-                    return true;
-                }
-
-                uint32 needRP = bidRP - oldBidRP;
-
-                // 2) 계정 RP 보유량 확인
-                {
-                    std::string qRP = Trinity::StringFormat(
-                        "SELECT reg_point FROM appdata.account_data WHERE id={}",
-                        accountId
-                    );
-                    if (QueryResult rRP = CharacterDatabase.Query(qRP.c_str()))
-                    {
-                        uint32 curRP = rRP->Fetch()[0].GetUInt32();
-                        if (curRP < needRP)
-                        {
-                            player->GetSession()->SendNotification("보유 RP가 부족합니다.");
-                            CloseGossipMenuFor(player);
-                            return true;
-                        }
-                    }
-                    else
-                    {
-                        player->GetSession()->SendNotification("RP 정보를 조회할 수 없습니다.");
-                        CloseGossipMenuFor(player);
-                        return true;
-                    }
-                }
-
-                // 3) 골드 수수료(100골드) 확인
-                if (player->GetMoney() < BM_BID_FEE_COPPER)
-                {
-                    player->GetSession()->SendNotification("입찰 수수료 100골드가 부족합니다.");
-                    CloseGossipMenuFor(player);
-                    return true;
-                }
-
-                // 4) 경매 현재 상태 읽기 (검증만)
-                uint64 curBid   = 0;
-                uint64 startRP  = MIN_START_RP;
-                uint64 minIncRP = MIN_INCREMENT_RP;
-
-                {
-                    std::string sqlInfo = Trinity::StringFormat(
-                        "SELECT current_bid, start_price, IFNULL(min_increment,0) "
-                        "FROM blackmarket_auction "
-                        "WHERE auction_id={} AND auction_status='active'",
-                        auctionId
-                    );
-                    QueryResult rInfo = WorldDatabase.Query(sqlInfo.c_str());
-                    if (!rInfo)
-                    {
-                        player->GetSession()->SendNotification("유효하지 않은 경매입니다.");
-                        return true;
-                    }
-
-                    Field* fi = rInfo->Fetch();
-                    curBid    = fi[0].GetUInt64();
-                    startRP   = fi[1].GetUInt64();
-                    minIncRP  = fi[2].GetUInt64();
-
-                    if (startRP == 0)
-                        startRP = MIN_START_RP;
-                    if (minIncRP == 0)
-                        minIncRP = MIN_INCREMENT_RP;
-                }
-
-                if (bidRP < startRP)
-                {
-                    player->GetSession()->SendNotification("시작 RP 이상만 입찰 가능합니다.");
-                    CloseGossipMenuFor(player);
-                    return true;
-                }
-                if (bidRP <= curBid)
-                {
-                    player->GetSession()->SendNotification("현재 입찰 RP보다 높아야 합니다.");
-                    CloseGossipMenuFor(player);
-                    return true;
-                }
-                if (bidRP < curBid + minIncRP)
-                {
-                    player->GetSession()->SendNotification("현재가보다 최소 100 RP 이상 입찰하셔야 합니다.");
-                    CloseGossipMenuFor(player);
-                    return true;
-                }
-
-                // 5) appdata 쪽 확정
-                uint32 nowTs = uint32(GameTime::GetGameTime());
-
-                // 5-1) RP 차감
-                {
-                    std::string updRP = Trinity::StringFormat(
-                        "UPDATE appdata.account_data SET reg_point = reg_point - {} WHERE id={}",
-                        needRP, accountId
-                    );
-                    CharacterDatabase.Execute(updRP.c_str());
-                }
-
-                // 5-2) 입찰 로그 upsert
-                {
-                    std::string upsert = Trinity::StringFormat(
-                        "INSERT INTO appdata.blackmarket_rp_bids "
-                        "(auction_id, account_id, character_guid, bid_rp, created_at, updated_at, status, token_item_guid) "
-                        "VALUES ({}, {}, {}, {}, {}, {}, 0, 0) "
-                        "ON DUPLICATE KEY UPDATE "
-                        "  bid_rp=VALUES(bid_rp), "
-                        "  character_guid=VALUES(character_guid), "
-                        "  updated_at=VALUES(updated_at)",
-                        auctionId, accountId, guidLo,
-                        static_cast<uint32>(bidRP),
-                        nowTs, nowTs
-                    );
-                    CharacterDatabase.Execute(upsert.c_str());
-                }
-
-                // 5-3) 입찰 수수료 100골드 차감
-                player->ModifyMoney(-int32(BM_BID_FEE_COPPER));
-
-                // 6) world.blackmarket_auction 갱신
-                {
-                    std::string sqlUpd = Trinity::StringFormat(
-                        "UPDATE blackmarket_auction "
-                        "SET current_bid={}, bidder_guid={}, bid_count=IFNULL(bid_count,0)+1, "
-                        "    end_time=CASE WHEN (end_time-UNIX_TIMESTAMP())<={} AND IFNULL(extend_count,0)<{} "
-                        "                  THEN end_time+{} ELSE end_time END, "
-                        "    extend_count=CASE WHEN (end_time-UNIX_TIMESTAMP())<={} AND IFNULL(extend_count,0)<{} "
-                        "                       THEN IFNULL(extend_count,0)+1 ELSE IFNULL(extend_count,0) END "
-                        "WHERE auction_id={} AND auction_status='active'",
-                        static_cast<uint64_t>(bidRP), guidLo,
-                        EXTEND_THRESHOLD_SEC, EXTEND_MAX_COUNT, EXTEND_ADD_SEC,
-                        EXTEND_THRESHOLD_SEC, EXTEND_MAX_COUNT,
-                        auctionId
-                    );
-                    WorldDatabase.Execute(sqlUpd.c_str());
-                }
-
-                ChatHandler(player->GetSession()).SendSysMessage("입찰 수수료 100골드가 지불되었습니다.");
-                std::string announce = Trinity::StringFormat("|cffABD473[암시장알림]|r {} RP 입찰!", bidRP);
-                sWorld->SendServerMessage(SERVER_MSG_STRING, announce.c_str(), 0);
-
-                CloseGossipMenuFor(player);
-                return true;
-            }
-            else if (action == ACTION_EXCHANGE_INPUT)
-            {
-                // ───────────────────────
-                // 골드 → RP 환전 처리
-                // ───────────────────────
-                uint32 accountId = player->GetSession()->GetAccountId();
-
-                // 1) 입력값: 환전할 RP 수량
-                uint64 wantRP = uint64(std::max<long long>(atoll(args), 0));
-                if (wantRP == 0)
-                {
-                    player->GetSession()->SendNotification("1 이상의 RP를 입력해주세요.");
-                    CloseGossipMenuFor(player);
-                    return true;
-                }
-
-                // 필요 골드(코퍼 기준) 계산
-                uint64 needGold  = wantRP * GOLD_PER_RP;     // 골드 단위
-                uint64 needCopper = needGold * COPPER_PER_GOLD;
-
-                // ModifyMoney는 int32이므로 말도 안 되게 큰 값 방지
-                if (needCopper > uint64(std::numeric_limits<int32>::max()))
-                {
-                    player->GetSession()->SendNotification("한 번에 너무 많은 RP를 환전하려고 합니다.");
-                    CloseGossipMenuFor(player);
-                    return true;
-                }
-
-                // 2) 골드 보유량 확인
-                uint64 curCopper = player->GetMoney();
-                if (curCopper < needCopper)
-                {
-                    player->GetSession()->SendNotification("환전에 필요한 골드가 부족합니다.");
-                    CloseGossipMenuFor(player);
-                    return true;
-                }
-
-                // 3) 골드 차감
-                player->ModifyMoney(-int32(needCopper));
-
-                // 4) 계정 RP 증가 (appdata.account_data.reg_point)
-                {
-                    std::string updRP = Trinity::StringFormat(
-                        "UPDATE appdata.account_data SET reg_point = reg_point + {} WHERE id={}",
-                        static_cast<uint32>(wantRP), accountId
-                    );
-                    CharacterDatabase.Execute(updRP.c_str());
-                }
-
-                // 5) 안내 메시지
-                std::ostringstream msg;
-                msg << "골드 " << needGold << "을(를) 사용하여 "
-                    << wantRP << " RP로 환전되었습니다.";
-                ChatHandler(player->GetSession()).SendSysMessage(msg.str().c_str());
-
-                CloseGossipMenuFor(player);
-                return true;
-            }
-
-            // 그 외 액션은 이 스크립트에서 처리하지 않음
-            return false;
-        }
-    };
-
-    CreatureAI* GetAI(Creature* c) const override { return new npc_black_market_auctioneerAI(c); }
-};
-
-
-// ============================================================================
-//                           Scheduler: Close auctions
-// ============================================================================
-class BlackMarketAuctionScheduler : public WorldScript
-{
-public:
-    BlackMarketAuctionScheduler() : WorldScript("BlackMarketAuctionScheduler") {}
-
-	void OnStartup() override
-    {
-		uint32 realmId = sConfigMgr->GetIntDefault("RealmID", 0);
-		if (realmId == 1)
-			CharacterDatabase.PExecute("TRUNCATE TABLE character_dungeon_session");
-    }
-
-    void OnUpdate(uint32 /*diff*/) override
-    {
-        static time_t nextCheck = 0;
-        time_t now = GameTime::GetGameTime();
-        if (now < nextCheck)
-            return;
-
-        nextCheck = now + 5;
-
-        QueryResult result = WorldDatabase.Query(
-            "SELECT auction_id, item_id, current_bid, bidder_guid, end_time "
-            "FROM blackmarket_auction "
-            "WHERE auction_status='active' AND end_time <= UNIX_TIMESTAMP()"
-        );
-        if (!result)
-            return;
-
-        do
-        {
-            Field* f          = result->Fetch();
-            uint32 auctionId  = f[0].GetUInt32();
-            uint32 itemId     = f[1].GetUInt32();
-            uint64 bidAmountRP= f[2].GetUInt64(); // 최종 낙찰 RP
-            uint32 bidderLow  = f[3].GetUInt32();
-            (void)f[4];
-
-            // 상태 completed 로 변경
-            {
-                std::string sqlDone = Trinity::StringFormat(
-                    "UPDATE blackmarket_auction SET auction_status='completed' WHERE auction_id={}",
-                    auctionId
-                );
-                WorldDatabase.Execute(sqlDone.c_str());
-            }
-
-            if (bidderLow == 0 || bidAmountRP == 0)
-                continue;
-
-            ObjectGuid bidderGuid = ObjectGuid::Create<HighGuid::Player>(bidderLow);
-
-            // 낙찰자 계정 ID 구하기
-            uint32 accountIdWinner = 0;
-            {
-                std::string qAcc = Trinity::StringFormat(
-                    "SELECT account FROM characters WHERE guid={}",
-                    bidderGuid.GetCounter()
-                );
-                if (QueryResult q = CharacterDatabase.Query(qAcc.c_str()))
-                    accountIdWinner = q->Fetch()[0].GetUInt32();
-            }
-
-            // 1) 낙찰 아이템 우편 발송
-            {
-                MailDraft draft("암시장 낙찰 아이템", "축하합니다! 암시장 경매에서 아이템을 낙찰받았습니다.");
-                CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
-
-                if (Item* item = Item::CreateItem(itemId, 1, nullptr))
-                {
-                    if (const ItemTemplate* proto = item->GetTemplate())
-                    {
-                        item->SaveToDB(trans);
-                        draft.AddItem(item);
-
-                        std::string msg = Trinity::StringFormat(
-                            "|cffABD473[암시장알림]|r [{}] {} RP 낙찰.",
-                            proto->Name1.c_str(), bidAmountRP
-                        );
-                        sWorld->SendServerMessage(SERVER_MSG_STRING, msg.c_str(), 0);
-                    }
-                }
-
-                draft.SendMailTo(trans, MailReceiver(bidderGuid.GetCounter()),
-                                 MailSender(MAIL_CREATURE, 24266), MAIL_CHECK_MASK_NONE);
-                CharacterDatabase.CommitTransaction(trans);
-            }
-
-            // 2) 입찰 로그 상태 갱신: 낙찰자 / 패배자 분리
-            {
-                // 낙찰자: status = 1 (won)
-                if (accountIdWinner != 0)
-                {
-                    std::string updWin = Trinity::StringFormat(
-                        "UPDATE appdata.blackmarket_rp_bids "
-                        "SET status=1, updated_at={} "
-                        "WHERE auction_id={} AND account_id={}",
-                        uint32(now), auctionId, accountIdWinner
-                    );
-                    CharacterDatabase.Execute(updWin.c_str());
-                }
-
-                // 패배자들: status=2, 환급 토큰 발송
-                std::string qLosers = Trinity::StringFormat(
-                    "SELECT account_id, character_guid, bid_rp "
-                    "FROM appdata.blackmarket_rp_bids "
-                    "WHERE auction_id={} AND account_id<>{}",
-                    auctionId, accountIdWinner == 0 ? 0 : accountIdWinner
-                );
-                if (QueryResult rLoser = CharacterDatabase.Query(qLosers.c_str()))
-                {
-                    do
-                    {
-                        Field* fl       = rLoser->Fetch();
-                        uint32 accId    = fl[0].GetUInt32();
-                        uint32 chGuidLo = fl[1].GetUInt32();
-                        uint32 bidRP    = fl[2].GetUInt32();
-
-                        if (bidRP == 0)
-                            continue;
-
-                        uint64 tokenItemGuidCounter = 0;
-
-                        // 환급 토큰 생성 + 우편 발송
-                        {
-                            MailDraft draft("암시장 RP 환급 토큰",
-                                "이번 암시장 경매에서 낙찰받지 못했습니다.\n"
-                                "동봉된 토큰을 사용하면 입찰에 사용된 RP를 돌려받을 수 있습니다.");
-
-                            CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
-
-                            if (Item* token = Item::CreateItem(BM_RP_REFUND_ITEM_ENTRY, 1, nullptr))
-                            {
-                                token->SaveToDB(trans);
-                                draft.AddItem(token);
-                                tokenItemGuidCounter = token->GetGUID().GetCounter();
-                            }
-
-                            draft.SendMailTo(trans, MailReceiver(chGuidLo),
-                                             MailSender(MAIL_CREATURE, 24266), MAIL_CHECK_MASK_NONE);
-                            CharacterDatabase.CommitTransaction(trans);
-                        }
-
-                        if (tokenItemGuidCounter != 0)
-                        {
-                            std::string updLoser = Trinity::StringFormat(
-                                "UPDATE appdata.blackmarket_rp_bids "
-                                "SET status=2, token_item_guid={}, updated_at={} "
-                                "WHERE auction_id={} AND account_id={}",
-                                static_cast<uint64_t>(tokenItemGuidCounter),
-                                uint32(now), auctionId, accId
-                            );
-                            CharacterDatabase.Execute(updLoser.c_str());
-                        }
-
-                    } while (rLoser->NextRow());
-                }
-            }
-
-        } while (result->NextRow());
-    }
-};
-
-// ============================================================================
-//                             Spawner: Realm1 only
-// ============================================================================
-// BlackMarketSpawner (WorldScript)
-// - 스폰 모드: TEST / MONTHLY / WEEKLY
-// - 플레이어가 없을 때 소환이 자주 실패/즉시 소멸하는 문제를 막기 위해
-//   CreateBaseMap + LoadGrid + SetActive(true) 적용
-//
-// [CHANGED] 핵심 패치
-//  1) FindMap(mapId, 0)  -> CreateBaseMap(mapId)
-//  2) map->LoadGrid(x,y) 로 그리드 강제 로드
-//  3) npc->SetActive(true) 로 그리드 언로드로 인한 즉시 소멸 방지
-//  4) 소환 실패/성공 로그 추가
-
-class BlackMarketSpawner : public WorldScript
-{
-public:
-    BlackMarketSpawner() : WorldScript("BlackMarketSpawner") {}
-
-    // NEW: 스폰 모드 구분
-    enum BMSpawnMode
-    {
-        BM_MODE_TEST    = 0, // 서버 기동 후 120초 뒤 테스트 스폰 (계속 반복)
-        BM_MODE_MONTHLY = 1, // 한 달에 한 번 랜덤 스폰
-        BM_MODE_WEEKLY  = 2,  // 일주일에 한 번 랜덤 스폰
-		BM_MODE_MIXED   = 3   // 🔥 추가
-    };
-
-    // NEW: 여기서 모드 선택
-    static constexpr BMSpawnMode BM_MODE = BM_MODE_MIXED;
-
-    static constexpr uint32 BM_TEST_DELAY_SEC = 120;
-
-    // ─────────────────────────────────────────────────────
-    // 한 달에 한 번: 1~28일 사이, 20~22시 사이 랜덤
-    // ─────────────────────────────────────────────────────
-    static uint32 GenerateMonthlySpawnTime()
-    {
-        time_t now = GameTime::GetGameTime();
-        tm lt = *localtime(&now);
-
-        int year  = lt.tm_year + 1900;
-        int month = lt.tm_mon + 1;
-
-        int day   = urand(1, 28);
-        int hour  = urand(20, 22);
-        int min   = urand(0, 59);
-
-        tm when {};
-        when.tm_year = year - 1900;
-        when.tm_mon  = month - 1;
-        when.tm_mday = day;
-        when.tm_hour = hour;
-        when.tm_min  = min;
-        when.tm_sec  = 0;
-
-        time_t ts = mktime(&when);
-        if (ts <= now)
-        {
-            month += 1;
-            if (month > 12)
-            {
-                month = 1;
-                year += 1;
-            }
-
-            day   = urand(1, 28);
-            hour  = urand(20, 22);
-            min   = urand(0, 59);
-
-            when = {};
-            when.tm_year = year - 1900;
-            when.tm_mon  = month - 1;
-            when.tm_mday = day;
-            when.tm_hour = hour;
-            when.tm_min  = min;
-            when.tm_sec  = 0;
-            ts = mktime(&when);
-        }
-        return static_cast<uint32>(ts);
-    }
-
-    // NEW: 주간 1회 스폰 스케줄 생성 (다음 주 중 하루)
-	//      - "이번 주"가 아니라 반드시 "다음 주" (월~일)에서 하루 랜덤
-	//      - 20~22시 사이 랜덤
-	static uint32 GenerateWeeklySpawnTime()
-	{
-		time_t now = GameTime::GetGameTime();
-		tm lt = *localtime(&now);
-
-		// tm_wday: 0=일, 1=월, ... 6=토
-		// 이번 주 월요일 00:00으로 맞춤
-		int daysSinceMonday = (lt.tm_wday == 0) ? 6 : (lt.tm_wday - 1);
-		lt.tm_mday -= daysSinceMonday;
-		lt.tm_hour = 0;
-		lt.tm_min  = 0;
-		lt.tm_sec  = 0;
-
-		// mktime으로 정규화(월/년 넘어감 자동 처리)
-		time_t thisMonday = mktime(&lt);
-
-		// 다음 주 월요일 00:00
-		time_t nextMonday = thisMonday + 7 * 24 * 60 * 60;
-
-		// 다음 주 중 하루(월~일) 랜덤
-		int addDays = urand(0, 6);
-		time_t baseDay = nextMonday + addDays * 24 * 60 * 60;
-
-		tm when = *localtime(&baseDay);
-		when.tm_hour = urand(20, 22);
-		when.tm_min  = urand(0, 59);
-		when.tm_sec  = 0;
-
-		time_t ts = mktime(&when);
-
-		// 혹시나(서버 타임/서머타임 등) 과거가 되면 7일 뒤로 보정
-		if (ts <= now)
-			ts += 7 * 24 * 60 * 60;
-
-		return static_cast<uint32>(ts);
-	}
-
-	static uint32 GenerateMixedSpawnTime()
-	{
-		time_t now = GameTime::GetGameTime();
-		tm lt = *localtime(&now);
-
-		// 이번 주 월요일 00:00 기준
-		int daysSinceMonday = (lt.tm_wday == 0) ? 6 : (lt.tm_wday - 1);
-		lt.tm_mday -= daysSinceMonday;
-		lt.tm_hour = 0;
-		lt.tm_min  = 0;
-		lt.tm_sec  = 0;
-
-		time_t thisMonday = mktime(&lt);
-
-		// 다음 주 월요일
-		time_t nextMonday = thisMonday + 7 * 24 * 60 * 60;
-
-		// 🔥 일~금 (0=일 ~ 5=금)
-		int addDays = urand(0, 5);
-
-		time_t baseDay = nextMonday + addDays * 24 * 60 * 60;
-
-		tm when = *localtime(&baseDay);
-
-		// 🔥 18~22시 랜덤
-		when.tm_hour = urand(18, 22);
-		when.tm_min  = urand(0, 59);
-		when.tm_sec  = 0;
-
-		time_t ts = mktime(&when);
-
-		if (ts <= now)
-			ts += 7 * 24 * 60 * 60;
-
-		return static_cast<uint32>(ts);
-	}
-
-    // NEW: 공통 스케줄 생성/저장 함수
-    void ScheduleNextSpawn(time_t now)
-    {
-        uint32 nextTs = 0;
-
-        if (BM_MODE == BM_MODE_TEST)
-        {
-            nextTs = static_cast<uint32>(now) + BM_TEST_DELAY_SEC;
-            TC_LOG_INFO("custom", "[BM][TEST] QuickNext: {}초 후({}) 스폰 예정", BM_TEST_DELAY_SEC, nextTs);
-        }
-        else if (BM_MODE == BM_MODE_MONTHLY)
-        {
-            nextTs = GenerateMonthlySpawnTime();
-            TC_LOG_INFO("custom", "[BM] 다음 월간 스폰 스케줄 생성: next_spawn_time={}", nextTs);
-        }
-        else if (BM_MODE == BM_MODE_WEEKLY)
-        {
-            nextTs = GenerateWeeklySpawnTime();
-            TC_LOG_INFO("custom", "[BM] 다음 주간 스폰 스케줄 생성: next_spawn_time={}", nextTs);
-        }
-		else if (BM_MODE == BM_MODE_MIXED)
-		{
-			nextTs = GenerateMixedSpawnTime(); // 평일 랜덤 1회
-			TC_LOG_INFO("custom", "[BM] MIXED 랜덤 스케줄 생성: {}", nextTs);
-		}
-        else
-        {
-            nextTs = GenerateMonthlySpawnTime();
-            TC_LOG_INFO("custom", "[BM] BM_MODE 알 수 없음, 월간 스케줄로 대체 생성: next_spawn_time={}", nextTs);
-        }
-
-        std::string upsert = Trinity::StringFormat(
-            "REPLACE INTO blackmarket_schedule (id, next_spawn_time, status) VALUES (1, {}, 1)",
-            nextTs);
-
-        WorldDatabase.Execute(upsert.c_str());
-
-        m_spawnTime   = time_t(nextTs);
-        m_warningSent = false;
-        m_spawned     = false;
-    }
-
-    void OnStartup() override
-    {
-        time_t now = GameTime::GetGameTime();
-
-		// 🔥 TEST 모드: DB 완전 무시
-		if (BM_MODE == BM_MODE_TEST)
-		{
-			TC_LOG_INFO("custom", "[BM][TEST] DB 스케줄 무시, 테스트 타임 적용");
-
-			ScheduleNextSpawn(now); // 바로 TEST 스케줄 생성
-			return;
-		}
-
-        // 그 이후는 SpawnNPC 호출 후 ScheduleNextSpawn(now)로 자동 순환
-        QueryResult r = WorldDatabase.Query("SELECT next_spawn_time, status FROM blackmarket_schedule WHERE id=1");
-        if (!r)
-        {
-            // DB에 아무 것도 없으면 지금 시점을 기준으로 새 스케줄 생성
-            ScheduleNextSpawn(now);
-            return;
-        }
-
-        Field* f = r->Fetch();
-        uint32 nextSpawn = f[0].GetUInt32();
-        uint32 status    = f[1].GetUInt32();
-
-        m_spawnTime   = time_t(nextSpawn);
-        m_warningSent = false;
-        m_spawned     = false;
-
-        // status==0 이거나, 이미 과거 시각이면 새로 스케줄 생성
-        if (status == 0 || m_spawnTime <= now)
-        {
-            TC_LOG_INFO("custom", "[BM] 기존 스케줄이 비활성/과거(next_spawn_time={}, status={}), 새 스케줄 생성",
-                        nextSpawn, status);
-            ScheduleNextSpawn(now);
-        }
-    }
-
-    void OnUpdate(uint32 /*diff*/) override
-    {
-        time_t now = GameTime::GetGameTime();
-        if (m_spawnTime == 0)
-            return;
-
-		// =========================
-		// 🔥 토요일 21시 고정 (MIXED 전용)
-		// =========================
-		if (BM_MODE == BM_MODE_MIXED)
-		{
-			static uint32 lastSaturdaySpawnDay = 0;
-
-			tm lt = *localtime(&now);
-
-			if (lt.tm_wday == 6 && lt.tm_hour == 21 && lt.tm_min == 0)
-			{
-				uint32 today = lt.tm_yday;
-
-				if (today != lastSaturdaySpawnDay)
-				{
-					TC_LOG_INFO("custom", "[BM] MIXED 토요일 고정 경매 시작");
-
-					SpawnNPC();
-
-					lastSaturdaySpawnDay = today;
-				}
-			}
-		}
-
-        // 1시간 전 경고
-		uint32 realmId = sConfigMgr->GetIntDefault("RealmID", 0);
-		if (realmId == 1)
-		{
-			if (!m_warningSent && now >= (m_spawnTime - 3600))
-			{
-				(void)std::system("php /home/esotar/fcm/send_fcm_BM.php 'alert' '암거상 노사장이 1시간뒤 경매를 시작할 예정입니다.' > /dev/null 2>&1 &");
-				SendServerDiscordEvent("🧿 암거상 등장", "암거상 노사장이 1시간뒤 경매를 시작할 예정입니다","https://stimpack.pe.kr/auth/register", 16759040, "event");
-				m_warningSent = true;
-			} 
-		}
-
-        // 스폰 시도
-        if (!m_spawned && now >= m_spawnTime)
-        {
-            SpawnNPC();
-            m_spawned = true;
-
-            // ★ 스폰 이후 곧바로 다음 스케줄 생성/저장
-            ScheduleNextSpawn(now);
-        }
-    }
-
-private:
-    time_t m_spawnTime = 0;
-    bool   m_warningSent = false;
-    bool   m_spawned = false;
-
-    void BroadcastSpawn(Creature* npc)
-    {
-        sWorld->SendServerMessage(
-            SERVER_MSG_STRING,
-            "|cffFF0000[암시장 알림]|r 암시장 상인이 경매를 시작했습니다. 1시간동안 거래가 가능합니다.",
-            0);
-
-        if (npc)
-            npc->DespawnOrUnsummon(Seconds(SPAWN_DURATION_SEC));
-
-		uint32 realmId = sConfigMgr->GetIntDefault("RealmID", 0);
-		if (realmId == 1)
-		{
-			(void)std::system("php /home/esotar/fcm/send_fcm_BM.php 'alert' '암거상 노사장이 경매를 시작했습니다.'  > /dev/null 2>&1 &");
-			SendServerDiscordEvent("🧿 암거상 등장", "암거상 노사장이 경매를 시작했습니다.","https://stimpack.pe.kr/auth/register", 16759040, "event");
-		}
-    }
-
-    void BroadcastSpawnGold(Creature* npc)
-    {
-        if (npc)
-            npc->DespawnOrUnsummon(Seconds(SPAWN_DURATION_SEC));
-    }
-
-    void SpawnNPC()
-    {
-    /*    static const std::array<std::pair<uint32, Position>, 1> kSpawns = {{
-            {1, Position{-7191.6f, -3938.15f, 8.96297f, 3.50838f}},
-        }};
-
-        auto pick = kSpawns[urand(0, kSpawns.size() - 1)];
-        uint32 mapId = pick.first;
-        Position pos = pick.second;
-
-        Position pos_gold{-7196.125f, -3933.963f, 9.143f, 4.276315f}; // 노스렌드
-
-        // [CHANGED] FindMap은 "이미 로드된 맵"에서만 잘 잡히는 경우가 있어,
-        //           플레이어가 없을 때 소환 실패/즉시 소멸 이슈가 자주 발생함.
-        //           베이스맵 확보 + 그리드 강제 로드로 해결.
-        Map* map = sMapMgr->CreateBaseMap(mapId);
-        if (!map)
-        {
-            TC_LOG_ERROR("custom", "[BM] CreateBaseMap 실패: mapId={}", mapId);
-            return;
-        }
-
-        // [CHANGED] 좌표 그리드 강제 로드 (플레이어 없어도 소환 가능하게)
-        map->LoadGrid(pos.GetPositionX(), pos.GetPositionY());
-        map->LoadGrid(pos_gold.GetPositionX(), pos_gold.GetPositionY());
-
-        Creature* npc = map->SummonCreature(BLACKMARKET_NPC_ENTRY, pos);
-        if (!npc)
-        {
-            TC_LOG_ERROR("custom", "[BM] SummonCreature 실패: entry={}, mapId={}, pos=({}, {}, {})",
-                         BLACKMARKET_NPC_ENTRY,
-                         mapId,
-                         pos.GetPositionX(), pos.GetPositionY(), pos.GetPositionZ());
-            return;
-        }
-
-        // [CHANGED] 그리드 언로드로 바로 사라지는 케이스 완화
-        npc->setActive(true);
-
-        if (Creature* npcgold = map->SummonCreature(5000065, pos_gold)) // 이벤트 NPC Entry
-        {
-            npcgold->setActive(true);
-            BroadcastSpawnGold(npcgold);
-        }
-
-        // [CHANGED] 소환 성공 로그
-        TC_LOG_INFO("custom", "[BM] NPC 소환 성공: guidLow={}, mapId={}, active={}",
-                    npc->GetGUID().GetCounter(), mapId, npc->isActiveObject());
-
-        s_BlackMarketNpcGuid  = npc->GetGUID();
-        s_BlackMarketNpcMapId = mapId;  */
-
-		QueryResult activeCheck = WorldDatabase.PQuery("SELECT 1 FROM blackmarket_auction WHERE auction_status='active' LIMIT 1");
-
-		if (activeCheck)
-		{
-			TC_LOG_INFO("custom", "[BM] 이미 진행 중인 경매 있음 → 생성 스킵");
-			return;
-		}
-
-		WorldDatabase.PExecute("UPDATE blackmarket_auction SET auction_status='completed' WHERE auction_status='active'");
-
-        uint32 groupId = static_cast<uint32>(GameTime::GetGameTime());
-
-		// ─────────────────────────
-		// 1️⃣ 카테고리별 아이템 미리 로드
-		// ─────────────────────────
-		std::unordered_map<uint32, std::vector<uint32>> itemCache;
-
-		for (uint32 catId : BM_CATEGORY_IDS)
-		{
-			std::string q = Trinity::StringFormat(
-				"SELECT game_item_id FROM appdata.shop_items WHERE category_id = {}",
-				catId
-			);
-
-			QueryResult r = WorldDatabase.Query(q.c_str());
-			if (!r)
-				continue;
-
-			std::vector<uint32>& items = itemCache[catId];
-
-			do
-			{
-				Field* f = r->Fetch();
-				items.push_back(f[0].GetUInt32());
-			}
-			while (r->NextRow());
-		}
-
-        // ─────────────────────────────────────────────
-        // 여기부터: AUCTION_VISIBLE 개수 채우기
-        // ─────────────────────────────────────────────
-        // ─────────────────────────
-		// 2️⃣ 기존 루프
-		// ─────────────────────────
-		uint32 created   = 0;
-		uint32 attempts  = 0;
-		const uint32 kMaxAttempts = AUCTION_VISIBLE * 20;
-
-		for (uint32 i = 0; i < AUCTION_VISIBLE; )
-		{
-			if (++attempts > kMaxAttempts)
-				break;
-
-			uint32 catId = BM_CATEGORY_IDS[urand(0, BM_CATEGORY_IDS.size() - 1)];
-
-			auto it = itemCache.find(catId);
-			if (it == itemCache.end() || it->second.empty())
-				continue;
-
-			std::vector<uint32>& items = it->second;
-
-			// 🔥 랜덤 선택 + 즉시 제거 (중복 방지 핵심)
-			uint32 idx = urand(0, items.size() - 1);
-			uint32 item = items[idx];
-
-			items[idx] = items.back();
-			items.pop_back();
-
-			time_t end  = GameTime::GetGameTime() + SPAWN_DURATION_SEC;
-
-			uint64 minIncRP = MIN_INCREMENT_RP;
-
-			std::string ins = Trinity::StringFormat(
-				"INSERT INTO blackmarket_auction "
-				"(item_id, start_price, current_bid, bidder_guid, end_time, auction_status, group_id, extend_count, min_increment, bid_count) "
-				"VALUES ({}, {}, 0, 0, {}, 'active', {}, 0, {}, 0)",
-				item,
-				static_cast<uint64_t>(MIN_START_RP),
-				static_cast<uint32_t>(end),
-				groupId,
-				static_cast<uint64_t>(minIncRP));
-
-			WorldDatabase.Execute(ins.c_str());
-			++created;
-			++i;
-		}
-
-        if (created < AUCTION_VISIBLE)
-        {
-            TC_LOG_WARN("custom", "[BM] 경매 아이템을 충분히 채우지 못했습니다: {}/{} (시도횟수 {})",
-                        created, AUCTION_VISIBLE, attempts);
-        }
-        else
-        {
-            TC_LOG_INFO("custom", "[BM] 경매 아이템 {}개 정상 등록 (시도횟수 {})",
-                        created, attempts);
-        }
-
-        sWorld->SendServerMessage(SERVER_MSG_STRING, "|cffFF0000[암시장 알림]|r 암시장 상인이 경매를 시작했습니다. 1시간동안 거래가 가능합니다.", 0);
-
-		uint32 realmId = sConfigMgr->GetIntDefault("RealmID", 0);
-		if (realmId == 1)
-		{
-			(void)std::system("php /home/esotar/fcm/send_fcm_BM.php 'alert' '암거상 노사장이 경매를 시작했습니다.'  > /dev/null 2>&1 &");
-			SendServerDiscordEvent("🧿 암거상 등장", "암거상 노사장이 경매를 시작했습니다.","https://stimpack.pe.kr",16753920,"event"); 
-		}
-    }
-};
-
-//rp환불아이템
-class item_blackmarket_rp_refund : public ItemScript
-{
-public:
-    item_blackmarket_rp_refund() : ItemScript("item_blackmarket_rp_refund") {}
-
-    bool OnUse(Player* player, Item* item, SpellCastTargets const&) override
-    {
-        if (!player || !item)
-            return false;
-
-        uint32 accountId = player->GetSession()->GetAccountId();
-        uint64 itemGuid  = item->GetGUID().GetCounter();
-
-        // 1) 토큰이 연결된 입찰 로그 찾기
-        std::string q = Trinity::StringFormat(
-            "SELECT auction_id, account_id, bid_rp, status "
-            "FROM appdata.blackmarket_rp_bids "
-            "WHERE token_item_guid={} LIMIT 1",
-            static_cast<uint64_t>(itemGuid)
-        );
-
-        uint32 auctionId = 0;
-        uint32 logAccId  = 0;
-        uint32 bidRP     = 0;
-        uint8  status    = 0;
-
-        if (QueryResult r = CharacterDatabase.Query(q.c_str()))
-        {
-            Field* f = r->Fetch();
-            auctionId = f[0].GetUInt32();
-            logAccId  = f[1].GetUInt32();
-            bidRP     = f[2].GetUInt32();
-            status    = f[3].GetUInt8();
-        }
-        else
-        {
-            player->GetSession()->SendNotification("이 토큰과 연결된 RP 입찰 기록을 찾을 수 없습니다.");
-            return false;
-        }
-
-        if (logAccId != accountId)
-        {
-            player->GetSession()->SendNotification("이 토큰은 다른 계정의 RP 입찰과 연결되어 있습니다.");
-            return false;
-        }
-
-        if (status != 2) // lost_token_sent 상태가 아닌 경우
-        {
-            player->GetSession()->SendNotification("이미 환급되었거나 사용할 수 없는 토큰입니다.");
-            return false;
-        }
-
-        if (bidRP == 0)
-        {
-            player->GetSession()->SendNotification("환급할 RP가 없습니다.");
-            return false;
-        }
-
-        // 2) 계정 RP에 재적립
-        {
-            std::string updRP = Trinity::StringFormat(
-                "UPDATE appdata.account_data SET reg_point = reg_point + {} WHERE id={}",
-                bidRP, accountId
-            );
-            CharacterDatabase.Execute(updRP.c_str());
-        }
-
-        // 3) 로그 상태 갱신 (refunded)
-        {
-            uint32 nowTs = uint32(GameTime::GetGameTime());
-            std::string updLog = Trinity::StringFormat(
-                "UPDATE appdata.blackmarket_rp_bids "
-                "SET status=3, updated_at={} "
-                "WHERE auction_id={} AND account_id={} AND token_item_guid={}",
-                nowTs, auctionId, accountId, static_cast<uint64_t>(itemGuid)
-            );
-            CharacterDatabase.Execute(updLog.c_str());
-        }
-
-        // 4) 아이템 파기
-        player->DestroyItem(item->GetBagSlot(), item->GetSlot(), true);
-        player->GetSession()->SendNotification("입찰에 사용된 RP가 환급되었습니다.");
-
-        return true;
-    }
-};
-
 
 #include "ScriptMgr.h"
 #include "Player.h"
@@ -2243,13 +1120,13 @@ public:
 				username = f[0].GetString();
 			}
 
-			SendServerDiscordEvent(
+	/*		SendServerDiscordEvent(
 				"🟢 로그인",
 				"계정: " + username,
 				"https://stimpack.pe.kr",
 				3066993,
 				"home"
-			);
+			);  */
 		}
     }
 };
@@ -3361,6 +2238,14 @@ public:
         if (!player)
             return false;
 
+		// 겨울손아귀 호수 / 일반 전장 사용 불가
+        // 겨울손아귀 호수 zoneId = 4197
+        if (player->GetZoneId() == 4197 || (player->InBattleground() && !player->InArena()))
+        {
+            ChatHandler(player->GetSession()).SendSysMessage("이 아이템은 겨울손아귀 호수와 전장에서는 사용할 수 없습니다.");
+            return true;
+        }
+
         uint32 spellId = 0;
 
         if (player->GetTeamId() == TEAM_HORDE)
@@ -3499,6 +2384,44 @@ public:
             message
         );
     }
+
+	void OnLogout(Player* player) override
+	{
+		uint32 realmId = sConfigMgr->GetIntDefault("RealmID", 0);
+		if (realmId != 1)
+			return;
+
+		if (!player)
+			return;
+
+		if (!player->GetSession())
+			return;
+
+		uint32 guildId = player->GetGuildId();
+
+		if (!guildId)
+			return;
+
+		uint32 accountId = player->GetSession()->GetAccountId();
+		uint64 characterGuid = player->GetGUID().GetCounter();
+
+		std::string characterName = player->GetName();
+		std::string message = "로그아웃하였습니다.";
+
+		LoginDatabase.EscapeString(characterName);
+		LoginDatabase.EscapeString(message);
+
+		LoginDatabase.PExecute(
+			"INSERT INTO appdata.guild_tech_chat "
+			"(guild_id, account_id, character_guid, character_name, message, created_at, deleted_at) "
+			"VALUES ({}, {}, {}, '{}', '{}', NOW(), NULL)",
+			guildId,
+			accountId,
+			characterGuid,
+			characterName,
+			message
+		);
+	}
 };
 
 class guild_join_chat_insert : public GuildScript
@@ -3541,6 +2464,1348 @@ public:
 };
 
 
+namespace
+{
+    static constexpr uint32 OLD_BATTLE_MARK_ITEM_ENTRY = 3438;
+}
+
+class item_old_battle_mark_deposit : public ItemScript
+{
+public:
+    item_old_battle_mark_deposit() : ItemScript("item_old_battle_mark_deposit") { }
+
+    bool OnUse(Player* player, Item* item, SpellCastTargets const& /*targets*/) override
+    {
+        if (!player || !item)
+            return true;
+
+        if (item->GetEntry() != OLD_BATTLE_MARK_ITEM_ENTRY)
+            return true;
+
+        WorldSession* session = player->GetSession();
+        if (!session)
+            return true;
+
+        uint32 accountId = session->GetAccountId();
+
+        if (accountId == 0)
+            return true;
+
+        std::string query = fmt::format(
+			"INSERT INTO appdata.account_data "
+			"    (id, old_battle_mark) "
+			"VALUES "
+			"    ({}, 1) "
+			"ON DUPLICATE KEY UPDATE "
+			"    old_battle_mark = old_battle_mark + 1",
+			accountId
+		);
+
+		LoginDatabase.DirectExecute(query.c_str());
+
+		uint32 count = 1;
+		player->DestroyItemCount(item, count, true);
+
+		ChatHandler(session).SendSysMessage("낡은 전장의 훈장 1개가 홈페이지 전장 상점에 적립되었습니다.");
+
+		return true;
+
+        return true;
+    }
+};
+
+#include "ScriptMgr.h"
+#include "Player.h"
+#include "Item.h"
+#include "Chat.h"
+#include "WorldSession.h"
+#include "Map.h"
+#include "SpellAuras.h"
+#include "SpellAuraDefines.h"
+#include "fmt/format.h"
+
+#include <ctime>
+#include <unordered_map>
+
+namespace BattleShopRewardItems
+{
+    static constexpr uint32 ITEM_BATTLE_GUARD_CHARM       = 23245; // 전장의 수호 부적
+    static constexpr uint32 ITEM_SMALL_ARENA_POINT_TICKET = 35554; // 소량 아레나 점수 교환권
+    static constexpr uint32 ITEM_HEROIC_RESET_TICKET      = 35552; // 영웅 던전 초기화권
+
+    static constexpr uint32 ARENA_POINT_REWARD = 50;
+
+    // 전장의 수호 부적 효과용 기존 주문
+    // Dispersion 계열: 받는 피해 90% 감소 성격.
+    // 지속시간은 스크립트에서 5초로 줄임.
+    static constexpr uint32 SPELL_BATTLE_GUARD_AURA = 29476;
+
+    static constexpr uint32 BATTLE_GUARD_DURATION_MS = 5 * IN_MILLISECONDS;
+    static constexpr uint32 BATTLE_GUARD_COOLDOWN_SEC = 10 * MINUTE;
+
+    static constexpr uint32 ZONE_WINTERGRASP = 4197;
+
+    static std::unordered_map<uint64, time_t> BattleGuardCooldowns;
+
+    bool IsInAllowedBattleArea(Player* player)
+    {
+        if (!player)
+            return false;
+
+        if (player->InArena())
+            return false;
+
+        if (player->InBattleground())
+            return true;
+
+        if (player->GetMapId() == 571 && player->GetZoneId() == ZONE_WINTERGRASP)
+            return true;
+
+        return false;
+    }
+
+    void Send(Player* player, std::string const& message)
+    {
+        if (!player || !player->GetSession())
+            return;
+
+        ChatHandler(player->GetSession()).SendSysMessage(message.c_str());
+    }
+
+    void ConsumeOne(Player* player, Item* item)
+    {
+        if (!player || !item)
+            return;
+
+        uint32 count = 1;
+        player->DestroyItemCount(item, count, true);
+    }
+
+    void RemoveEmergencyControlAuras(Player* player)
+    {
+        if (!player)
+            return;
+
+        player->RemoveAurasByType(SPELL_AURA_MOD_STUN);
+        player->RemoveAurasByType(SPELL_AURA_MOD_FEAR);
+        player->RemoveAurasByType(SPELL_AURA_MOD_ROOT);
+        player->RemoveAurasByType(SPELL_AURA_MOD_CONFUSE);
+        player->RemoveAurasByType(SPELL_AURA_MOD_DECREASE_SPEED);
+    }
+}
+
+class item_battle_guard_charm : public ItemScript
+{
+public:
+    item_battle_guard_charm() : ItemScript("item_battle_guard_charm") { }
+
+    bool OnUse(Player* player, Item* item, SpellCastTargets const& /*targets*/) override
+    {
+        using namespace BattleShopRewardItems;
+
+        if (!player || !item)
+            return true;
+
+        if (item->GetEntry() != ITEM_BATTLE_GUARD_CHARM)
+            return true;
+
+        if (player->GetHealthPct() > 40.0f)
+        {
+            Send(player, "전장의 수호 부적은 생명력이 40% 이하일 때만 사용할 수 있습니다.");
+            return true;
+        }
+
+        uint64 guidLow = player->GetGUID().GetCounter();
+        time_t now = std::time(nullptr);
+
+        auto itr = BattleGuardCooldowns.find(guidLow);
+        if (itr != BattleGuardCooldowns.end() && itr->second > now)
+        {
+            uint32 remain = uint32(itr->second - now);
+            uint32 minute = (remain + 59) / 60;
+
+            Send(player, fmt::format("전장의 수호 부적은 아직 사용할 수 없습니다. 남은 시간: 약 {}분", minute));
+            return true;
+        }
+
+        RemoveEmergencyControlAuras(player);
+
+        Aura* aura = player->AddAura(SPELL_BATTLE_GUARD_AURA, player);
+        if (!aura)
+        {
+            Send(player, "전장의 수호 부적 효과 적용에 실패했습니다.");
+            return true;
+        }
+
+        aura->SetMaxDuration(BATTLE_GUARD_DURATION_MS);
+        aura->SetDuration(BATTLE_GUARD_DURATION_MS);
+
+        BattleGuardCooldowns[guidLow] = now + BATTLE_GUARD_COOLDOWN_SEC;
+
+        ConsumeOne(player, item);
+
+        Send(player, "전장의 수호 부적을 사용했습니다. 5초 동안 받는 피해가 크게 감소합니다.");
+
+        return true;
+    }
+};
+
+class item_small_arena_point_ticket : public ItemScript
+{
+public:
+    item_small_arena_point_ticket() : ItemScript("item_small_arena_point_ticket") { }
+
+    bool OnUse(Player* player, Item* item, SpellCastTargets const& /*targets*/) override
+    {
+        using namespace BattleShopRewardItems;
+
+        if (!player || !item)
+            return true;
+
+        if (item->GetEntry() != ITEM_SMALL_ARENA_POINT_TICKET)
+            return true;
+
+        player->ModifyArenaPoints(int32(ARENA_POINT_REWARD));
+
+        ConsumeOne(player, item);
+
+        Send(player, fmt::format("아레나 점수 {}점을 획득했습니다.", ARENA_POINT_REWARD));
+
+        return true;
+    }
+};
+
+class item_heroic_dungeon_reset_ticket : public ItemScript
+{
+public:
+    item_heroic_dungeon_reset_ticket() : ItemScript("item_heroic_dungeon_reset_ticket") { }
+
+    bool OnUse(Player* player, Item* item, SpellCastTargets const& /*targets*/) override
+    {
+        using namespace BattleShopRewardItems;
+
+        if (!player || !item)
+            return true;
+
+        if (item->GetEntry() != ITEM_HEROIC_RESET_TICKET)
+            return true;
+
+        if (player->IsInCombat())
+        {
+            Send(player, "전투 중에는 영웅 던전 초기화권을 사용할 수 없습니다.");
+            return true;
+        }
+
+        Map* map = player->GetMap();
+        if (map && map->IsDungeon())
+        {
+            Send(player, "인스턴스 내부에서는 영웅 던전 초기화권을 사용할 수 없습니다.");
+            return true;
+        }
+
+        if (player->InBattleground() || player->InArena())
+        {
+            Send(player, "전장 또는 투기장 안에서는 영웅 던전 초기화권을 사용할 수 없습니다.");
+            return true;
+        }
+
+        static constexpr uint8 INSTANCE_RESET_ALL_METHOD = 0;
+
+        player->ResetInstances(INSTANCE_RESET_ALL_METHOD, false);
+
+        ConsumeOne(player, item);
+
+        Send(player, "영웅 던전 귀속이 초기화되었습니다. 레이드 귀속은 초기화되지 않습니다.");
+
+        return true;
+    }
+};
+
+//투기장 보상상자
+#include "ScriptMgr.h"
+#include "Player.h"
+#include "Item.h"
+#include "Chat.h"
+#include "DatabaseEnv.h"
+#include "WorldSession.h"
+
+namespace Season8BattleBoxes
+{
+    // 상자 아이템
+    static constexpr uint32 ITEM_SEASON8_BATTLE_BOX      = 23656; // 시즌 8 전투상자
+    static constexpr uint32 ITEM_SEASON8_HIGH_BATTLE_BOX = 22582; // 시즌 8 고급 전투상자
+
+    // 보상 아이템
+    static constexpr uint32 ITEM_ARENA_TOKEN             = 3438; // 투기장 증표
+    static constexpr uint32 ITEM_BATTLE_HEALING_POTION   = 17348; // 전장 특급 치유 물약
+    static constexpr uint32 ITEM_BATTLE_MANA_POTION      = 17351; // 전장 특급 마나 물약
+    static constexpr uint32 ITEM_BATTLE_GUARD_CHARM      = 23245; // 전장의 수호 부적
+    static constexpr uint32 ITEM_ARENA_POINT_TICKET      = 35554; // 전장의 아레나 증서
+    static constexpr uint32 ITEM_HEROIC_RESET_TICKET     = 35552; // 영웅 던전 재입장 허가서
+
+    static constexpr uint32 NORMAL_BOX_BASE_TOKEN = 3;
+    static constexpr uint32 HIGH_BOX_BASE_TOKEN   = 8;
+
+    static void Send(Player* player, std::string const& message)
+    {
+        if (!player || !player->GetSession())
+            return;
+
+        ChatHandler(player->GetSession()).SendSysMessage(message.c_str());
+    }
+
+    static void AddRP(Player* player, uint32 amount)
+    {
+        if (!player || !player->GetSession() || amount == 0)
+            return;
+
+        uint32 accountId = player->GetSession()->GetAccountId();
+
+        if (accountId == 0)
+            return;
+
+        LoginDatabase.PExecute(
+            "UPDATE appdata.account_data "
+            "SET reg_point = reg_point + {} "
+            "WHERE id = {}",
+            amount,
+            accountId
+        );
+    }
+
+    static void AddHonor(Player* player, uint32 amount)
+    {
+        if (!player || amount == 0)
+            return;
+
+        player->ModifyHonorPoints(int32(amount));
+    }
+
+    static void AddItem(Player* player, uint32 itemEntry, uint32 count)
+    {
+        if (!player || itemEntry == 0 || count == 0)
+            return;
+
+        player->AddItem(itemEntry, count);
+    }
+
+    static void ConsumeBox(Player* player, Item* item)
+    {
+        if (!player || !item)
+            return;
+
+        uint32 count = 1;
+        player->DestroyItemCount(item, count, true);
+    }
+
+    static void GiveNormalBoxReward(Player* player)
+    {
+        AddItem(player, ITEM_ARENA_TOKEN, NORMAL_BOX_BASE_TOKEN);
+
+        uint32 roll = urand(1, 100);
+
+        if (roll <= 30)
+        {
+            AddItem(player, ITEM_ARENA_TOKEN, 2);
+            Send(player, "시즌 8 전투상자에서 투기장 증표 2개를 추가로 획득했습니다.");
+        }
+        else if (roll <= 45)
+        {
+            AddItem(player, ITEM_BATTLE_HEALING_POTION, 5);
+            Send(player, "시즌 8 전투상자에서 전장 특급 치유 물약 5개를 획득했습니다.");
+        }
+        else if (roll <= 60)
+        {
+            AddItem(player, ITEM_BATTLE_MANA_POTION, 5);
+            Send(player, "시즌 8 전투상자에서 전장 특급 마나 물약 5개를 획득했습니다.");
+        }
+        else if (roll <= 70)
+        {
+            AddItem(player, ITEM_BATTLE_GUARD_CHARM, 1);
+            Send(player, "시즌 8 전투상자에서 전장의 수호 부적 1개를 획득했습니다.");
+        }
+        else if (roll <= 80)
+        {
+            AddItem(player, ITEM_ARENA_POINT_TICKET, 1);
+            Send(player, "시즌 8 전투상자에서 전장의 아레나 증서 1개를 획득했습니다.");
+        }
+        else if (roll <= 85)
+        {
+            AddItem(player, ITEM_HEROIC_RESET_TICKET, 1);
+            Send(player, "시즌 8 전투상자에서 영웅 던전 재입장 허가서 1개를 획득했습니다.");
+        }
+        else if (roll <= 95)
+        {
+            AddRP(player, 2000);
+            Send(player, "시즌 8 전투상자에서 RP 2,000을 획득했습니다.");
+        }
+        else
+        {
+            AddHonor(player, 1000);
+            Send(player, "시즌 8 전투상자에서 명예 점수 1,000점을 획득했습니다.");
+        }
+
+        Send(player, "시즌 8 전투상자 기본 보상으로 투기장 증표 3개를 획득했습니다.");
+    }
+
+    static void GiveHighBoxReward(Player* player)
+    {
+        AddItem(player, ITEM_ARENA_TOKEN, HIGH_BOX_BASE_TOKEN);
+
+        uint32 roll = urand(1, 100);
+
+        if (roll <= 30)
+        {
+            AddItem(player, ITEM_ARENA_TOKEN, 5);
+            Send(player, "시즌 8 고급 전투상자에서 투기장 증표 5개를 추가로 획득했습니다.");
+        }
+        else if (roll <= 45)
+        {
+            AddItem(player, ITEM_BATTLE_GUARD_CHARM, 2);
+            Send(player, "시즌 8 고급 전투상자에서 전장의 수호 부적 2개를 획득했습니다.");
+        }
+        else if (roll <= 60)
+        {
+            AddItem(player, ITEM_ARENA_POINT_TICKET, 2);
+            Send(player, "시즌 8 고급 전투상자에서 전장의 아레나 증서 2개를 획득했습니다.");
+        }
+        else if (roll <= 70)
+        {
+            AddItem(player, ITEM_HEROIC_RESET_TICKET, 1);
+            Send(player, "시즌 8 고급 전투상자에서 영웅 던전 재입장 허가서 1개를 획득했습니다.");
+        }
+        else if (roll <= 80)
+        {
+            AddRP(player, 5000);
+            Send(player, "시즌 8 고급 전투상자에서 RP 5,000을 획득했습니다.");
+        }
+        else if (roll <= 90)
+        {
+            AddHonor(player, 3000);
+            Send(player, "시즌 8 고급 전투상자에서 명예 점수 3,000점을 획득했습니다.");
+        }
+        else if (roll <= 97)
+        {
+            AddItem(player, ITEM_ARENA_TOKEN, 10);
+            Send(player, "시즌 8 고급 전투상자에서 투기장 증표 10개를 추가로 획득했습니다.");
+        }
+        else
+        {
+            AddItem(player, ITEM_ARENA_TOKEN, 15);
+            Send(player, "시즌 8 고급 전투상자에서 투기장 증표 15개를 추가로 획득했습니다.");
+        }
+
+        Send(player, "시즌 8 고급 전투상자 기본 보상으로 투기장 증표 8개를 획득했습니다.");
+    }
+}
+
+class item_season8_battle_box : public ItemScript
+{
+public:
+    item_season8_battle_box() : ItemScript("item_season8_battle_box") { }
+
+    bool OnUse(Player* player, Item* item, SpellCastTargets const& /*targets*/) override
+    {
+        if (!player || !item)
+            return true;
+
+        if (item->GetEntry() != Season8BattleBoxes::ITEM_SEASON8_BATTLE_BOX)
+            return true;
+
+        Season8BattleBoxes::GiveNormalBoxReward(player);
+        Season8BattleBoxes::ConsumeBox(player, item);
+
+        return true;
+    }
+};
+
+class item_season8_high_battle_box : public ItemScript
+{
+public:
+    item_season8_high_battle_box() : ItemScript("item_season8_high_battle_box") { }
+
+    bool OnUse(Player* player, Item* item, SpellCastTargets const& /*targets*/) override
+    {
+        if (!player || !item)
+            return true;
+
+        if (item->GetEntry() != Season8BattleBoxes::ITEM_SEASON8_HIGH_BATTLE_BOX)
+            return true;
+
+        Season8BattleBoxes::GiveHighBoxReward(player);
+        Season8BattleBoxes::ConsumeBox(player, item);
+
+        return true;
+    }
+};
+
+
+//전문기술확장
+namespace
+{
+    static constexpr uint32 ITEM_PROFESSION_BONUS_TOKEN = 1136;
+}
+
+class item_profession_bonus_token : public ItemScript
+{
+public:
+    item_profession_bonus_token() : ItemScript("item_profession_bonus_token") { }
+
+    bool OnUse(Player* player, Item* item, SpellCastTargets const& /*targets*/) override
+    {
+        if (!player || !item)
+            return true;
+
+        if (item->GetEntry() != ITEM_PROFESSION_BONUS_TOKEN)
+            return true;
+
+        uint32 guid = player->GetGUID().GetCounter();
+
+        QueryResult checkResult = CharacterDatabase.PQuery(
+            "SELECT enabled FROM character_profession_bonus WHERE guid = {} LIMIT 1",
+            guid
+        );
+
+        if (checkResult)
+        {
+            Field* fields = checkResult->Fetch();
+            uint8 enabled = fields[0].GetUInt8();
+
+            if (enabled == 1)
+            {
+                ChatHandler(player->GetSession()).PSendSysMessage("이미 전문기술 확장권을 사용한 캐릭터입니다.");
+                return true;
+            }
+        }
+
+		CharacterDatabase.PExecute(
+            "INSERT INTO character_profession_bonus "
+            "(guid, enabled, note) "
+            "VALUES ({}, 1, '전문기술 확장권 사용') "
+            "ON DUPLICATE KEY UPDATE "
+            "enabled = 1, "
+            "note = '전문기술 확장권 사용'",
+            guid
+        );
+
+        player->SetFreePrimaryProfessions(player->GetFreePrimaryProfessionPoints() + 1);
+
+		player->DestroyItemCount(item->GetEntry(), 1, true);
+
+        ChatHandler(player->GetSession()).PSendSysMessage("전문기술 가능 개수가 1 증가했습니다.");
+        return true;
+    }
+};
+
+
+//잿빛선고단 평판확고
+#include "ScriptMgr.h"
+#include "Player.h"
+#include "Item.h"
+#include "Chat.h"
+#include "DBCStores.h"
+#include "ReputationMgr.h"
+
+static constexpr uint32 ITEM_ASHEN_VERDICT_EXALTED = 1138;
+static constexpr uint32 FACTION_ASHEN_VERDICT = 1156;
+static constexpr int32 REPUTATION_EXALTED_MAX = 42999;
+
+class item_ashen_verdict_exalted : public ItemScript
+{
+public:
+    item_ashen_verdict_exalted() : ItemScript("item_ashen_verdict_exalted") { }
+
+    bool OnUse(Player* player, Item* item, SpellCastTargets const& /*targets*/) override
+    {
+        if (!player || !item)
+            return false;
+
+        FactionEntry const* factionEntry = sFactionStore.LookupEntry(FACTION_ASHEN_VERDICT);
+        if (!factionEntry)
+        {
+            ChatHandler(player->GetSession()).SendSysMessage("잿빛 선고단 평판 정보를 찾을 수 없습니다.");
+            return true;
+        }
+
+        int32 currentStanding = player->GetReputationMgr().GetReputation(FACTION_ASHEN_VERDICT);
+
+        if (currentStanding >= REPUTATION_EXALTED_MAX)
+        {
+            ChatHandler(player->GetSession()).SendSysMessage("이미 잿빛 선고단 평판이 확고한 동맹입니다.");
+            return true;
+        }
+
+        player->GetReputationMgr().SetReputation(factionEntry, REPUTATION_EXALTED_MAX);
+
+        player->DestroyItemCount(item->GetEntry(), 1, true);
+
+        ChatHandler(player->GetSession()).SendSysMessage("잿빛 선고단 평판이 확고한 동맹이 되었습니다.");
+
+        return true;
+    }
+};
+
+// custom_booty_bay_transport.cpp
+
+#include "ScriptMgr.h"
+#include "ScriptedGossip.h"
+#include "Creature.h"
+#include "Player.h"
+#include "Unit.h"
+
+namespace
+{
+    enum BootyBayTransportData : uint32
+    {
+        ACTION_TO_BOOTY_BAY  = GOSSIP_ACTION_INFO_DEF + 1,
+        ACTION_TO_GADGETZAN  = GOSSIP_ACTION_INFO_DEF + 2,
+        ACTION_TO_FERALAS    = GOSSIP_ACTION_INFO_DEF + 3,
+
+        MIN_TRANSPORT_LEVEL  = 35,
+        MAX_TRANSPORT_LEVEL  = 60
+    };
+
+    struct TransportDestination
+    {
+        uint32 map;
+        float x;
+        float y;
+        float z;
+        float o;
+    };
+
+    // 무법항 도착지
+    static constexpr TransportDestination DEST_BOOTY_BAY =
+    {
+        0,
+        -14296.80f,
+        531.30f,
+        8.80f,
+        3.80f
+    };
+
+    // 가젯잔 도착지
+    static constexpr TransportDestination DEST_GADGETZAN =
+    {
+        1,
+        -7169.20f,
+        -3839.70f,
+        8.70f,
+        0.75f
+    };
+
+    // 페랄라스 - 호드: 모자케 야영지 근처
+    static constexpr TransportDestination DEST_FERALAS_HORDE =
+    {
+        1,
+        -4414.516f,
+        193.8892f,
+        25.660864f,
+        1.416485f
+    };
+
+    // 페랄라스 - 얼라이언스: 페더문 요새 근처
+    static constexpr TransportDestination DEST_FERALAS_ALLIANCE =
+    {
+        1,
+        -4370.10f,
+        3288.30f,
+        13.90f,
+        4.65f
+    };
+
+    enum TransportNpcPlace : uint8
+	{
+		PLACE_BOOTY_BAY = 0,
+		PLACE_GADGETZAN = 1,
+		PLACE_FERALAS_HORDE = 2,
+		PLACE_FERALAS_ALLIANCE = 3,
+		PLACE_UNKNOWN = 4
+	};
+
+	enum TransportDisplayId : uint32
+	{
+		DISPLAY_TRANSPORT_GOBLIN = 11376, // 무법항 / 가젯잔
+		DISPLAY_TRANSPORT_TAUREN = 7248, // 모자케
+		DISPLAY_TRANSPORT_HUMAN  = 7022  // 페더문
+	};
+
+    static TransportNpcPlace GetTransportNpcPlace(Creature* creature)
+	{
+		if (!creature)
+			return PLACE_UNKNOWN;
+
+		uint32 mapId = creature->GetMapId();
+		float x = creature->GetPositionX();
+		float y = creature->GetPositionY();
+
+		// 무법항 근처
+		if (mapId == 0)
+		{
+			if (x < -14000.0f && y > 300.0f && y < 900.0f)
+				return PLACE_BOOTY_BAY;
+		}
+
+		// 칼림도어
+		if (mapId == 1)
+		{
+			// 가젯잔 근처
+			if (x < -6900.0f && x > -7500.0f && y < -3500.0f && y > -4200.0f)
+				return PLACE_GADGETZAN;
+
+			// 모자케 야영지 근처
+			if (x < -4100.0f && x > -4700.0f && y > -100.0f && y < 600.0f)
+				return PLACE_FERALAS_HORDE;
+
+			// 페더문 요새 근처
+			if (x < -4100.0f && x > -4700.0f && y > 2800.0f && y < 3600.0f)
+				return PLACE_FERALAS_ALLIANCE;
+		}
+
+		return PLACE_UNKNOWN;
+	}
+
+	static uint32 GetTransportDisplayIdByPlace(TransportNpcPlace place)
+	{
+		switch (place)
+		{
+			case PLACE_BOOTY_BAY:
+			case PLACE_GADGETZAN:
+				return DISPLAY_TRANSPORT_GOBLIN;
+
+			case PLACE_FERALAS_HORDE:
+				return DISPLAY_TRANSPORT_TAUREN;
+
+			case PLACE_FERALAS_ALLIANCE:
+				return DISPLAY_TRANSPORT_HUMAN;
+
+			default:
+				return DISPLAY_TRANSPORT_GOBLIN;
+		}
+	}
+
+	static void ApplyTransportDisplay(Creature* creature)
+	{
+		if (!creature)
+			return;
+
+		TransportNpcPlace place = GetTransportNpcPlace(creature);
+		uint32 displayId = GetTransportDisplayIdByPlace(place);
+
+		creature->SetDisplayId(displayId);
+		creature->SetNativeDisplayId(displayId);
+	}
+
+    static bool CanUseBootyBayTransport(Player* player)
+    {
+        if (!player)
+            return false;
+
+        if (!player->IsAlive())
+        {
+            player->GetSession()->SendAreaTriggerMessage("죽은 상태에서는 이용할 수 없습니다.");
+            return false;
+        }
+
+        if (player->IsInCombat())
+        {
+            player->GetSession()->SendAreaTriggerMessage("전투 중에는 이용할 수 없습니다.");
+            return false;
+        }
+
+        uint8 level = player->GetLevel();
+
+        if (level < MIN_TRANSPORT_LEVEL || level > MAX_TRANSPORT_LEVEL)
+        {
+            player->GetSession()->SendAreaTriggerMessage("이 수송은 35~50레벨만 이용할 수 있습니다.");
+            return false;
+        }
+
+        return true;
+    }
+
+    static void SendTransport(Player* player, TransportDestination const& dest)
+    {
+        if (!player)
+            return;
+
+        player->TeleportTo(dest.map, dest.x, dest.y, dest.z, dest.o);
+    }
+
+    static void SendFeralas(Player* player)
+    {
+        if (!player)
+            return;
+
+        if (player->GetTeamId() == TEAM_ALLIANCE)
+            SendTransport(player, DEST_FERALAS_ALLIANCE);
+        else
+            SendTransport(player, DEST_FERALAS_HORDE);
+    }
+}
+
+struct npc_booty_bay_transport : public ScriptedAI
+{
+    npc_booty_bay_transport(Creature* creature) : ScriptedAI(creature) { }
+
+	void Reset() override
+	{
+		ApplyTransportDisplay(me);
+	}
+
+    bool OnGossipHello(Player* player) override
+    {
+        ClearGossipMenuFor(player);
+
+        TransportNpcPlace place = GetTransportNpcPlace(me);
+
+        switch (place)
+        {
+            case PLACE_BOOTY_BAY:
+                AddGossipItemFor(player, GOSSIP_ICON_CHAT, "가젯잔으로 이동한다", GOSSIP_SENDER_MAIN, ACTION_TO_GADGETZAN);
+                AddGossipItemFor(player, GOSSIP_ICON_CHAT, "페랄라스로 이동한다", GOSSIP_SENDER_MAIN, ACTION_TO_FERALAS);
+                break;
+
+            case PLACE_GADGETZAN:
+                AddGossipItemFor(player, GOSSIP_ICON_CHAT, "무법항으로 이동한다", GOSSIP_SENDER_MAIN, ACTION_TO_BOOTY_BAY);
+                AddGossipItemFor(player, GOSSIP_ICON_CHAT, "페랄라스로 이동한다", GOSSIP_SENDER_MAIN, ACTION_TO_FERALAS);
+                break;
+
+            case PLACE_FERALAS_HORDE:
+			case PLACE_FERALAS_ALLIANCE:
+                AddGossipItemFor(player, GOSSIP_ICON_CHAT, "무법항으로 이동한다", GOSSIP_SENDER_MAIN, ACTION_TO_BOOTY_BAY);
+                AddGossipItemFor(player, GOSSIP_ICON_CHAT, "가젯잔으로 이동한다", GOSSIP_SENDER_MAIN, ACTION_TO_GADGETZAN);
+                break;
+
+            default:
+                AddGossipItemFor(player, GOSSIP_ICON_CHAT, "무법항으로 이동한다", GOSSIP_SENDER_MAIN, ACTION_TO_BOOTY_BAY);
+                AddGossipItemFor(player, GOSSIP_ICON_CHAT, "가젯잔으로 이동한다", GOSSIP_SENDER_MAIN, ACTION_TO_GADGETZAN);
+                AddGossipItemFor(player, GOSSIP_ICON_CHAT, "페랄라스로 이동한다", GOSSIP_SENDER_MAIN, ACTION_TO_FERALAS);
+                break;
+        }
+
+        SendGossipMenuFor(player, 1, me->GetGUID());
+        return true;
+    }
+
+    bool OnGossipSelect(Player* player, uint32 /*menuId*/, uint32 gossipListId) override
+    {
+        uint32 const action = player->PlayerTalkClass->GetGossipOptionAction(gossipListId);
+
+        CloseGossipMenuFor(player);
+
+        if (!CanUseBootyBayTransport(player))
+            return true;
+
+        switch (action)
+        {
+            case ACTION_TO_BOOTY_BAY:
+                SendTransport(player, DEST_BOOTY_BAY);
+                break;
+
+            case ACTION_TO_GADGETZAN:
+                SendTransport(player, DEST_GADGETZAN);
+                break;
+
+            case ACTION_TO_FERALAS:
+                SendFeralas(player);
+                break;
+
+            default:
+                break;
+        }
+
+        return true;
+    }
+};
+
+
+//레벨 골드 보상
+#include "ScriptMgr.h"
+#include "Player.h"
+#include "Mail.h"
+#include "DatabaseEnv.h"
+
+#include <array>
+#include <string>
+
+namespace
+{
+    constexpr uint32 GOLD_TO_COPPER = 10000;
+
+    struct LevelGoldReward
+    {
+        uint8 Level;
+        uint32 Gold;
+    };
+
+    constexpr std::array<LevelGoldReward, 8> LEVEL_GOLD_REWARDS =
+    {{
+        {10, 500},
+        {20, 700},
+        {30, 800},
+        {40, 1000},
+        {50, 1200},
+        {60, 1800},
+        {65, 1500},
+        {70, 1500}
+    }};
+
+    void SendGoldRewardMail(Player* player, uint8 level, uint32 gold)
+    {
+        if (!player || gold == 0)
+            return;
+
+        std::string subject = "레벨 달성 지원금";
+        std::string body =
+            "축하합니다!\n\n"
+            + std::to_string(level)
+            + "레벨 달성을 기념하여 서버 정착 지원금 "
+            + std::to_string(gold)
+            + "골드를 지급합니다.\n\n"
+            "탈것, 숙련, 수리비, 소모품 준비에 사용해 주세요.";
+
+        uint32 money = gold * GOLD_TO_COPPER;
+
+        CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
+
+        MailDraft draft(subject, body);
+        draft.AddMoney(money);
+
+        draft.SendMailTo(
+            trans,
+            MailReceiver(player, player->GetGUID().GetCounter()),
+            MailSender(MAIL_NORMAL, 0, MAIL_STATIONERY_GM)
+        );
+
+        CharacterDatabase.CommitTransaction(trans);
+
+        player->GetSession()->SendAreaTriggerMessage("레벨 달성 지원금이 우편으로 지급되었습니다.");
+    }
+
+    void CheckLevelGoldReward(Player* player, uint8 oldLevel, uint8 currentLevel)
+    {
+        if (!player)
+            return;
+
+        if (currentLevel <= oldLevel)
+            return;
+
+        for (LevelGoldReward const& reward : LEVEL_GOLD_REWARDS)
+        {
+            if (oldLevel < reward.Level && currentLevel >= reward.Level)
+                SendGoldRewardMail(player, reward.Level, reward.Gold);
+        }
+    }
+}
+
+class custom_level_gold_reward : public PlayerScript
+{
+public:
+    custom_level_gold_reward() : PlayerScript("custom_level_gold_reward") { }
+
+    void OnLevelChanged(Player* player, uint8 oldLevel) override
+    {
+        if (!player)
+            return;
+
+        CheckLevelGoldReward(player, oldLevel, player->GetLevel());
+    }
+};
+
+
+//채널초대
+static constexpr uint32 LIGHT_GUARDIAN_INVITE_DELAY_MS = 5000;
+static std::string const LIGHT_GUARDIAN_CHANNEL_NAME = "빛의수호자";
+
+static bool IsAlreadyInLightGuardianChannel(Player* player)
+{
+    if (!player || !player->GetSession())
+        return false;
+
+    Channel* channel = ChannelMgr::GetChannelForPlayerByNamePart(LIGHT_GUARDIAN_CHANNEL_NAME, player);
+    if (!channel)
+        return false;
+
+    return channel->GetName(player->GetSession()->GetSessionDbcLocale()) == LIGHT_GUARDIAN_CHANNEL_NAME;
+}
+
+static void SendLightGuardianInvitePopup(Player* player)
+{
+    if (!player || !player->GetSession())
+        return;
+
+    // 이미 빛의수호자 채널에 들어가 있으면 초대창 보내지 않음
+    if (IsAlreadyInLightGuardianChannel(player))
+        return;
+
+    WorldPacket data(SMSG_CHANNEL_NOTIFY, 80);
+
+    data << uint8(CHAT_INVITE_NOTICE);
+    data << LIGHT_GUARDIAN_CHANNEL_NAME;
+    data << player->GetGUID();
+
+    player->GetSession()->SendPacket(&data);
+}
+
+class LightGuardianInviteEvent : public BasicEvent
+{
+public:
+    explicit LightGuardianInviteEvent(ObjectGuid playerGuid)
+        : _playerGuid(playerGuid)
+    {
+    }
+
+    bool Execute(uint64 /*time*/, uint32 /*diff*/) override
+    {
+        Player* player = ObjectAccessor::FindConnectedPlayer(_playerGuid);
+        if (!player)
+            return true;
+
+        SendLightGuardianInvitePopup(player);
+        return true;
+    }
+
+private:
+    ObjectGuid _playerGuid;
+};
+
+class light_guardian_channel_invite_player : public PlayerScript
+{
+public:
+    light_guardian_channel_invite_player()
+        : PlayerScript("light_guardian_channel_invite_player")
+    {
+    }
+
+    void OnLogin(Player* player, bool /*firstLogin*/) override
+    {
+        if (!player)
+            return;
+
+        player->m_Events.AddEvent(
+            new LightGuardianInviteEvent(player->GetGUID()),
+            player->m_Events.CalculateTime(Milliseconds(LIGHT_GUARDIAN_INVITE_DELAY_MS))
+        );
+    }
+};
+
+//감사장 랜덤추가
+namespace
+{
+    constexpr uint32 ITEM_THANK_YOU_LETTER = 45924;
+
+    // 영웅 던전만 적용
+    constexpr bool ONLY_HEROIC_DUNGEON = true;
+
+    bool IsThankYouWeekend()
+    {
+        std::time_t now = std::time(nullptr);
+
+        std::tm localTime;
+#ifdef _WIN32
+        localtime_s(&localTime, &now);
+#else
+        localtime_r(&now, &localTime);
+#endif
+
+        // 일요일 0, 금요일 5, 토요일 6
+        return localTime.tm_wday == 0 || localTime.tm_wday == 5 || localTime.tm_wday == 6;
+    }
+
+    bool IsThankYouDungeon(Player* player)
+    {
+        if (!player)
+            return false;
+
+        Map* map = player->GetMap();
+        if (!map)
+            return false;
+
+        if (!map->IsDungeon())
+            return false;
+
+        if (map->IsRaid())
+            return false;
+
+        if (ONLY_HEROIC_DUNGEON && player->GetDungeonDifficulty() != DUNGEON_DIFFICULTY_HEROIC)
+            return false;
+
+        return true;
+    }
+
+    uint32 GetSameInstanceGroupMemberCount(Player* player)
+    {
+        if (!player)
+            return 0;
+
+        Map* map = player->GetMap();
+        if (!map)
+            return 0;
+
+        Group* group = player->GetGroup();
+        if (!group)
+            return 1;
+
+        uint32 count = 0;
+
+        Map::PlayerList const& players = map->GetPlayers();
+        for (Map::PlayerList::const_iterator itr = players.begin(); itr != players.end(); ++itr)
+        {
+            Player* member = itr->GetSource();
+            if (!member)
+                continue;
+
+            if (member->GetGroup() != group)
+                continue;
+
+            ++count;
+        }
+
+        return count;
+    }
+
+    uint32 GetThankYouFinalCount(Player* player, uint32 lootedCount)
+    {
+        uint32 finalCount = lootedCount;
+
+        uint32 memberCount = GetSameInstanceGroupMemberCount(player);
+
+        if (memberCount >= 5)
+            finalCount = urand(1, 5);
+        else
+            finalCount = 1;
+
+        if (IsThankYouWeekend())
+            finalCount *= 2;
+
+        return finalCount;
+    }
+}
+
+
+
+
+struct ThankYouOutdoorPvpBuffInfo
+{
+    uint32 AllianceBuff;
+    uint32 HordeBuff;
+};
+
+static constexpr uint32 THANK_YOU_OUTDOOR_PVP_BUFF_REQUIRED_COUNT = 3;
+static constexpr uint32 THANK_YOU_OUTDOOR_PVP_BUFF_MULTIPLIER = 2;
+
+static constexpr std::array<ThankYouOutdoorPvpBuffInfo, 6> THANK_YOU_OUTDOOR_PVP_BUFFS =
+{{
+    // 지옥불 반도
+    { 32071, 32049 },
+
+    // 실리더스
+    { 29534, 29534 },
+
+    // 나그란드
+    { 33795, 33795 },
+
+    // 장가르 습지대
+    { 0, 0 },
+
+    // 테로카르 숲
+    { 0, 0 },
+
+    // 동부 역병지대
+    { 0, 0 } 
+}};
+
+static uint32 GetThankYouOutdoorPvpBuffCount(Player* player)
+{
+    if (!player)
+        return 0;
+
+    uint32 buffCount = 0;
+
+    for (ThankYouOutdoorPvpBuffInfo const& outdoorBuff : THANK_YOU_OUTDOOR_PVP_BUFFS)
+    {
+        if (outdoorBuff.AllianceBuff == 0 && outdoorBuff.HordeBuff == 0)
+            continue;
+
+        bool hasBuff = false;
+
+        if (player->GetTeam() == ALLIANCE)
+        {
+            if (outdoorBuff.AllianceBuff != 0 && player->HasAura(outdoorBuff.AllianceBuff))
+                hasBuff = true;
+        }
+        else if (player->GetTeam() == HORDE)
+        {
+            if (outdoorBuff.HordeBuff != 0 && player->HasAura(outdoorBuff.HordeBuff))
+                hasBuff = true;
+        }
+
+        if (hasBuff)
+            ++buffCount;
+    }
+
+    return buffCount;
+}
+
+class custom_thank_you_letter_loot : public PlayerScript
+{
+public:
+    custom_thank_you_letter_loot() : PlayerScript("custom_thank_you_letter_loot") { }
+
+    void OnLootItem(Player* looter, ObjectGuid const& /*lootGuid*/, uint32 itemId, uint32 count) override
+    {
+        if (!looter)
+            return;
+
+        if (itemId != ITEM_THANK_YOU_LETTER)
+            return;
+
+        if (!IsThankYouDungeon(looter))
+            return;
+
+        if (count == 0)
+            return;
+
+        uint32 finalCount = GetThankYouFinalCount(looter, count);
+
+		uint32 outdoorPvpBuffCount = GetThankYouOutdoorPvpBuffCount(looter);
+        bool outdoorPvpBuffBonus = outdoorPvpBuffCount >= THANK_YOU_OUTDOOR_PVP_BUFF_REQUIRED_COUNT;
+
+        if (outdoorPvpBuffBonus)
+            finalCount *= THANK_YOU_OUTDOOR_PVP_BUFF_MULTIPLIER;
+
+        // 이미 기본 루팅으로 받은 수량보다 최종 수량이 작거나 같으면 추가 지급 없음
+        if (finalCount <= count)
+            return;
+
+        uint32 bonusCount = finalCount - count;
+
+        if (!looter->AddItem(ITEM_THANK_YOU_LETTER, bonusCount))
+        {
+            ChatHandler(looter->GetSession()).SendSysMessage("|cffff0000[감사장 보너스]|r 가방 공간이 부족하여 추가 감사장을 받을 수 없습니다.");
+            return;
+        }
+    }
+};
+
+#include "ScriptMgr.h"
+#include "Chat.h"
+#include "Item.h"
+#include "Map.h"
+#include "Player.h"
+#include "Spell.h"
+#include "SpellAuras.h"
+#include "Unit.h"
+
+namespace CustomTrialOfTheCrusaderSilenceScroll
+{
+    static constexpr uint32 MAP_TRIAL_OF_THE_CRUSADER = 649;
+    static constexpr uint32 SPELL_SCROLL_SILENCE_AURA = 65542;
+    static constexpr uint32 MAX_TRY_PLAYER_COUNT = 7;
+    static constexpr int32 SILENCE_DURATION_MS = 6000;
+    static constexpr float MAX_USE_DISTANCE = 40.0f;
+
+    static uint32 GetCurrentRaidMemberCount(Player* player)
+    {
+        if (!player)
+            return 0;
+
+        Group* group = player->GetGroup();
+
+        if (!group)
+            return 1;
+
+        return group->GetMembersCount();
+    }
+}
+
+class item_trial_of_the_crusader_silence_scroll : public ItemScript
+{
+public:
+    item_trial_of_the_crusader_silence_scroll() : ItemScript("item_trial_of_the_crusader_silence_scroll") { }
+
+    bool OnUse(Player* player, Item* item, SpellCastTargets const& targets) override
+    {
+        using namespace CustomTrialOfTheCrusaderSilenceScroll;
+
+        if (!player || !item)
+            return true;
+
+        if (player->GetMapId() != MAP_TRIAL_OF_THE_CRUSADER)
+        {
+            ChatHandler(player->GetSession()).SendSysMessage("이 두루마리는 십자군의 시험장에서만 사용할 수 있습니다.");
+            return true;
+        }
+
+        if (!player->IsInCombat())
+        {
+            ChatHandler(player->GetSession()).SendSysMessage("전투 중에만 사용할 수 있습니다.");
+            return true;
+        }
+
+        uint32 tryPlayerCount = GetCurrentRaidMemberCount(player);
+
+        if (tryPlayerCount > MAX_TRY_PLAYER_COUNT)
+        {
+            ChatHandler(player->GetSession()).SendSysMessage("트라이 인원이 7명을 초과하면 사용할 수 없습니다.");
+            return true;
+        }
+
+        Unit* target = targets.GetUnitTarget();
+
+        if (!target)
+            target = player->GetSelectedUnit();
+
+        if (!target)
+        {
+            ChatHandler(player->GetSession()).SendSysMessage("대상을 선택해야 합니다.");
+            return true;
+        }
+
+        if (!target->ToCreature())
+        {
+            ChatHandler(player->GetSession()).SendSysMessage("NPC 대상에게만 사용할 수 있습니다.");
+            return true;
+        }
+
+        if (!target->IsAlive())
+        {
+            ChatHandler(player->GetSession()).SendSysMessage("죽은 대상에게는 사용할 수 없습니다.");
+            return true;
+        }
+
+        if (!target->IsInCombat())
+        {
+            ChatHandler(player->GetSession()).SendSysMessage("전투 중인 대상에게만 사용할 수 있습니다.");
+            return true;
+        }
+
+        if (!player->IsWithinDistInMap(target, MAX_USE_DISTANCE))
+        {
+            ChatHandler(player->GetSession()).SendSysMessage("대상이 너무 멀리 있습니다.");
+            return true;
+        }
+
+        target->InterruptNonMeleeSpells(false);
+
+        Aura* aura = target->AddAura(SPELL_SCROLL_SILENCE_AURA, target);
+
+        if (!aura)
+        {
+            ChatHandler(player->GetSession()).SendSysMessage("대상에게 침묵 효과를 적용하지 못했습니다.");
+            return true;
+        }
+
+        aura->SetMaxDuration(SILENCE_DURATION_MS);
+        aura->SetDuration(SILENCE_DURATION_MS);
+
+        uint32 destroyCount = 1;
+        player->DestroyItemCount(item, destroyCount, true);
+
+        return true;
+    }
+};
 
 
 
@@ -3557,12 +3822,6 @@ void AddSC_custom_scripts()
     new item_portable_bankmail_onuse();
 	new item_mail();
 	new item_buff();
-
-	//암시장
-	new npc_black_market_auctioneer();
-    new BlackMarketAuctionScheduler();
-    new BlackMarketSpawner();
-	new item_blackmarket_rp_refund();
 
 	//80레벨 부스터
 	new item_level80_boost_dps();
@@ -3604,4 +3863,36 @@ void AddSC_custom_scripts()
 	new faction_channel_chat_log();
 	new guild_login_chat_insert();
 	new guild_join_chat_insert();
+
+	//낡은 훈장
+	new item_old_battle_mark_deposit();
+	new item_battle_guard_charm();
+    new item_small_arena_point_ticket();
+    new item_heroic_dungeon_reset_ticket();
+
+	//투기장 보상상자
+	new item_season8_battle_box();
+    new item_season8_high_battle_box();
+
+	//전문기술확장
+	new item_profession_bonus_token();
+
+	//잿빛선고단 평팜
+	new item_ashen_verdict_exalted();
+
+	//레벨업 텔레보터
+	RegisterCreatureAI(npc_booty_bay_transport);
+
+	//레벨업보상골드
+	new custom_level_gold_reward();
+
+	//채널초대
+	new light_guardian_channel_invite_player();
+
+	//감사장추가지급
+	new custom_thank_you_letter_loot();
+
+	//침묵시전
+	new item_trial_of_the_crusader_silence_scroll();
+
 }

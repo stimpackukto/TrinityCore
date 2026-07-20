@@ -15,6 +15,12 @@
  * with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
+/*
+ * Custom Update - 2026-06-30
+ *
+ * Trial of the Champion Grand Champions start state fix
+ */
+
 #include "GameObject.h"
 #include "ScriptMgr.h"
 #include "ScriptedCreature.h"
@@ -639,28 +645,32 @@ class npc_announcer_toc5 : public CreatureScript
         void StartEncounter(bool startRp = false)
         {
             me->RemoveFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_GOSSIP);
-            /// @todo: fix this ugly code
+
             if (instance->GetBossState(DATA_BLACK_KNIGHT) == NOT_STARTED || instance->GetBossState(DATA_BLACK_KNIGHT) == TO_BE_DECIDED)
             {
                 if (instance->GetBossState(DATA_ARGENT_CHALLENGE) == NOT_STARTED || instance->GetBossState(DATA_ARGENT_CHALLENGE) == TO_BE_DECIDED)
                 {
-                    // Starting Grand Champion event (with roleplaying)
-                    if (startRp && (instance->GetBossState(DATA_GRAND_CHAMPIONS) == NOT_STARTED || instance->GetBossState(DATA_GRAND_CHAMPIONS) == TO_BE_DECIDED))
+                    EncounterState const grandChampionState = instance->GetBossState(DATA_GRAND_CHAMPIONS);
+
+                    if (grandChampionState == NOT_STARTED || grandChampionState == TO_BE_DECIDED || grandChampionState == FAIL)
                     {
-                        Talk(SAY_INTRO_1);
-                        NextStep(7000, 0, false, EVENT_INTRODUCE);
+                        instance->SetBossState(DATA_GRAND_CHAMPIONS, IN_PROGRESS);
+
+                        if (startRp)
+                        {
+                            Talk(SAY_INTRO_1);
+                            NextStep(7000, 0, false, EVENT_INTRODUCE);
+                        }
+                        else
+                            SetData(DATA_START, 0);
+
+                        return;
                     }
 
-                    // Starting Grand Champion event (skipped roleplaying)
-                    if (!startRp && (instance->GetBossState(DATA_GRAND_CHAMPIONS) == NOT_STARTED || instance->GetBossState(DATA_GRAND_CHAMPIONS) == TO_BE_DECIDED))
-                        SetData(DATA_START, 0);
-
-                    // Starting Argent Champion event
-                    if (instance->GetBossState(DATA_GRAND_CHAMPIONS) == DONE)
+                    if (grandChampionState == DONE)
                         DoStartArgentChampionEncounter();
                 }
 
-                // Starting Black Knight event
                 if (instance->GetBossState(DATA_GRAND_CHAMPIONS) == DONE && instance->GetBossState(DATA_ARGENT_CHALLENGE) == DONE)
                     DoStartBlackKnight();
             }

@@ -239,36 +239,169 @@ enum WGQueue
     SPELL_FROST_ARMOR                               = 12544
 };
 
+	namespace
+{
+    enum WgQueuePortalData : uint32
+    {
+        GO_PORTAL_TO_WINTERGRASP = 193772,
+        WG_PORTAL_CHECK_TIMER    = 5000
+    };
+
+    struct WgQueuePortalPos
+    {
+        float x;
+        float y;
+        float z;
+        float o;
+    };
+
+    static constexpr std::array<WgQueuePortalPos, 2> WG_QUEUE_PORTAL_POS =
+	{{
+		// 0번: 호드 진영 포탈 위치
+		{ 5924.081054f, 570.234375f, 661.087158f, 2.917058f },
+
+		// 1번: 얼라 진영 포탈 위치
+		{ 5686.799804f, 773.174987f, 647.752014f, 1.832589f }
+	}};
+
+    static std::array<ObjectGuid, 2> g_WgQueuePortalGuids;
+
+    static void RemoveWintergraspQueuePortals(Creature* me)
+	{
+		if (!me)
+			return;
+
+		for (ObjectGuid& guid : g_WgQueuePortalGuids)
+		{
+			if (guid.IsEmpty())
+				continue;
+
+			if (GameObject* go = ObjectAccessor::GetGameObject(*me, guid))
+				go->Delete();
+
+			guid.Clear();
+		}
+	}
+
+    static void UpdateWintergraspQueuePortals(Creature* me)
+	{
+		if (!me)
+			return;
+
+		if (me->GetMapId() != 571)
+			return;
+
+		Battlefield* wintergrasp = sBattlefieldMgr->GetBattlefieldByBattleId(BATTLEFIELD_BATTLEID_WG);
+		if (!wintergrasp)
+		{
+			RemoveWintergraspQueuePortals(me);
+			return;
+		}
+
+		// 전투 중에는 포탈 전부 삭제
+		if (wintergrasp->IsWarTime())
+		{
+			RemoveWintergraspQueuePortals(me);
+			return;
+		}
+
+		// 전투 종료 후 현재 겨손 소유 진영 기준
+		// GetDefenderTeam(): false = 얼라, true = 호드 구조로 기존 코드에서 사용 중
+		uint8 activePortalIndex = wintergrasp->GetDefenderTeam() ? 0 : 1;
+
+		// 반대 진영 포탈은 삭제
+		for (uint8 i = 0; i < g_WgQueuePortalGuids.size(); ++i)
+		{
+			if (i == activePortalIndex)
+				continue;
+
+			if (g_WgQueuePortalGuids[i].IsEmpty())
+				continue;
+
+			if (GameObject* go = ObjectAccessor::GetGameObject(*me, g_WgQueuePortalGuids[i]))
+				go->Delete();
+
+			g_WgQueuePortalGuids[i].Clear();
+		}
+
+		// 이미 이긴 진영 포탈이 살아 있으면 유지
+		if (!g_WgQueuePortalGuids[activePortalIndex].IsEmpty())
+		{
+			if (ObjectAccessor::GetGameObject(*me, g_WgQueuePortalGuids[activePortalIndex]))
+				return;
+
+			g_WgQueuePortalGuids[activePortalIndex].Clear();
+		}
+
+		WgQueuePortalPos const& p = WG_QUEUE_PORTAL_POS[activePortalIndex];
+
+		QuaternionData rot;
+		rot.x = 0.0f;
+		rot.y = 0.0f;
+		rot.z = std::sin(p.o * 0.5f);
+		rot.w = std::cos(p.o * 0.5f);
+
+		if (GameObject* go = me->SummonGameObject(
+			GO_PORTAL_TO_WINTERGRASP,
+			p.x,
+			p.y,
+			p.z,
+			p.o,
+			rot,
+			Seconds(0),
+			GO_SUMMON_TIMED_OR_CORPSE_DESPAWN
+		))
+		{
+			go->SetRespawnTime(0);
+			g_WgQueuePortalGuids[activePortalIndex] = go->GetGUID();
+		}
+	}
+}
+
 struct npc_wg_queue : public ScriptedAI
 {
     npc_wg_queue(Creature* creature) : ScriptedAI(creature)
     {
         FrostArmor_Timer = 0;
+        Portal_Timer = 0;
     }
 
     uint32 FrostArmor_Timer;
+    uint32 Portal_Timer;
 
     void Reset() override
     {
         FrostArmor_Timer = 0;
+        Portal_Timer = 0;
     }
 
     void JustEngagedWith(Unit* /*who*/) override { }
 
     void UpdateAI(uint32 diff) override
     {
+        if (Portal_Timer <= diff)
+        {
+            UpdateWintergraspQueuePortals(me);
+            Portal_Timer = WG_PORTAL_CHECK_TIMER;
+        }
+        else
+            Portal_Timer -= diff;
+
         if (FrostArmor_Timer <= diff)
         {
             DoCast(me, SPELL_FROST_ARMOR);
             FrostArmor_Timer = 180000;
         }
-        else FrostArmor_Timer -= diff;
+        else
+            FrostArmor_Timer -= diff;
 
         DoMeleeAttackIfReady();
     }
 
     bool OnGossipHello(Player* player) override
     {
+        ClearGossipMenuFor(player);
+
         if (me->IsQuestGiver())
             player->PrepareQuestMenu(me->GetGUID());
 
@@ -285,33 +418,45 @@ struct npc_wg_queue : public ScriptedAI
         {
             uint32 timer = wintergrasp->GetTimer() / 1000;
             player->SendUpdateWorldState(4354, GameTime::GetGameTime() + timer);
+
             if (timer < 15 * MINUTE)
             {
                 AddGossipItemFor(player, GOSSIP_ICON_CHAT, player->GetSession()->GetTrinityString(WG_NPCQUEUE_TEXTOPTION_JOIN), GOSSIP_SENDER_MAIN, GOSSIP_ACTION_INFO_DEF);
                 SendGossipMenuFor(player, wintergrasp->GetDefenderTeam() ? WG_NPCQUEUE_TEXT_H_QUEUE : WG_NPCQUEUE_TEXT_A_QUEUE, me->GetGUID());
             }
             else
+            {
                 SendGossipMenuFor(player, wintergrasp->GetDefenderTeam() ? WG_NPCQUEUE_TEXT_H_NOWAR : WG_NPCQUEUE_TEXT_A_NOWAR, me->GetGUID());
+            }
         }
+
         return true;
     }
 
-    bool OnGossipSelect(Player* player, uint32 /*menuId*/, uint32 /*gossipListId*/) override
+    bool OnGossipSelect(Player* player, uint32 /*menuId*/, uint32 gossipListId) override
     {
+        uint32 const action = player->PlayerTalkClass->GetGossipOptionAction(gossipListId);
+
         CloseGossipMenuFor(player);
+
+        if (action != GOSSIP_ACTION_INFO_DEF)
+            return true;
 
         Battlefield* wintergrasp = sBattlefieldMgr->GetBattlefieldByBattleId(BATTLEFIELD_BATTLEID_WG);
         if (!wintergrasp)
             return true;
 
         if (wintergrasp->IsWarTime())
+        {
             wintergrasp->InvitePlayerToWar(player);
+        }
         else
         {
             uint32 timer = wintergrasp->GetTimer() / 1000;
             if (timer < 15 * MINUTE)
                 wintergrasp->InvitePlayerToQueue(player);
         }
+
         return true;
     }
 };

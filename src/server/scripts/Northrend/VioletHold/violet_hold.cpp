@@ -365,6 +365,8 @@ struct npc_sinclari_vh : public ScriptedAI
 
     void Reset() override
     {
+        ForceNonCombatState();
+
         _summons.DespawnAll();
         for (uint8 i = 0; i < PortalIntroCount; ++i)
             if (Creature* summon = me->SummonCreature(NPC_TELEPORTATION_PORTAL_INTRO, PortalIntroPositions[i], TEMPSUMMON_MANUAL_DESPAWN))
@@ -381,6 +383,16 @@ struct npc_sinclari_vh : public ScriptedAI
             guard->SetReactState(REACT_AGGRESSIVE);
             guard->AI()->EnterEvadeMode();
         }
+    }
+
+    void MoveInLineOfSight(Unit* /*who*/) override
+    {
+        // Lieutenant Sinclari는 전투용 NPC가 아니므로 근처 유저를 대상으로 잡지 않는다.
+    }
+
+    void AttackStart(Unit* /*who*/) override
+    {
+        ForceNonCombatState();
     }
 
     bool OnGossipHello(Player* player) override
@@ -429,18 +441,21 @@ struct npc_sinclari_vh : public ScriptedAI
 
     void UpdateAI(uint32 diff) override
     {
+        // 신클라리는 전투용 NPC가 아니므로 스케줄러만 계속 진행한다.
         _scheduler.Update(diff);
 
-        if (!UpdateVictim())
-            return;
-
-        DoMeleeAttackIfReady();
+        // 혹시 외부 요인으로 전투 상태가 걸려도 즉시 제거한다.
+        ForceNonCombatState();
     }
 
     void ScheduleIntro()
     {
+        ForceNonCombatState();
+
         _scheduler.Schedule(1s, [this](TaskContext task)
         {
+            ForceNonCombatState();
+
             switch (task.GetRepeatCounter())
             {
                 case 0:
@@ -523,13 +538,18 @@ struct npc_sinclari_vh : public ScriptedAI
 
     void ScheduleOutro()
     {
+        ForceNonCombatState();
+
         _scheduler.Schedule(4s, [this](TaskContext task)
         {
+            ForceNonCombatState();
+
             Talk(SAY_SINCLARI_OUTRO);
             me->GetMotionMaster()->MovePoint(0, SinclariPositions[3]);
 
             task.Schedule(10s, [this](TaskContext /*task*/)
             {
+                ForceNonCombatState();
                 me->SetNpcFlag(UNIT_NPC_FLAG_GOSSIP);
             });
         });
@@ -548,6 +568,18 @@ struct npc_sinclari_vh : public ScriptedAI
     }
 
 private:
+    void ForceNonCombatState()
+    {
+        me->SetReactState(REACT_PASSIVE);
+        me->SetFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_NON_ATTACKABLE);
+
+        if (me->GetVictim())
+            me->AttackStop();
+
+        if (me->IsInCombat())
+            me->CombatStop(true);
+    }
+
     InstanceScript* _instance;
     TaskScheduler _scheduler;
 

@@ -6,13 +6,13 @@
  * Free Software Foundation; either version 2 of the License, or (at your
  * option) any later version.
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
- * more details.
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU General Public License along
- * with this program. If not, see <http://www.gnu.org/licenses/>.
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include "WorldSession.h"
@@ -25,6 +25,7 @@
 #include "GameObjectAI.h"
 #include "GossipDef.h"
 #include "Group.h"
+#include "ItemTemplate.h"
 #include "Log.h"
 #include "ObjectAccessor.h"
 #include "ObjectMgr.h"
@@ -34,6 +35,111 @@
 #include "ScriptMgr.h"
 #include "World.h"
 #include "WorldPacket.h"
+
+namespace
+{
+    bool QuestRequiresItem(Quest const* quest, uint32 itemId)
+    {
+        if (!quest || !itemId)
+            return false;
+
+        for (uint8 i = 0; i < QUEST_ITEM_OBJECTIVES_COUNT; ++i)
+        {
+            if (quest->RequiredItemId[i] == itemId)
+                return true;
+        }
+
+        return false;
+    }
+
+    bool QuestUsesItem(Quest const* quest, uint32 itemId)
+    {
+        if (!quest || !itemId)
+            return false;
+
+        if (quest->GetSrcItemId() == itemId)
+            return true;
+
+        return QuestRequiresItem(quest, itemId);
+    }
+
+    bool IsCleanupTargetQuestItem(uint32 itemId)
+    {
+        if (!itemId)
+            return false;
+
+        ItemTemplate const* itemTemplate = sObjectMgr->GetItemTemplate(itemId);
+        if (!itemTemplate)
+            return false;
+
+        return itemTemplate->Class == ITEM_CLASS_QUEST;
+    }
+
+    bool PlayerHasOtherActiveQuestThatUsesItem(Player* player, uint32 itemId, uint32 currentQuestId)
+    {
+        if (!player || !itemId)
+            return false;
+
+        for (uint8 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
+        {
+            uint32 activeQuestId = player->GetQuestSlotQuestId(slot);
+
+            if (!activeQuestId || activeQuestId == currentQuestId)
+                continue;
+
+            Quest const* activeQuest = sObjectMgr->GetQuestTemplate(activeQuestId);
+            if (QuestUsesItem(activeQuest, itemId))
+                return true;
+        }
+
+        return false;
+    }
+
+    void CleanupQuestRequiredItems(Player* player, Quest const* quest, uint32 questId, Quest const* nextQuestToKeep = nullptr)
+    {
+        if (!player || !quest)
+            return;
+
+        for (uint8 i = 0; i < QUEST_ITEM_OBJECTIVES_COUNT; ++i)
+        {
+            uint32 itemId = quest->RequiredItemId[i];
+
+            if (!itemId)
+                continue;
+
+            if (!IsCleanupTargetQuestItem(itemId))
+                continue;
+
+            bool alreadyChecked = false;
+            for (uint8 j = 0; j < i; ++j)
+            {
+                if (quest->RequiredItemId[j] == itemId)
+                {
+                    alreadyChecked = true;
+                    break;
+                }
+            }
+
+            if (alreadyChecked)
+                continue;
+
+            if (PlayerHasOtherActiveQuestThatUsesItem(player, itemId, questId))
+                continue;
+
+            if (QuestUsesItem(nextQuestToKeep, itemId))
+                continue;
+
+            uint32 count = player->GetItemCount(itemId, true);
+
+            if (!count)
+                continue;
+
+            // 퀘스트 완료 후 더 이상 필요 없는 RequiredItemId 퀘스트 아이템은 보유 수량 전체 삭제
+            // 다른 진행 중 퀘스트 또는 다음 연계 퀘스트가 RequiredItem/SourceItem으로 쓰면 유지
+            player->DestroyItemCount(itemId, count, true, false);
+        }
+    }
+}
 
 void WorldSession::HandleQuestgiverStatusQueryOpcode(WorldPacket& recvData)
 {
@@ -53,7 +159,7 @@ void WorldSession::HandleQuestgiverStatusQueryOpcode(WorldPacket& recvData)
         case TYPEID_UNIT:
         {
             TC_LOG_DEBUG("network", "WORLD: Received CMSG_QUESTGIVER_STATUS_QUERY for npc {}", questGiver->GetGUID().ToString());
-            if (!questGiver->ToCreature()->IsHostileTo(_player)) // do not show quest status to enemies
+            if (!questGiver->ToCreature()->IsHostileTo(_player))
                 questStatus = _player->GetQuestDialogStatus(questGiver);
             break;
         }
@@ -68,7 +174,6 @@ void WorldSession::HandleQuestgiverStatusQueryOpcode(WorldPacket& recvData)
             break;
     }
 
-    // inform client about status of quest
     _player->PlayerTalkClass->SendQuestGiverStatus(uint8(questStatus), guid);
 }
 
@@ -82,21 +187,20 @@ void WorldSession::HandleQuestgiverHelloOpcode(WorldPacket& recvData)
     Creature* creature = GetPlayer()->GetNPCIfCanInteractWith(guid, UNIT_NPC_FLAG_QUESTGIVER);
     if (!creature)
     {
-        TC_LOG_DEBUG("network", "WORLD: HandleQuestgiverHelloOpcode - {} not found or you can't interact with him.",
-            guid.ToString());
+        TC_LOG_DEBUG("network", "WORLD: HandleQuestgiverHelloOpcode - {} not found or you can't interact with him.", guid.ToString());
         return;
     }
 
-    // remove fake death
     if (GetPlayer()->HasUnitState(UNIT_STATE_DIED))
         GetPlayer()->RemoveAurasByType(SPELL_AURA_FEIGN_DEATH);
 
-    // Stop the npc if moving
     if (uint32 pause = creature->GetMovementTemplate().GetInteractionPauseTimer())
         creature->PauseMovement(pause);
+
     creature->SetHomePosition(creature->GetPosition());
 
     _player->PlayerTalkClass->ClearMenus();
+
     if (creature->AI()->OnGossipHello(_player))
         return;
 
@@ -125,7 +229,6 @@ void WorldSession::HandleQuestgiverAcceptQuestOpcode(WorldPacket& recvData)
         _player->ClearQuestSharingInfo();
     });
 
-    // no or incorrect quest giver
     if (!object)
     {
         CLOSE_GOSSIP_CLEAR_SHARING_INFO();
@@ -139,6 +242,7 @@ void WorldSession::HandleQuestgiverAcceptQuestOpcode(WorldPacket& recvData)
             CLOSE_GOSSIP_CLEAR_SHARING_INFO();
             return;
         }
+
         if (!_player->IsInSameRaidWith(playerQuestObject))
         {
             CLOSE_GOSSIP_CLEAR_SHARING_INFO();
@@ -154,7 +258,6 @@ void WorldSession::HandleQuestgiverAcceptQuestOpcode(WorldPacket& recvData)
         }
     }
 
-    // some kind of WPE protection
     if (!_player->CanInteractWithQuestGiver(object))
     {
         CLOSE_GOSSIP_CLEAR_SHARING_INFO();
@@ -163,7 +266,6 @@ void WorldSession::HandleQuestgiverAcceptQuestOpcode(WorldPacket& recvData)
 
     if (Quest const* quest = sObjectMgr->GetQuestTemplate(questId))
     {
-        // prevent cheating
         if (!GetPlayer()->CanTakeQuest(quest, true))
         {
             CLOSE_GOSSIP_CLEAR_SHARING_INFO();
@@ -192,16 +294,13 @@ void WorldSession::HandleQuestgiverAcceptQuestOpcode(WorldPacket& recvData)
                     {
                         Player* player = itr->GetSource();
 
-                        if (!player || player == _player || !player->IsInMap(_player))     // not self and in same map
+                        if (!player || player == _player || !player->IsInMap(_player))
                             continue;
 
                         if (player->CanTakeQuest(quest, true))
                         {
                             player->SetQuestSharingInfo(_player->GetGUID(), questId);
-
-                            // need confirmation that any gossip window will close
                             player->PlayerTalkClass->SendCloseGossip();
-
                             _player->SendQuestConfirmAccept(quest, player);
                         }
                     }
@@ -226,9 +325,9 @@ void WorldSession::HandleQuestgiverQueryQuestOpcode(WorldPacket& recvData)
     uint32 questId;
     uint8 unk1;
     recvData >> guid >> questId >> unk1;
+
     TC_LOG_DEBUG("network", "WORLD: Received CMSG_QUESTGIVER_QUERY_QUEST npc = {}, quest = {}, unk1 = {}", guid.ToString(), questId, unk1);
 
-    // Verify that the guid is valid and is a questgiver or involved in the requested quest
     Object* object = ObjectAccessor::GetObjectByTypeMask(*_player, guid, TYPEMASK_UNIT | TYPEMASK_GAMEOBJECT | TYPEMASK_ITEM);
     if (!object || (!object->hasQuest(questId) && !object->hasInvolvedQuest(questId)))
     {
@@ -261,7 +360,8 @@ void WorldSession::HandleQuestQueryOpcode(WorldPackets::Quest::QueryQuestInfo& q
 
 void WorldSession::HandleQuestgiverChooseRewardOpcode(WorldPacket& recvData)
 {
-    uint32 questId, reward;
+    uint32 questId;
+    uint32 reward;
     ObjectGuid guid;
     recvData >> guid >> questId >> reward;
 
@@ -281,33 +381,35 @@ void WorldSession::HandleQuestgiverChooseRewardOpcode(WorldPacket& recvData)
     if (!object || !object->hasInvolvedQuest(questId))
         return;
 
-    // some kind of WPE protection
     if (!_player->CanInteractWithQuestGiver(object))
         return;
 
-    if ((!_player->CanSeeStartQuest(quest) &&  _player->GetQuestStatus(questId) == QUEST_STATUS_NONE) ||
+    if ((!_player->CanSeeStartQuest(quest) && _player->GetQuestStatus(questId) == QUEST_STATUS_NONE) ||
         (_player->GetQuestStatus(questId) != QUEST_STATUS_COMPLETE && !quest->IsAutoComplete()))
     {
         TC_LOG_ERROR("entities.player.cheat", "Error in QUEST_STATUS_COMPLETE: player {} {} tried to complete quest {}, but is not allowed to do so (possible packet-hacking or high latency)",
-                       _player->GetName(), _player->GetGUID().ToString(), questId);
+            _player->GetName(), _player->GetGUID().ToString(), questId);
         return;
     }
 
-    if (_player->CanRewardQuest(quest, true)) // First, check if player is allowed to turn the quest in (all objectives completed). If not, we send players to the offer reward screen
+    if (_player->CanRewardQuest(quest, true))
     {
-        if (_player->CanRewardQuest(quest, reward, true)) // Then check if player can receive the reward item (if inventory is not full, if player doesn't have too many unique items, and so on). If not, the client will close the gossip window
+        if (_player->CanRewardQuest(quest, reward, true))
         {
             _player->RewardQuest(quest, reward, object);
+
+            Quest const* nextQuestToKeep = nullptr;
 
             switch (object->GetTypeId())
             {
                 case TYPEID_UNIT:
                 {
                     Creature* questgiver = object->ToCreature();
-                    // Send next quest
+
                     if (Quest const* nextQuest = _player->GetNextQuest(questgiver, quest))
                     {
-                        // Only send the quest to the player if the conditions are met
+                        nextQuestToKeep = nextQuest;
+
                         if (_player->CanTakeQuest(nextQuest, false))
                         {
                             if (nextQuest->IsAutoAccept() && _player->CanAddQuest(nextQuest, true))
@@ -324,10 +426,11 @@ void WorldSession::HandleQuestgiverChooseRewardOpcode(WorldPacket& recvData)
                 case TYPEID_GAMEOBJECT:
                 {
                     GameObject* questGiver = object->ToGameObject();
-                    // Send next quest
+
                     if (Quest const* nextQuest = _player->GetNextQuest(questGiver, quest))
                     {
-                        // Only send the quest to the player if the conditions are met
+                        nextQuestToKeep = nextQuest;
+
                         if (_player->CanTakeQuest(nextQuest, false))
                         {
                             if (nextQuest->IsAutoAccept() && _player->CanAddQuest(nextQuest, true))
@@ -344,6 +447,8 @@ void WorldSession::HandleQuestgiverChooseRewardOpcode(WorldPacket& recvData)
                 default:
                     break;
             }
+
+            CleanupQuestRequiredItems(_player, quest, questId, nextQuestToKeep);
         }
     }
     else
@@ -362,7 +467,6 @@ void WorldSession::HandleQuestgiverRequestRewardOpcode(WorldPacket& recvData)
     if (!object || !object->hasInvolvedQuest(questId))
         return;
 
-    // some kind of WPE protection
     if (!_player->CanInteractWithQuestGiver(object))
         return;
 
@@ -385,7 +489,8 @@ void WorldSession::HandleQuestgiverCancel(WorldPacket& /*recvData*/)
 
 void WorldSession::HandleQuestLogSwapQuest(WorldPacket& recvData)
 {
-    uint8 slot1, slot2;
+    uint8 slot1;
+    uint8 slot2;
     recvData >> slot1 >> slot2;
 
     if (slot1 == slot2 || slot1 >= MAX_QUEST_LOG_SIZE || slot2 >= MAX_QUEST_LOG_SIZE)
@@ -408,35 +513,38 @@ void WorldSession::HandleQuestLogRemoveQuest(WorldPacket& recvData)
         if (uint32 questId = _player->GetQuestSlotQuestId(slot))
         {
             if (!_player->TakeQuestSourceItem(questId, true))
-                return;                                     // can't un-equip some items, reject quest cancel
+                return;
 
-            if (Quest const* quest = sObjectMgr->GetQuestTemplate(questId))
+            Quest const* abandonedQuest = sObjectMgr->GetQuestTemplate(questId);
+
+            if (abandonedQuest)
             {
-                if (quest->HasSpecialFlag(QUEST_SPECIAL_FLAGS_TIMED))
+                if (abandonedQuest->HasSpecialFlag(QUEST_SPECIAL_FLAGS_TIMED))
                     _player->RemoveTimedQuest(questId);
 
-                if (quest->HasFlag(QUEST_FLAGS_FLAGS_PVP))
+                if (abandonedQuest->HasFlag(QUEST_FLAGS_FLAGS_PVP))
                 {
                     _player->pvpInfo.IsHostile = _player->pvpInfo.IsInHostileArea || _player->HasPvPForcingQuest();
                     _player->UpdatePvPState();
                 }
             }
 
-            _player->TakeQuestSourceItem(questId, true); // remove quest src item from player
-            _player->AbandonQuest(questId); // remove all quest items player received before abandoning quest. Note, this does not remove normal drop items that happen to be quest requirements.
+            _player->TakeQuestSourceItem(questId, true);
+            _player->AbandonQuest(questId);
+
+            // RequiredItemId 퀘스트 아이템은 포기 시 삭제하지 않음
+            // 포기 후 재수락/재진행 가능성을 위해 유저 인벤에 그대로 유지
             _player->RemoveActiveQuest(questId);
             _player->RemoveTimedAchievement(ACHIEVEMENT_TIMED_TYPE_QUEST, questId);
 
             TC_LOG_INFO("network", "Player {} abandoned quest {}", _player->GetGUID().ToString(), questId);
 
-            if (sWorld->getBoolConfig(CONFIG_QUEST_ENABLE_QUEST_TRACKER)) // check if Quest Tracker is enabled
+            if (sWorld->getBoolConfig(CONFIG_QUEST_ENABLE_QUEST_TRACKER))
             {
-                // prepare Quest Tracker datas
                 CharacterDatabasePreparedStatement* stmt = CharacterDatabase.GetPreparedStatement(CHAR_UPD_QUEST_TRACK_ABANDON_TIME);
                 stmt->setUInt32(0, questId);
                 stmt->setUInt32(1, _player->GetGUID().GetCounter());
 
-                // add to Quest Tracker
                 CharacterDatabase.Execute(stmt);
             }
 
@@ -476,7 +584,7 @@ void WorldSession::HandleQuestConfirmAccept(WorldPacket& recvData)
 
         if (_player->CanAddQuest(quest, true))
         {
-            _player->AddQuestAndCheckCompletion(quest, nullptr); // NULL, this prevent DB script from duplicate running
+            _player->AddQuestAndCheckCompletion(quest, nullptr);
 
             if (quest->GetSrcSpell() > 0)
                 _player->CastSpell(_player, quest->GetSrcSpell(), true);
@@ -509,13 +617,11 @@ void WorldSession::HandleQuestgiverCompleteQuest(WorldPacket& recvData)
         if (!object->hasInvolvedQuest(questId))
             return;
 
-        // some kind of WPE protection
         if (!_player->CanInteractWithQuestGiver(object))
             return;
     }
     else
     {
-        // Do not allow completing quests on other players.
         if (guid != _player->GetGUID())
             return;
     }
@@ -539,9 +645,9 @@ void WorldSession::HandleQuestgiverCompleteQuest(WorldPacket& recvData)
     }
     else
     {
-        if (quest->GetReqItemsCount())                  // some items required
+        if (quest->GetReqItemsCount())
             _player->PlayerTalkClass->SendQuestGiverRequestItems(quest, guid, _player->CanRewardQuest(quest, false), false);
-        else                                            // no items required
+        else
             _player->PlayerTalkClass->SendQuestGiverOfferReward(quest, guid, true);
     }
 }
@@ -565,7 +671,7 @@ void WorldSession::HandlePushQuestToParty(WorldPacket& recvPacket)
     if (!quest)
         return;
 
-    Player * const sender = GetPlayer();
+    Player* const sender = GetPlayer();
 
     Group* group = sender->GetGroup();
     if (!group)
@@ -630,6 +736,7 @@ void WorldSession::HandlePushQuestToParty(WorldPacket& recvPacket)
         {
             receiver->SetQuestSharingInfo(sender->GetGUID(), questId);
             receiver->PlayerTalkClass->SendQuestGiverQuestDetails(quest, receiver->GetGUID(), true);
+
             if (quest->IsAutoAccept() && receiver->CanAddQuest(quest, true) && receiver->CanTakeQuest(quest, true))
             {
                 receiver->AddQuestAndCheckCompletion(quest, sender);
@@ -669,7 +776,7 @@ void WorldSession::HandleQuestgiverStatusMultipleQuery(WorldPacket& /*recvPacket
     _player->SendQuestGiverStatusMultiple();
 }
 
-void WorldSession::HandleQueryQuestsCompleted(WorldPacket & /*recvData*/)
+void WorldSession::HandleQueryQuestsCompleted(WorldPacket& /*recvData*/)
 {
     size_t rew_count = _player->GetRewardedQuestCount();
 

@@ -30,6 +30,7 @@
 #include "ObjectAccessor.h"
 #include "Player.h"
 #include "World.h"
+#include "../../scripts/Custom/DiscordEvent.h"
 
 /*********************************************************/
 /***            BATTLEGROUND QUEUE SYSTEM              ***/
@@ -156,7 +157,15 @@ GroupQueueInfo* BattlegroundQueue::AddGroup(Player* leader, Group const* group, 
     {
         ArenaTeam* team = sArenaTeamMgr->GetArenaTeamById(arenateamid);
         if (team)
-            sWorld->SendWorldText(LANG_ARENA_QUEUE_ANNOUNCE_WORLD_JOIN, team->GetName().c_str(), m_queueId.TeamSize, m_queueId.TeamSize, ginfo->ArenaTeamRating);
+            sWorld->SendWorldText(LANG_ARENA_QUEUE_ANNOUNCE_WORLD_JOIN);
+
+		SendServerDiscordEvent(
+            "⚔️ 투기장 신청",
+            "투기장 신청이 등록되었습니다.",
+            "https://stimpack.pe.kr",
+            16753920,
+            "arena"
+        );
     }
 
     //add players from group to ginfo
@@ -213,8 +222,15 @@ GroupQueueInfo* BattlegroundQueue::AddGroup(Player* leader, Group const* group, 
                 // System message
                 else
                 {
-                    sWorld->SendWorldText(LANG_BG_QUEUE_ANNOUNCE_WORLD, bg->GetName().c_str(), q_min_level, q_max_level,
-                        qAlliance, (MinPlayers > qAlliance) ? MinPlayers - qAlliance : (uint32)0, qHorde, (MinPlayers > qHorde) ? MinPlayers - qHorde : (uint32)0);
+                    sWorld->SendWorldText(LANG_BG_QUEUE_ANNOUNCE_WORLD, bg->GetName().c_str());
+
+					SendServerDiscordEvent(
+						"⚔️ 전장 신청",
+						"전장 신청이 등록되었습니다.",
+						"https://stimpack.pe.kr",
+						16753920,
+						"arena"
+					);
                 }
             }
         }
@@ -345,7 +361,7 @@ void BattlegroundQueue::RemovePlayer(ObjectGuid guid, bool decreaseInvitedCount)
     // announce to world if arena team left queue for rated match, show only once
     if (m_queueId.TeamSize && group->IsRated && group->Players.empty() && sWorld->getBoolConfig(CONFIG_ARENA_QUEUE_ANNOUNCER_ENABLE))
         if (ArenaTeam* team = sArenaTeamMgr->GetArenaTeamById(group->ArenaTeamId))
-            sWorld->SendWorldText(LANG_ARENA_QUEUE_ANNOUNCE_WORLD_EXIT, team->GetName().c_str(), m_queueId.TeamSize, m_queueId.TeamSize, group->ArenaTeamRating);
+            sWorld->SendWorldText(LANG_ARENA_QUEUE_ANNOUNCE_WORLD_EXIT);
 
     // if player leaves queue and he is invited to rated arena match, then he have to lose
     if (group->IsInvitedToBGInstanceGUID && group->IsRated && decreaseInvitedCount)
@@ -762,6 +778,11 @@ void BattlegroundQueue::BattlegroundQueueUpdate(uint32 /*diff*/, bool isRated, u
     BattlegroundBracketId bracket_id = BattlegroundBracketId(m_queueId.BracketId);
     uint8 arenaType = m_queueId.TeamSize;
 
+	bool const isArena1v1PracticeQueue =
+    !isRated &&
+    bgTypeId == BATTLEGROUND_AA &&
+    arenaType == ARENA_TYPE_5v5;
+
     //if no players in queue - do nothing
     if (m_QueuedGroups[BG_QUEUE_PREMADE_ALLIANCE].empty() &&
         m_QueuedGroups[BG_QUEUE_PREMADE_HORDE].empty() &&
@@ -819,12 +840,20 @@ void BattlegroundQueue::BattlegroundQueueUpdate(uint32 /*diff*/, bool isRated, u
     uint32 MaxPlayersPerTeam = bg_template->GetMaxPlayersPerTeam();
 
     if (bg_template->isArena())
-    {
-        MaxPlayersPerTeam = arenaType;
-        MinPlayersPerTeam = sBattlegroundMgr->isArenaTesting() ? 1 : arenaType;
-    }
-    else if (sBattlegroundMgr->isTesting())
-        MinPlayersPerTeam = 1;
+	{
+		MaxPlayersPerTeam = arenaType;
+		MinPlayersPerTeam = sBattlegroundMgr->isArenaTesting() ? 1 : arenaType;
+
+		// 1v1 NPC 연습전은 내부적으로 5:5 큐를 사용하지만,
+		// 실제 매칭은 1명 vs 1명으로 성립시킨다.
+		if (isArena1v1PracticeQueue)
+		{
+			MinPlayersPerTeam = 1;
+			MaxPlayersPerTeam = 1;
+		}
+	}
+	else if (sBattlegroundMgr->isTesting())
+		MinPlayersPerTeam = 1;
 
     m_SelectionPools[TEAM_ALLIANCE].Init();
     m_SelectionPools[TEAM_HORDE].Init();

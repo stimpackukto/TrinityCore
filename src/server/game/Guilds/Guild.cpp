@@ -15,6 +15,16 @@
  * with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
+/*
+ * Custom Update - 2026-07-06
+ *
+ * Guild roster app chat presence marker
+ *
+ * 앱 채팅 접속 중인 길드원을 길드창 이름에 [A]로 표시한다.
+ * 인게임 접속 + 앱 접속: 이름 [A]
+ * 앱만 접속: [A] 이름
+ */
+
 #include "Guild.h"
 #include "AccountMgr.h"
 #include "Bag.h"
@@ -39,9 +49,49 @@
 #include "WorldSession.h"
 #include <boost/iterator/counting_iterator.hpp>
 
+#include <unordered_set>
+
 size_t const MAX_GUILD_BANK_TAB_TEXT_LEN = 500;
 
 uint32 const EMBLEM_PRICE = 10 * GOLD;
+
+static std::unordered_set<ObjectGuid::LowType> LoadGuildAppChatPresence(ObjectGuid::LowType guildId)
+{
+    std::unordered_set<ObjectGuid::LowType> appMembers;
+
+    if (!guildId)
+        return appMembers;
+
+    QueryResult result = LoginDatabase.PQuery(
+        "SELECT character_guid "
+        "FROM lightguardian_community.guild_chat_presence "
+        "WHERE guild_id = {} "
+        "  AND is_active = 1 "
+        "  AND last_seen_at >= DATE_SUB(NOW(), INTERVAL 90 SECOND)",
+        uint32(guildId));
+
+    if (!result)
+        return appMembers;
+
+    do
+    {
+        Field* fields = result->Fetch();
+        appMembers.insert(ObjectGuid::LowType(fields[0].GetUInt32()));
+    } while (result->NextRow());
+
+    return appMembers;
+}
+
+static std::string GetGuildRosterDisplayName(std::string const& name, bool gameOnline, bool appOnline)
+{
+    if (!appOnline)
+        return name;
+
+    if (gameOnline)
+        return name;
+
+    return std::string("|cff00ff00") + name + "|r";
+}
 
 // only used in logs
 char const* GetGuildEventString(GuildEvents event)
@@ -1251,22 +1301,26 @@ void Guild::HandleRoster(WorldSession* session)
     }
 
     bool sendOfficerNote = _HasRankRight(session->GetPlayer(), GR_RIGHT_VIEWOFFNOTE);
+    std::unordered_set<ObjectGuid::LowType> appMembers = LoadGuildAppChatPresence(GetId());
+
     roster.MemberData.reserve(m_members.size());
     for (auto const& [guid, member] : m_members)
     {
         WorldPackets::Guild::GuildRosterMemberData& memberData = roster.MemberData.emplace_back();
+        bool appOnline = appMembers.find(member.GetGUID().GetCounter()) != appMembers.end();
+        bool gameOnline = (member.GetFlags() & GUILDMEMBER_STATUS_ONLINE) != 0;
 
         memberData.Guid = member.GetGUID();
         memberData.RankID = int32(member.GetRankId());
         memberData.AreaID = int32(member.GetZoneId());
         memberData.LastSave = float(float(GameTime::GetGameTime() - member.GetLogoutTime()) / float(DAY));
 
-        memberData.Status = member.GetFlags();
+        memberData.Status = appOnline ? member.GetFlags() | GUILDMEMBER_STATUS_ONLINE : member.GetFlags();
         memberData.Level = member.GetLevel();
         memberData.ClassID = member.GetClass();
         memberData.Gender = member.GetGender();
 
-        memberData.Name = member.GetName();
+        memberData.Name = GetGuildRosterDisplayName(member.GetName(), gameOnline, appOnline);
         memberData.Note = member.GetPublicNote();
         if (sendOfficerNote)
             memberData.OfficerNote = member.GetOfficerNote();

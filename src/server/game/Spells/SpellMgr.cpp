@@ -4964,11 +4964,396 @@ void SpellMgr::LoadSpellInfoCorrections()
 		spellInfo->AttributesEx6 = 0x0;        // 11열
     });
 
+	ApplySpellFix({ 58549 }, [](SpellInfo* spellInfo)
+    {
+        spellInfo->RequiredAreasID = 0;
+	});
+
+	// 지옥불 반도 점령 상태 오라 커스텀
+	// 32049 / 32071
+	// - 디버프 자리 표시
+	// - 사망 후에도 유지
+	// - 플레이어가 직접 해제하지 못하게 처리
+	// - 기지 점령 로직에서만 적용/해제되도록 기존 컨트롤 유지
+	ApplySpellFix({ 32049, 32071, 33795 }, [](SpellInfo* spellInfo)
+	{
+		// 디버프 자리로 표시
+		spellInfo->AttributesCu |= SPELL_ATTR0_CU_NEGATIVE;
+
+		// 죽어도 유지
+		spellInfo->AttributesEx3 |= SPELL_ATTR3_DEATH_PERSISTENT;
+
+		// 우클릭 해제 방지
+		spellInfo->Attributes |= SPELL_ATTR0_CANT_CANCEL;
+	});
+
+	ApplySpellFix({ 29534 }, [](SpellInfo* spellInfo)
+	{
+		// Custom Update - 2026-06-18:
+		// SI_TRACES_OF_SILITHYST(29534)는 실리더스 보상 버프로만 사용한다.
+		// Effect_1(SPELL_EFFECT_ACTIVATE_OBJECT)이 주변 GameObject를 잘못 활성화하므로 제거한다.
+		spellInfo->_effects[EFFECT_0].Effect = SPELL_EFFECT_NONE;
+		spellInfo->_effects[EFFECT_0].TargetA = SpellImplicitTargetInfo();
+		spellInfo->_effects[EFFECT_0].TargetB = SpellImplicitTargetInfo();
+		spellInfo->_effects[EFFECT_0].MiscValue = 0;
+		spellInfo->AttributesCu |= SPELL_ATTR0_CU_NEGATIVE;
+		spellInfo->AttributesEx3 |= SPELL_ATTR3_DEATH_PERSISTENT;
+		spellInfo->Attributes |= SPELL_ATTR0_CANT_CANCEL;
+	});
+
+	ApplySpellFix({ 33779 }, [](SpellInfo* spellInfo)
+	{
+		// 기존 피해량 5% 증가 보정
+		spellInfo->_effects[EFFECT_0].Effect = SPELL_EFFECT_APPLY_AURA;
+		spellInfo->_effects[EFFECT_0].ApplyAuraName = SPELL_AURA_MOD_DAMAGE_PERCENT_DONE;
+		spellInfo->_effects[EFFECT_0].BasePoints = 5;
+		spellInfo->_effects[EFFECT_0].DieSides = 0;
+
+		// 전체 속성 피해 적용
+		spellInfo->_effects[EFFECT_0].MiscValue =
+			SPELL_SCHOOL_MASK_NORMAL |
+			SPELL_SCHOOL_MASK_HOLY |
+			SPELL_SCHOOL_MASK_FIRE |
+			SPELL_SCHOOL_MASK_NATURE |
+			SPELL_SCHOOL_MASK_FROST |
+			SPELL_SCHOOL_MASK_SHADOW |
+			SPELL_SCHOOL_MASK_ARCANE;
+
+		// 힐량 5% 증가 추가
+		spellInfo->_effects[EFFECT_1].Effect = SPELL_EFFECT_APPLY_AURA;
+		spellInfo->_effects[EFFECT_1].ApplyAuraName = SPELL_AURA_MOD_HEALING_DONE_PERCENT;
+		spellInfo->_effects[EFFECT_1].BasePoints = 5;
+		spellInfo->_effects[EFFECT_1].DieSides = 0;
+		spellInfo->_effects[EFFECT_1].MiscValue = 0;
+		spellInfo->_effects[EFFECT_1].MiscValueB = 0;
+
+		// 대상은 기존 EFFECT_0과 동일하게 복사
+		spellInfo->_effects[EFFECT_1].TargetA = spellInfo->_effects[EFFECT_0].TargetA;
+		spellInfo->_effects[EFFECT_1].TargetB = spellInfo->_effects[EFFECT_0].TargetB;
+
+		// 디버프 자리로 표시
+		spellInfo->AttributesCu |= SPELL_ATTR0_CU_NEGATIVE;
+
+		// 죽어도 유지
+		spellInfo->AttributesEx3 |= SPELL_ATTR3_DEATH_PERSISTENT;
+	});
+
 	// Shadow Trap (searcher)
     ApplySpellFix({ 51422 }, [](SpellInfo* spellInfo)
     {
         spellInfo->_GetEffect(EFFECT_0).RadiusEntry = sSpellRadiusStore.LookupEntry(45); // 10yd
     });
+
+	ApplySpellFix({ 29476 }, [](SpellInfo* spellInfo)
+    {
+        spellInfo->DurationEntry = sSpellDurationStore.LookupEntry(7);
+    });
+
+	ApplySpellFix({ 21393, 21395 }, [](SpellInfo* spellInfo)  //물약
+    {
+		spellInfo->_GetEffect(EFFECT_0).BasePoints = 7999; // 8000 ~10000 spellInfo->AttributesEx6 = 0x0;   inv_helmet_plate_pvpwarrior_e_01
+    });
+
+	ApplySpellFix({ 43185 }, [](SpellInfo* spellInfo)  //룬치유물약
+    {
+		spellInfo->_GetEffect(EFFECT_0).BasePoints = 7999;
+		spellInfo->AttributesEx7 |= 0x10000000;
+    });
+
+	ApplySpellFix({ 43186 }, [](SpellInfo* spellInfo)  //룬마나물약
+    {
+		spellInfo->_GetEffect(EFFECT_0).BasePoints = 11999;
+		spellInfo->AttributesEx7 |= 0x10000000;
+    });
+
+	ApplySpellFix({ 45544 }, [](SpellInfo* spellInfo)  //두꺼운서리매듭붕대
+    {
+		spellInfo->_GetEffect(EFFECT_0).BasePoints = 1399;
+    });
+
+	ApplySpellFix({ 4043 }, [](SpellInfo* spellInfo)  //고브린 지뢰
+    {
+		spellInfo->_GetEffect(EFFECT_0).BasePoints =7999;
+    });
+
+	ApplySpellFix({ 57970 }, [](SpellInfo* spellInfo)  // 맹독 IX 실제 피해 오라  1138
+	{
+		spellInfo->_GetEffect(EFFECT_0).BasePoints = 249;
+	});
+
+	ApplySpellFix({ 57965 }, [](SpellInfo* spellInfo)  // 순간독 IX 실제 피해
+	{
+		spellInfo->_GetEffect(EFFECT_0).BasePoints = 1019;
+	});
+
+	ApplySpellFix({ 1138 }, [](SpellInfo* spellInfo)  // 바실리크등뼈
+	{
+		spellInfo->_GetEffect(EFFECT_0).BasePoints = 999;
+	});
+
+	ApplySpellFix({ 29453 }, [](SpellInfo* spellInfo)
+	{
+		spellInfo->EquippedItemSubClassMask |= (1 << ITEM_SUBCLASS_WEAPON_POLEARM);
+	});
+
+	//폭발의 덫
+	// Custom Update - 2026-06-26
+	// Explosive Trap projectile conversion.
+	// 49067 = Explosive Trap Rank 9 user spell
+	// 900067 = Custom internal landing spell
+	ApplySpellFix({ 49067 }, [](SpellInfo* spellInfo)
+	{
+		// 60192 Freezing Arrow 기준
+		spellInfo->Targets = 64;
+		spellInfo->RangeEntry = sSpellRangeStore.LookupEntry(5);
+		spellInfo->Speed = 45.0f;
+
+		spellInfo->AttributesEx = 131072;
+		spellInfo->AttributesEx2 = 134217728;
+
+		spellInfo->EquippedItemClass = ITEM_CLASS_WEAPON;
+		spellInfo->EquippedItemSubClassMask = 262156;
+		spellInfo->EquippedItemInventoryTypeMask = 0;
+
+		// 기존 폭발의 덫 설치 비주얼 제거, 얼음의 화살 비주얼 사용
+		spellInfo->SpellVisual[0] = 12409;
+		spellInfo->SpellVisual[1] = 0;
+
+		SpellEffectInfo& effect = spellInfo->_GetEffect(EFFECT_0);
+
+		effect.Effect = SPELL_EFFECT_TRIGGER_MISSILE;
+		effect.TargetA = SpellImplicitTargetInfo(87);
+		effect.TargetB = SpellImplicitTargetInfo(0);
+		effect.TriggerSpell = 900067;
+
+		// 기존 49067의 덫 설치 오브젝트 잔여값 제거
+		effect.MiscValue = 0;
+		effect.MiscValueB = 0;
+	});
+
+	ApplySpellFix({ 900067 }, [](SpellInfo* spellInfo)
+	{
+		spellInfo->Attributes |= SPELL_ATTR0_HIDDEN_CLIENTSIDE;
+
+		// 60202 Freezing Arrow 착탄 스펠 기준
+		spellInfo->AttributesEx = 0;
+		spellInfo->AttributesEx2 = 134217732;
+
+		spellInfo->Targets = 64;
+		spellInfo->RangeEntry = sSpellRangeStore.LookupEntry(6);
+		spellInfo->Speed = 0.0f;
+
+		// 내부 설치용이라 화면 비주얼 제거
+		spellInfo->SpellVisual[0] = 0;
+		spellInfo->SpellVisual[1] = 0;
+
+		SpellEffectInfo& effect = spellInfo->_GetEffect(EFFECT_0);
+
+		effect.Effect = SPELL_EFFECT_SUMMON_OBJECT_SLOT1;
+		effect.TargetA = SpellImplicitTargetInfo(87);
+		effect.TargetB = SpellImplicitTargetInfo(0);
+		effect.TriggerSpell = 0;
+
+		// 189322 = Explosive Trap Rank 9 GameObject
+		effect.MiscValue = 189322;
+		effect.MiscValueB = 0;
+	});
+
+	// 전투 준비물 인첸트 수치 보정
+	// 숫돌 / 무게추 / 오일 / 서리 오일
+	{
+		auto UpdateTempEnchantBySpell = [](uint32 spellId, std::function<void(SpellItemEnchantmentEntry*)> updater)
+		{
+			SpellInfo* spellInfo = const_cast<SpellInfo*>(sSpellMgr->GetSpellInfo(spellId));
+			if (!spellInfo)
+				return;
+
+			SpellEffectInfo& effect = spellInfo->_GetEffect(EFFECT_0);
+
+			uint32 const enchantId = uint32(effect.MiscValue);
+			if (!enchantId)
+				return;
+
+			SpellItemEnchantmentEntry const* enchant = sSpellItemEnchantmentStore.LookupEntry(enchantId);
+			if (!enchant)
+				return;
+
+			SpellItemEnchantmentEntry* editableEnchant = const_cast<SpellItemEnchantmentEntry*>(enchant);
+			updater(editableEnchant);
+		};
+
+		// 아다만타이트 숫돌
+		// 기존: 무기 피해 +12 / 근접 치명타 +14
+		// 수정: 무기 피해 +30 / 근접 치명타 +80
+		UpdateTempEnchantBySpell(29453, [](SpellItemEnchantmentEntry* enchant)
+		{
+			for (uint8 i = 0; i < MAX_ITEM_ENCHANTMENT_EFFECTS; ++i)
+			{
+				if (enchant->EffectPointsMin[i] == 12)
+					enchant->EffectPointsMin[i] = 30;
+
+				if (enchant->EffectPointsMin[i] == 14)
+					enchant->EffectPointsMin[i] = 80;
+			}
+		});
+
+		// 아다만타이트 무게추
+		// 기존: 무기 피해 +12 / 치명타 +14
+		// 수정: 무기 피해 +30 / 치명타 +80
+		UpdateTempEnchantBySpell(34340, [](SpellItemEnchantmentEntry* enchant)
+		{
+			for (uint8 i = 0; i < MAX_ITEM_ENCHANTMENT_EFFECTS; ++i)
+			{
+				if (enchant->EffectPointsMin[i] == 12)
+					enchant->EffectPointsMin[i] = 30;
+
+				if (enchant->EffectPointsMin[i] == 14)
+					enchant->EffectPointsMin[i] = 80;
+			}
+		});
+
+		// 상급 마술사 오일
+		// 기존: 주문력 +42
+		// 수정: 주문력 +120
+		UpdateTempEnchantBySpell(28017, [](SpellItemEnchantmentEntry* enchant)
+		{
+			for (uint8 i = 0; i < MAX_ITEM_ENCHANTMENT_EFFECTS; ++i)
+			{
+				if (enchant->EffectPointsMin[i] == 42)
+					enchant->EffectPointsMin[i] = 120;
+			}
+		});
+
+		// 상급 마나 오일
+		// 기존: 5초당 마나 회복 +14
+		// 수정: 5초당 마나 회복 +80
+		UpdateTempEnchantBySpell(28013, [](SpellItemEnchantmentEntry* enchant)
+		{
+			for (uint8 i = 0; i < MAX_ITEM_ENCHANTMENT_EFFECTS; ++i)
+			{
+				if (enchant->EffectPointsMin[i] == 14)
+					enchant->EffectPointsMin[i] = 80;
+			}
+		});
+
+		// 서리 오일
+		// 기존: 공격 시 얼음 화살 발동
+		// 수정: 냉기 저항 +50
+		UpdateTempEnchantBySpell(3595, [](SpellItemEnchantmentEntry* enchant)
+		{
+			enchant->Effect[0] = ITEM_ENCHANTMENT_TYPE_RESISTANCE;
+			enchant->EffectPointsMin[0] = 75;
+			enchant->EffectArg[0] = SPELL_SCHOOL_FROST;
+
+			for (uint8 i = 1; i < MAX_ITEM_ENCHANTMENT_EFFECTS; ++i)
+			{
+				enchant->Effect[i] = 0;
+				enchant->EffectPointsMin[i] = 0;
+				enchant->EffectArg[i] = 0;
+			}
+		});
+	}
+
+	// 노력 합치기(64347) 커스텀 보정
+	// 재료: 45924 x99
+	// 생성 아이템: 49426 x10
+	if (SpellInfo* spellInfo = const_cast<SpellInfo*>(GetSpellInfo(64347)))
+	{
+		for (uint8 i = 0; i < MAX_SPELL_REAGENTS; ++i)
+		{
+			spellInfo->Reagent[i] = 0;
+			spellInfo->ReagentCount[i] = 0;
+		}
+
+		// 재료 보정
+		spellInfo->Reagent[0] = 45924;
+		spellInfo->ReagentCount[0] = 99;
+
+		// 생성 아이템 보정
+		spellInfo->_effects[EFFECT_0].Effect = SPELL_EFFECT_CREATE_ITEM;
+		spellInfo->_effects[EFFECT_0].ItemType = 49426;
+
+		// 생성 개수 보정
+		spellInfo->_effects[EFFECT_0].BasePoints = 10;
+		spellInfo->_effects[EFFECT_0].DieSides = 0;
+	}
+
+	//침공의 결정
+	if (SpellInfo* spellInfo = const_cast<SpellInfo*>(GetSpellInfo(900203)))
+	{
+		for (uint8 i = 0; i < MAX_SPELL_REAGENTS; ++i)
+		{
+			spellInfo->Reagent[i] = 0;
+			spellInfo->ReagentCount[i] = 0;
+		}
+
+		// 재료 보정
+		spellInfo->Reagent[0] = 56940;
+		spellInfo->ReagentCount[0] = 99;
+
+		// 생성 아이템 보정
+		spellInfo->_effects[EFFECT_0].Effect = SPELL_EFFECT_CREATE_ITEM;
+		spellInfo->_effects[EFFECT_0].ItemType = 56941;
+
+		// 생성 개수 보정
+		spellInfo->_effects[EFFECT_0].BasePoints = 1;
+		spellInfo->_effects[EFFECT_0].DieSides = 0;
+
+		spellInfo->RecoveryTime = 43200000;
+		spellInfo->CategoryRecoveryTime = 0;
+	}
+
+		// 흑마법사 화염석 / 주문석 80레벨 보정
+	// 55151 화염석:
+	// EFFECT_0 = 직접 피해 주문 증가
+	// EFFECT_2 = 주문 극대화
+	//
+	// 55195 주문석:
+	// EFFECT_0 = 주기 피해 주문 증가
+	// EFFECT_2 = 주문 가속
+	ApplySpellFix({ 55151 }, [](SpellInfo* spellInfo)  // 화염석
+	{
+		// 직접 피해 주문 증가 1% -> 2%
+		// 기존 DBC: BasePoints 0 + DieSides 1 = 1
+		spellInfo->_GetEffect(EFFECT_0).BasePoints = 1;
+		spellInfo->_GetEffect(EFFECT_0).DieSides = 1;
+
+		// 주문 극대화 49 -> 120
+		// 기존 DBC: BasePoints 48 + DieSides 1 = 49
+		spellInfo->_GetEffect(EFFECT_2).BasePoints = 119;
+		spellInfo->_GetEffect(EFFECT_2).DieSides = 1;
+	});
+
+	ApplySpellFix({ 55195 }, [](SpellInfo* spellInfo)  // 주문석
+	{
+		// 주기 피해 주문 증가 1% -> 2%
+		// 기존 DBC: BasePoints 0 + DieSides 1 = 1
+		spellInfo->_GetEffect(EFFECT_0).BasePoints = 1;
+		spellInfo->_GetEffect(EFFECT_0).DieSides = 1;
+
+		// 주문 가속 60 -> 120
+		// 기존 DBC: BasePoints 59 + DieSides 1 = 60
+		spellInfo->_GetEffect(EFFECT_2).BasePoints = 119;
+		spellInfo->_GetEffect(EFFECT_2).DieSides = 1;
+	});
+
+	ApplySpellFix({ 31961 }, [](SpellInfo* spellInfo)  // 불폭탄 1% -> 5%
+	{
+		spellInfo->_GetEffect(EFFECT_0).BasePoints = 2899;
+		spellInfo->_GetEffect(EFFECT_1).BasePoints = 4;
+	});
+
+	//실리시스트
+	ApplySpellFix({ 29519 }, [](SpellInfo* spellInfo) // Silithyst Geyser  29534  58549
+	{
+		spellInfo->_GetEffect(EFFECT_0).TargetA = SpellImplicitTargetInfo(TARGET_UNIT_TARGET_ANY);
+		spellInfo->_GetEffect(EFFECT_1).TargetA = SpellImplicitTargetInfo(TARGET_UNIT_TARGET_ANY);
+		spellInfo->_GetEffect(EFFECT_2).TargetA = SpellImplicitTargetInfo(TARGET_UNIT_TARGET_ANY);
+
+		spellInfo->_GetEffect(EFFECT_0).TargetB = SpellImplicitTargetInfo();
+		spellInfo->_GetEffect(EFFECT_1).TargetB = SpellImplicitTargetInfo();
+		spellInfo->_GetEffect(EFFECT_2).TargetB = SpellImplicitTargetInfo();
+	});
 
     for (uint32 i = 0; i < GetSpellInfoStoreSize(); ++i)
     {

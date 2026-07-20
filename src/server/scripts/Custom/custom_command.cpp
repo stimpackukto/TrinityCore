@@ -61,10 +61,17 @@
 #include "Guild.h"
 #include "GuildMgr.h"
 
+#include "Bag.h"
+
 
 #if TRINITY_COMPILER == TRINITY_COMPILER_GNU
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 #endif
+
+// ============================================================================
+// Custom Update - 2026-07-13
+// appdata.character_archive_log 등록 캐릭터 일괄 영구 삭제 명령어 추가
+// ============================================================================
 
 using namespace Trinity::ChatCommands;
 
@@ -88,14 +95,64 @@ public:
 			{ "delivery",      HandleDeliveryGiftCommand, rbac::RBAC_PERM_COMMAND_SEND_MESSAGE, Console::Yes },
 			{ "guildsay",      HandleSendGuildSayCommand, rbac::RBAC_PERM_COMMAND_SEND_MESSAGE, Console::Yes },
 			{ "custommail",      HandleSendCustomMailCommand, rbac::RBAC_PERM_COMMAND_SEND_MESSAGE, Console::Yes },
+			{ "pshopmail", HandleSendPersonalShopItemMailCommand, rbac::RBAC_PERM_COMMAND_SEND_MESSAGE, Console::Yes },
         };
+
+		static ChatCommandTable titleCommandTable =
+		{
+			{ "customadd",    HandleCustomTitleAddCommand,    rbac::RBAC_PERM_COMMAND_SEND_MESSAGE,    Console::Yes },
+			{ "customremove", HandleCustomTitleRemoveCommand, rbac::RBAC_PERM_COMMAND_SEND_MESSAGE, Console::Yes },
+		};
 
         static ChatCommandTable commandTable =
         {
             { "send", sendCommandTable },
+			{ "title", titleCommandTable },
+			{ "archivedelete", HandleArchiveDeleteCommand, rbac::RBAC_PERM_COMMAND_SEND_MESSAGE, Console::Yes },
         };
         return commandTable;
     }
+
+	// 사용법: .archivedelete
+	// appdata.character_archive_log에 등록되어 있고 현재 존재하는 캐릭터를 영구 삭제한다.
+	static bool HandleArchiveDeleteCommand(ChatHandler* handler)
+	{
+		if (!handler)
+			return false;
+
+		QueryResult result = CharacterDatabase.PQuery(
+			"SELECT DISTINCT c.guid, c.account "
+			"FROM appdata.character_archive_log AS archive_log "
+			"INNER JOIN characters.characters AS c ON c.guid = archive_log.guid");
+
+		if (!result)
+		{
+			handler->SendSysMessage("character_archive_log에 삭제할 캐릭터가 없습니다.");
+			return true;
+		}
+
+		uint32 deletedCount = 0;
+		do
+		{
+			Field* fields = result->Fetch();
+			uint32 guidLow = fields[0].GetUInt32();
+			uint32 accountId = fields[1].GetUInt32();
+			ObjectGuid playerGuid = ObjectGuid::Create<HighGuid::Player>(guidLow);
+
+			if (Player* player = ObjectAccessor::FindConnectedPlayer(playerGuid))
+				if (WorldSession* session = player->GetSession())
+					session->KickPlayer("archivedelete command deleting archived character");
+
+			Player::DeleteFromDB(playerGuid, accountId, true, true);
+			++deletedCount;
+		} while (result->NextRow());
+
+		handler->SendSysMessage(
+			Trinity::StringFormat("character_archive_log 등록 캐릭터 {}명을 삭제했습니다.", deletedCount).c_str()
+		);
+
+		return true;
+	}
 
 	// global announce
 	static bool HandleAppAnnounceCommand(ChatHandler* handler, Tail message)
@@ -276,6 +333,27 @@ public:
 			handler->SendSysMessage("사용법: .app a  또는  .app h");
 			return true;
 		}
+
+		constexpr uint32 kWintergraspZoneId = 4197;
+
+		auto IsOwarGiftExcludedPlayer = [](Player* plr) -> bool
+		{
+			if (!plr)
+				return true;
+
+			if (!plr->IsInWorld())
+				return true;
+
+			// 겨울손아귀 호수 제외
+			if (plr->GetZoneId() == 4197)
+				return true;
+
+			// 일반 전장 , 투기장은 제외
+			if (plr->InBattleground() && plr->InArena())
+				return true;
+
+			return false;
+		};
 
 		// ─────────────────────────────────────────────────────────
 		// 3가지 랜덤:
@@ -721,6 +799,258 @@ static bool HandleSendCustomMailCommand(ChatHandler* /*handler*/, char const* ar
 
     return true;
 }
+
+
+static Player* FindOnlinePlayerForCustomTitle(std::string playerName)
+{
+    if (playerName.empty())
+        return nullptr;
+
+    normalizePlayerName(playerName);
+
+    return ObjectAccessor::FindConnectedPlayerByName(playerName.c_str());
+}
+
+static bool HandleCustomTitleAddCommand(ChatHandler* handler, uint16 titleId, std::string_view characterName)
+{
+    if (!handler)
+        return false;
+
+    std::string targetName(characterName);
+
+    if (titleId == 0 || targetName.empty())
+    {
+        handler->SendSysMessage("사용법: .title add 칭호ID 캐릭터이름");
+        return true;
+    }
+
+    CharTitlesEntry const* titleInfo = sCharTitlesStore.LookupEntry(titleId);
+    if (!titleInfo)
+    {
+        handler->SendSysMessage(
+            Trinity::StringFormat("존재하지 않는 칭호 ID입니다: {}", titleId).c_str()
+        );
+        return true;
+    }
+
+    Player* target = FindOnlinePlayerForCustomTitle(targetName);
+    if (!target || !target->GetSession())
+    {
+        handler->SendSysMessage(
+            Trinity::StringFormat("캐릭터가 온라인이 아니거나 찾을 수 없습니다: {}", targetName).c_str()
+        );
+        return true;
+    }
+
+    if (handler->HasLowerSecurity(target, ObjectGuid::Empty))
+        return false;
+
+    if (target->HasTitle(titleInfo))
+    {
+        handler->SendSysMessage(
+            Trinity::StringFormat("{} 캐릭터는 이미 해당 칭호를 보유하고 있습니다. 칭호 ID: {}", target->GetName(), titleId).c_str()
+        );
+        return true;
+    }
+
+    target->SetTitle(titleInfo);
+
+    handler->SendSysMessage(
+        Trinity::StringFormat("{} 캐릭터에게 칭호를 지급했습니다. 칭호 ID: {}", target->GetName(), titleId).c_str()
+    );
+
+    return true;
+}
+
+static bool HandleCustomTitleRemoveCommand(ChatHandler* handler, uint16 titleId, std::string_view characterName)
+{
+    if (!handler)
+        return false;
+
+    std::string targetName(characterName);
+
+    if (titleId == 0 || targetName.empty())
+    {
+        handler->SendSysMessage("사용법: .title remove 칭호ID 캐릭터이름");
+        return true;
+    }
+
+    CharTitlesEntry const* titleInfo = sCharTitlesStore.LookupEntry(titleId);
+    if (!titleInfo)
+    {
+        handler->SendSysMessage(
+            Trinity::StringFormat("존재하지 않는 칭호 ID입니다: {}", titleId).c_str()
+        );
+        return true;
+    }
+
+    Player* target = FindOnlinePlayerForCustomTitle(targetName);
+    if (!target || !target->GetSession())
+    {
+        handler->SendSysMessage(
+            Trinity::StringFormat("캐릭터가 온라인이 아니거나 찾을 수 없습니다: {}", targetName).c_str()
+        );
+        return true;
+    }
+
+    if (handler->HasLowerSecurity(target, ObjectGuid::Empty))
+        return false;
+
+    if (!target->HasTitle(titleInfo))
+    {
+        handler->SendSysMessage(
+            Trinity::StringFormat("{} 캐릭터는 해당 칭호를 보유하고 있지 않습니다. 칭호 ID: {}", target->GetName(), titleId).c_str()
+        );
+        return true;
+    }
+
+    target->SetTitle(titleInfo, true);
+
+    if (!target->HasTitle(target->GetInt32Value(PLAYER_CHOSEN_TITLE)))
+        target->SetUInt32Value(PLAYER_CHOSEN_TITLE, 0);
+
+    handler->SendSysMessage(
+        Trinity::StringFormat("{} 캐릭터에게서 칭호를 제거했습니다. 칭호 ID: {}", target->GetName(), titleId).c_str()
+    );
+
+    return true;
+}
+
+
+//개인상점
+static Item* GetAItemFromDB(uint32 itemGuid, ChatHandler* handler)
+{
+    (void)handler;
+
+    QueryResult result = CharacterDatabase.PQuery(
+        "SELECT owner_guid, itemEntry, "
+        "creatorGuid, giftCreatorGuid, count, duration, charges, flags, enchantments, randomPropertyId, durability, playedTime, text, "
+        "0, 0, 0, 0, 0, transmog, enchant "
+        "FROM item_instance "
+        "WHERE guid = {} "
+        "LIMIT 1",
+        itemGuid
+    );
+
+    if (!result)
+        return nullptr;
+
+    Field* fields = result->Fetch();
+
+    uint32 ownerGuidLow = fields[0].GetUInt32();
+    uint32 itemEntry = fields[1].GetUInt32();
+
+    if (ownerGuidLow == 0)
+        return nullptr;
+
+    ItemTemplate const* itemTemplate = sObjectMgr->GetItemTemplate(itemEntry);
+	if (!itemTemplate)
+		return nullptr;
+
+	Item* item = NewItemOrBag(itemTemplate);
+	if (!item)
+		return nullptr;
+
+    ObjectGuid ownerGuid = ObjectGuid::Create<HighGuid::Player>(ownerGuidLow);
+
+    // fields + 2 이후 기준:
+    // fields[0]  = creatorGuid
+    // fields[1]  = giftCreatorGuid
+    // fields[2]  = count
+    // fields[3]  = duration
+    // fields[4]  = charges
+    // fields[5]  = flags
+    // fields[6]  = enchantments
+    // fields[7]  = randomPropertyId
+    // fields[8]  = durability
+    // fields[9]  = playedTime
+    // fields[10] = text
+    // fields[16] = transmog
+    // fields[17] = enchant
+    if (!item->LoadFromDB(itemGuid, ownerGuid, fields + 2, itemEntry))
+    {
+        delete item;
+        return nullptr;
+    }
+
+    return item;
+}
+
+static bool HandleSendPersonalShopItemMailCommand(ChatHandler* handler, char const* args)
+{
+    if (!handler || !args || !*args)
+        return true;
+
+    std::istringstream iss(args);
+
+    uint32 itemGuid = 0;
+    uint32 buyerGuid = 0;
+
+    if (!(iss >> itemGuid >> buyerGuid))
+    {
+        handler->SendSysMessage("사용법: .send pshopmail {item_guid} {buyer_guid}");
+        return true;
+    }
+
+    if (itemGuid == 0 || buyerGuid == 0)
+    {
+        handler->SendSysMessage("개인상점 우편 발송 실패: 인자 오류");
+        return true;
+    }
+
+    QueryResult buyerResult = CharacterDatabase.PQuery(
+        "SELECT guid, name "
+        "FROM characters "
+        "WHERE guid = {} "
+        "LIMIT 1",
+        buyerGuid
+    );
+
+    if (!buyerResult)
+    {
+        handler->SendSysMessage(
+            Trinity::StringFormat("개인상점 우편 발송 실패: 구매자 캐릭터 없음 buyer_guid={}", buyerGuid).c_str()
+        );
+
+        return true;
+    }
+
+    Item* pItem = GetAItemFromDB(itemGuid, handler);
+    if (!pItem)
+    {
+        handler->SendSysMessage(
+            Trinity::StringFormat("개인상점 우편 발송 실패: DB 아이템 로드 실패 item_guid={}", itemGuid).c_str()
+        );
+        return true;
+    }
+
+    ObjectGuid buyerObjectGuid = ObjectGuid::Create<HighGuid::Player>(buyerGuid);
+    Player* buyer = ObjectAccessor::FindConnectedPlayer(buyerObjectGuid);
+
+    CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
+
+    pItem->SetBinding(false);
+    pItem->SetOwnerGUID(buyerObjectGuid);
+    pItem->SetState(ITEM_CHANGED);
+
+    pItem->SaveToDB(trans);
+
+    MailDraft("개인상점 구매 물품", "개인상점에서 구매한 물품입니다.")
+        .AddItem(pItem)
+        .SendMailTo(
+            trans,
+            MailReceiver(buyer, buyerGuid),
+            MailSender(MAIL_NORMAL, 0, MAIL_STATIONERY_DEFAULT),
+            MAIL_CHECK_MASK_COPIED,
+            0
+        );
+
+    CharacterDatabase.CommitTransaction(trans);
+
+    return true;
+}
+
+
 
 
 

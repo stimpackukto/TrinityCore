@@ -39,92 +39,277 @@ public:
         using GuidKey = uint64;
 
         std::unordered_map<GuidKey, ObjectGuid> g_SelectedItem;
+        std::unordered_map<GuidKey, std::unordered_map<uint32, ObjectGuid>> g_ItemList;
         std::unordered_map<GuidKey, uint32> g_Bid;
-        std::unordered_map<GuidKey, uint32> g_Buyout;
         std::unordered_map<GuidKey, uint32> g_Deposit;
 
-        static constexpr uint32 ACTION_SELECT_ITEM   = 1000;
-        static constexpr uint32 ACTION_INPUT_BID     = 2000;
-        static constexpr uint32 ACTION_INPUT_BUYOUT  = 2001;
-        static constexpr uint32 ACTION_INPUT_DEPOSIT = 2002;
-        static constexpr uint32 ACTION_CONFIRM       = 3000;
+        static constexpr uint32 ACTION_REFRESH_LIST      = 900;
+        static constexpr uint32 ACTION_SELECT_ITEM       = 1000;
+        static constexpr uint32 ACTION_SELECT_ITEM_END   = 1100;
+        static constexpr uint32 ACTION_INPUT_BID         = 2000;
+        static constexpr uint32 ACTION_CONFIRM           = 3000;
 
         static constexpr uint8 FIXED_AUCTION_HOUSE_ID = 7;
 
         npc_custom_auctioneerAI(Creature* c) : ScriptedAI(c) {}
 
-        // =========================
-        // 아이템 리스트
-        // =========================
-        bool OnGossipHello(Player* player) override
+        bool IsKnownAction(uint32 action) const
         {
-            ClearGossipMenuFor(player);
+            if (action == ACTION_REFRESH_LIST)
+                return true;
 
-            for (uint8 slot = 0; slot < INVENTORY_SLOT_ITEM_END; ++slot)
-            {
-                Item* item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
-                if (!item)
-                    continue;
+            if (action == ACTION_INPUT_BID)
+                return true;
 
-                if (item->GetTemplate()->Quality < ITEM_QUALITY_EPIC)
-                    continue;
+            if (action == ACTION_CONFIRM)
+                return true;
 
-				if (item->GetTemplate()->Class != ITEM_CLASS_WEAPON &&
-					item->GetTemplate()->Class != ITEM_CLASS_ARMOR)
-					continue;
+            if (action >= ACTION_SELECT_ITEM && action < ACTION_SELECT_ITEM_END)
+                return true;
 
-				// 🔥 귀속 아이템만 허용
-				if (!item->IsSoulBound())
-					continue;
+            return false;
+        }
 
-				if (item->GetUInt32Value(ITEM_FIELD_DURABILITY) <
-					item->GetUInt32Value(ITEM_FIELD_MAXDURABILITY))
-				{
-					continue; // 🔥 사용된 장비 금지
-				}
+        uint32 GetSelectedGossipAction(Player* player, uint32 gossipListId) const
+        {
+            if (!player)
+                return 0;
 
-				if (item->GetPlayedTime() > 12000)
-					continue;
+            if (IsKnownAction(gossipListId))
+                return gossipListId;
 
-				const ItemTemplate* proto = item->GetTemplate();
+            return player->PlayerTalkClass->GetGossipOptionAction(gossipListId);
+        }
 
-				// 🔥 shop_items 제외
-				if (g_BlockItemSet.count(proto->ItemId))
-					continue;
+        bool IsBaseInventoryItem(Item* item) const
+        {
+            if (!item)
+                return false;
 
-                AddGossipItemFor(player, GOSSIP_ICON_DOT,
-                    item->GetTemplate()->Name1,
-                    GOSSIP_SENDER_MAIN,
-                    ACTION_SELECT_ITEM + slot);
-            }
+            if (item->GetBagSlot() != INVENTORY_SLOT_BAG_0)
+                return false;
 
-            SendGossipMenuFor(player, 1, me->GetGUID());
+            uint8 slot = item->GetSlot();
+
+            if (slot < INVENTORY_SLOT_ITEM_START)
+                return false;
+
+            if (slot >= INVENTORY_SLOT_ITEM_END)
+                return false;
+
             return true;
         }
 
-        // =========================
-        // 선택
-        // =========================
-        bool OnGossipSelect(Player* player, uint32, uint32 gossipListId) override
+        bool IsAuctionableInventoryItem(Item* item) const
         {
-            uint32 action = player->PlayerTalkClass->GetGossipOptionAction(gossipListId);
+            if (!item)
+                return false;
+
+            if (!IsBaseInventoryItem(item))
+                return false;
+
+            const ItemTemplate* proto = item->GetTemplate();
+            if (!proto)
+                return false;
+
+            if (proto->Quality < ITEM_QUALITY_EPIC)
+                return false;
+
+            if (proto->Class != ITEM_CLASS_WEAPON &&
+                proto->Class != ITEM_CLASS_ARMOR)
+                return false;
+
+            if (!item->IsSoulBound())
+                return false;
+
+            if (item->GetUInt32Value(ITEM_FIELD_DURABILITY) <
+                item->GetUInt32Value(ITEM_FIELD_MAXDURABILITY))
+            {
+                return false;
+            }
+
+            if (item->GetPlayedTime() > 12000)
+                return false;
+
+            if (g_BlockItemSet.count(proto->ItemId))
+                return false;
+
+            return true;
+        }
+
+        void ClearPlayerAuctionState(Player* player)
+        {
+            if (!player)
+                return;
+
+            GuidKey key = player->GetGUID().GetRawValue();
+
+            g_SelectedItem.erase(key);
+            g_ItemList.erase(key);
+            g_Bid.erase(key);
+            g_Deposit.erase(key);
+        }
+
+        void BuildItemListMenu(Player* player)
+        {
+            if (!player)
+                return;
+
             ClearGossipMenuFor(player);
 
-            if (action >= ACTION_SELECT_ITEM && action < ACTION_SELECT_ITEM + 100)
+            GuidKey key = player->GetGUID().GetRawValue();
+
+            g_SelectedItem.erase(key);
+            g_ItemList[key].clear();
+            g_Bid.erase(key);
+            g_Deposit.erase(key);
+
+            AddGossipItemFor(
+                player,
+                GOSSIP_ICON_CHAT,
+                "등록할 아이템을 선택하세요.",
+                GOSSIP_SENDER_MAIN,
+                ACTION_REFRESH_LIST
+            );
+
+            bool hasItem = false;
+            uint32 listIndex = 0;
+
+            for (uint8 slot = INVENTORY_SLOT_ITEM_START; slot < INVENTORY_SLOT_ITEM_END; ++slot)
             {
-                uint32 slot = action - ACTION_SELECT_ITEM;
                 Item* item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
+                if (!item)
+                    continue;
+
+                if (!IsAuctionableInventoryItem(item))
+                    continue;
+
+                const ItemTemplate* proto = item->GetTemplate();
+                if (!proto)
+                    continue;
+
+                uint32 action = ACTION_SELECT_ITEM + listIndex;
+
+                if (action >= ACTION_SELECT_ITEM_END)
+                    break;
+
+                g_ItemList[key][action] = item->GetGUID();
+
+                std::ostringstream label;
+                label << proto->Name1;
+
+                AddGossipItemFor(
+                    player,
+                    GOSSIP_ICON_DOT,
+                    label.str(),
+                    GOSSIP_SENDER_MAIN,
+                    action
+                );
+
+                hasItem = true;
+                ++listIndex;
+            }
+
+            if (!hasItem)
+            {
+                AddGossipItemFor(
+                    player,
+                    GOSSIP_ICON_CHAT,
+                    "등록 가능한 기본가방 아이템이 없습니다.",
+                    GOSSIP_SENDER_MAIN,
+                    ACTION_REFRESH_LIST
+                );
+            }
+
+            SendGossipMenuFor(player, 1, me->GetGUID());
+        }
+
+        bool OnGossipHello(Player* player) override
+        {
+            if (!player)
+                return true;
+
+            BuildItemListMenu(player);
+            return true;
+        }
+
+        bool OnGossipSelect(Player* player, uint32, uint32 gossipListId) override
+        {
+            if (!player)
+                return true;
+
+            uint32 action = GetSelectedGossipAction(player, gossipListId);
+            ClearGossipMenuFor(player);
+
+            GuidKey key = player->GetGUID().GetRawValue();
+
+            if (action == ACTION_REFRESH_LIST)
+            {
+                BuildItemListMenu(player);
+                return true;
+            }
+
+            if (action >= ACTION_SELECT_ITEM && action < ACTION_SELECT_ITEM_END)
+            {
+                auto playerListItr = g_ItemList.find(key);
+
+                if (playerListItr == g_ItemList.end())
+                {
+                    ChatHandler(player->GetSession()).SendSysMessage("아이템 목록이 만료되었습니다. 다시 말을 걸어주세요.");
+                    CloseGossipMenuFor(player);
+                    return true;
+                }
+
+                auto itemItr = playerListItr->second.find(action);
+
+                if (itemItr == playerListItr->second.end())
+                {
+                    ChatHandler(player->GetSession()).SendSysMessage("선택한 아이템을 찾을 수 없습니다. 다시 말을 걸어주세요.");
+                    CloseGossipMenuFor(player);
+                    return true;
+                }
+
+                Item* item = player->GetItemByGuid(itemItr->second);
 
                 if (!item)
+                {
+                    ChatHandler(player->GetSession()).SendSysMessage("선택한 아이템이 기본가방에 없습니다.");
+                    CloseGossipMenuFor(player);
                     return true;
+                }
 
-                g_SelectedItem[player->GetGUID().GetRawValue()] = item->GetGUID();
+                if (!IsAuctionableInventoryItem(item))
+                {
+                    ChatHandler(player->GetSession()).SendSysMessage("이 아이템은 더 이상 등록 조건을 만족하지 않습니다.");
+                    CloseGossipMenuFor(player);
+                    return true;
+                }
 
-                AddGossipItemFor(player, GOSSIP_ICON_MONEY_BAG,
-                    "시작가 입력",
+                const ItemTemplate* proto = item->GetTemplate();
+
+                if (!proto)
+                {
+                    CloseGossipMenuFor(player);
+                    return true;
+                }
+
+                g_SelectedItem[key] = item->GetGUID();
+                g_Bid.erase(key);
+                g_Deposit.erase(key);
+
+                std::ostringstream label;
+                label << proto->Name1 << " 시작가 입력";
+
+                AddGossipItemFor(
+                    player,
+                    GOSSIP_ICON_MONEY_BAG,
+                    label.str(),
                     GOSSIP_SENDER_MAIN,
-                    ACTION_INPUT_BUYOUT,
-                    "", 0, true);
+                    ACTION_INPUT_BID,
+                    "",
+                    0,
+                    true
+                );
 
                 SendGossipMenuFor(player, 1, me->GetGUID());
                 return true;
@@ -137,103 +322,152 @@ public:
                 return true;
             }
 
+            CloseGossipMenuFor(player);
             return true;
         }
 
-        // =========================
-        // 코드 입력 처리
-        // =========================
         bool OnGossipSelectCode(Player* player, uint32, uint32 gossipListId, const char* code) override
         {
-            uint32 action = player->PlayerTalkClass->GetGossipOptionAction(gossipListId);
+            if (!player)
+                return true;
+
+            uint32 action = GetSelectedGossipAction(player, gossipListId);
             ClearGossipMenuFor(player);
 
-            uint32 value = atoi(code);
-            if (!value)
+            if (!code)
+            {
+                CloseGossipMenuFor(player);
                 return true;
+            }
+
+            uint32 value = uint32(atoi(code));
+
+            if (!value)
+            {
+                ChatHandler(player->GetSession()).SendSysMessage("시작가를 올바르게 입력해주세요.");
+                CloseGossipMenuFor(player);
+                return true;
+            }
 
             GuidKey key = player->GetGUID().GetRawValue();
 
-            // 시작가
             if (action == ACTION_INPUT_BID)
             {
-                g_Bid[key] = value;
+                if (!g_SelectedItem.count(key))
+                {
+                    ChatHandler(player->GetSession()).SendSysMessage("선택된 아이템이 없습니다. 다시 말을 걸어주세요.");
+                    CloseGossipMenuFor(player);
+                    return true;
+                }
 
-                AddGossipItemFor(player, GOSSIP_ICON_MONEY_BAG,
-                    "즉시구매가 입력",
+                Item* item = player->GetItemByGuid(g_SelectedItem[key]);
+
+                if (!item)
+                {
+                    ChatHandler(player->GetSession()).SendSysMessage("선택한 아이템이 기본가방에 없습니다.");
+                    CloseGossipMenuFor(player);
+                    return true;
+                }
+
+                if (!IsAuctionableInventoryItem(item))
+                {
+                    ChatHandler(player->GetSession()).SendSysMessage("이 아이템은 더 이상 등록 조건을 만족하지 않습니다.");
+                    CloseGossipMenuFor(player);
+                    return true;
+                }
+
+                const ItemTemplate* proto = item->GetTemplate();
+
+                if (!proto)
+                {
+                    CloseGossipMenuFor(player);
+                    return true;
+                }
+
+                if (g_MinbiditemSet.count(proto->ItemId))
+                {
+                    if (value < 20000)
+                    {
+                        ChatHandler(player->GetSession()).SendSysMessage("상급 아이템은 시작금액이 20000RP 이상입니다.");
+                        CloseGossipMenuFor(player);
+                        return true;
+                    }
+                }
+
+                uint32 depositRP = 10000;
+
+                g_Bid[key] = value;
+                g_Deposit[key] = depositRP;
+
+                std::ostringstream msg;
+                msg << "|cffFFD700[경매 등록 확인]|r\n\n"
+                    << "아이템: " << proto->Name1 << "\n"
+                    << "시작가: " << value << " RP\n"
+                    << "보증금: " << depositRP << " RP\n\n"
+                    << "즉시구매가는 사용하지 않습니다.\n"
+                    << "판매시 수수료는 25% 입니다.\n\n"
+                    << "등록하시겠습니까?";
+
+                AddGossipItemFor(
+                    player,
+                    GOSSIP_ICON_DOT,
+                    msg.str(),
                     GOSSIP_SENDER_MAIN,
-                    ACTION_INPUT_BUYOUT,
-                    "", 0, true);
+                    ACTION_CONFIRM
+                );
 
                 SendGossipMenuFor(player, 1, me->GetGUID());
                 return true;
             }
 
-            // 즉구가
-            if (action == ACTION_INPUT_BUYOUT)
-			{
-				g_Bid[key] = value;
-
-				uint32 bid = g_Bid[key];
-				uint32 buyout = g_Buyout[key];
-
-				ObjectGuid itemGuid = g_SelectedItem[key];
-				Item* item = player->GetItemByGuid(itemGuid);
-				const ItemTemplate* proto = item->GetTemplate();
-
-				if (!item)
-					return true;
-
-				if (g_MinbiditemSet.count(proto->ItemId))
-					if (bid < 20000)
-					{
-						ChatHandler(player->GetSession()).SendSysMessage("상급 아이템음 시작금이이 20000RP 이상 입니다.");
-						return true;
-					}
-
-				// 🔥 보증금 자동 계산
-				uint32 depositRP = 10000;
-
-				// 저장
-				g_Deposit[key] = depositRP;
-
-				std::ostringstream msg;
-				msg << "|cffFFD700[경매 등록 확인]|r\n\n"
-					<< "시작가: " << bid << "\n"
-					<< "보증금: " << depositRP << "\n\n"
-					<< "판매시 수수료는 25% 입니다.\n\n"
-					<< "등록하시겠습니까?";
-
-				AddGossipItemFor(player, GOSSIP_ICON_DOT,
-					msg.str(),
-					GOSSIP_SENDER_MAIN,
-					ACTION_CONFIRM);
-
-				SendGossipMenuFor(player, 1, me->GetGUID());
-				return true;
-			}
-
+            CloseGossipMenuFor(player);
             return true;
         }
 
-        // =========================
-        // 등록
-        // =========================
         void RegisterAuction(Player* player)
         {
-			uint32 realmId = sConfigMgr->GetIntDefault("RealmID", 0);
+            if (!player)
+                return;
+
+            uint32 realmId = sConfigMgr->GetIntDefault("RealmID", 0);
             GuidKey key = player->GetGUID().GetRawValue();
 
             if (!g_SelectedItem.count(key))
+            {
+                ChatHandler(player->GetSession()).SendSysMessage("선택된 아이템이 없습니다.");
                 return;
+            }
+
+            if (!g_Bid.count(key))
+            {
+                ChatHandler(player->GetSession()).SendSysMessage("시작가가 입력되지 않았습니다.");
+                return;
+            }
+
+            if (!g_Deposit.count(key))
+            {
+                ChatHandler(player->GetSession()).SendSysMessage("보증금 정보가 없습니다.");
+                return;
+            }
 
             Item* item = player->GetItemByGuid(g_SelectedItem[key]);
-            if (!item)
-                return;
 
-			uint32 bidRP = g_Bid[key];
-			uint32 buyoutRP = g_Buyout[key];
-			uint32 depositRP = g_Deposit[key];
+            if (!item)
+            {
+                ChatHandler(player->GetSession()).SendSysMessage("선택한 아이템이 기본가방에 없습니다.");
+                ClearPlayerAuctionState(player);
+                return;
+            }
+
+            if (!IsAuctionableInventoryItem(item))
+            {
+                ChatHandler(player->GetSession()).SendSysMessage("이 아이템은 더 이상 등록 조건을 만족하지 않습니다.");
+                ClearPlayerAuctionState(player);
+                return;
+            }
+
+            uint32 bidRP = g_Bid[key];
+            uint32 depositRP = g_Deposit[key];
 
             uint32 accountId = player->GetSession()->GetAccountId();
 
@@ -243,15 +477,29 @@ public:
                 return;
             }
 
-			SubtractRP(accountId, depositRP);
-
-			// 🔥 전부 변환
-			uint32 bid = bidRP;
-			uint32 buyout = 0;
-			uint32 deposit = depositRP;
-
             AuctionHouseEntry const* ahEntry =
                 sAuctionMgr->GetAuctionHouseEntryFromHouse(FIXED_AUCTION_HOUSE_ID);
+
+            if (!ahEntry)
+            {
+                ChatHandler(player->GetSession()).SendSysMessage("경매장 정보를 찾을 수 없습니다.");
+                return;
+            }
+
+            AuctionHouseObject* auctionHouse =
+                sAuctionMgr->GetAuctionsMapByHouseId(FIXED_AUCTION_HOUSE_ID);
+
+            if (!auctionHouse)
+            {
+                ChatHandler(player->GetSession()).SendSysMessage("경매장 객체를 찾을 수 없습니다.");
+                return;
+            }
+
+            SubtractRP(accountId, depositRP);
+
+            uint32 bid = bidRP;
+            uint32 buyout = 0;
+            uint32 deposit = depositRP;
 
             AuctionEntry* AH = new AuctionEntry();
 
@@ -262,19 +510,16 @@ public:
             AH->itemCount = item->GetCount();
             AH->owner = player->GetGUID().GetCounter();
             AH->startbid = bid;
-			AH->bidder = 0;
+            AH->bidder = 0;
             AH->bid = 0;
             AH->buyout = buyout;
             AH->expire_time = time(nullptr) + 12 * HOUR;
 
-			if (realmId != 1)
-				AH->expire_time = time(nullptr) + 2 * MINUTE;
+            if (realmId != 1)
+                AH->expire_time = time(nullptr) + 2 * MINUTE;
 
             AH->deposit = deposit;
             AH->auctionHouseEntry = ahEntry;
-
-            AuctionHouseObject* auctionHouse =
-                sAuctionMgr->GetAuctionsMapByHouseId(FIXED_AUCTION_HOUSE_ID);
 
             sAuctionMgr->AddAItem(item);
             auctionHouse->AddAuction(AH);
@@ -287,15 +532,38 @@ public:
             item->SaveToDB(trans);
             AH->SaveToDB(trans);
 
-			uint32 endTime = AH->expire_time;
-			LogAuctionHistory(accountId, player->GetGUID().GetCounter(), AH->itemGUIDLow, AH->itemEntry, bid, buyout, deposit, "SELL", false,endTime, 1);
+            uint32 endTime = AH->expire_time;
 
-			if (realmId == 1)
-				SendServerDiscordEvent("🧿 경매물품 등록", "새로운 경매 물품이 등록되었습니다. 지금 바로 확인하세요!","https://stimpack.pe.kr",16753920,"auction");
+            LogAuctionHistory(
+                accountId,
+                player->GetGUID().GetCounter(),
+                AH->itemGUIDLow,
+                AH->itemEntry,
+                bid,
+                buyout,
+                deposit,
+                "SELL",
+                false,
+                endTime,
+                1
+            );
+
+            if (realmId == 1)
+            {
+                SendServerDiscordEvent(
+                    "🧿 경매물품 등록",
+                    "새로운 경매 물품이 등록되었습니다. 지금 바로 확인하세요!",
+                    "https://stimpack.pe.kr",
+                    16753920,
+                    "auction"
+                );
+            }
 
             player->SaveInventoryAndGoldToDB(trans);
 
             CharacterDatabase.CommitTransaction(trans);
+
+            ClearPlayerAuctionState(player);
 
             ChatHandler(player->GetSession()).SendSysMessage("경매 등록 완료");
         }
@@ -569,8 +837,10 @@ namespace AutoRareMaterialAuction
 		{ 37663, "티탄강철 주괴" },
 		{ 44128, "북극 가죽" },
 		{ 34057, "심연의 결정" },
-		{ 36908, "서리 연꽃" }
-	};
+		{ 36908, "서리 연꽃" },
+		{ 43016, "달라란 요리상" },
+		{ 41596, "달라란 보석세공사의 징표" }
+	}; 
 
 	static RareMaterialPickResult PickRandomAvailableRareMaterial()
 	{

@@ -352,6 +352,7 @@ class TC_GAME_API BossAI : public ScriptedAI
 
     private:
         uint32 const _bossId;
+		uint32 _bossEngageUnixTime = 0;
 };
 
 class TC_GAME_API WorldBossAI : public ScriptedAI

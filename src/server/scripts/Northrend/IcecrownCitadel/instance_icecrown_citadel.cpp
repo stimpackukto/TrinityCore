@@ -201,6 +201,14 @@ class instance_icecrown_citadel : public InstanceMapScript
             void OnPlayerLeave(Player* player) override
             {
                 DoRemoveAurasDueToSpellOnPlayer(player, TeamInInstance == ALLIANCE ? SPELL_STRENGHT_OF_WRYNN : SPELL_HELLSCREAMS_WARSONG, true, true);
+
+				uint32 phaseMask = player->GetPhaseMask();
+				phaseMask &= ~16384; // 평판작업모드 페이즈 제거
+				phaseMask |= 1;  // 기본 1페이즈 복구
+
+				player->SetPhaseMask(phaseMask, true);
+				player->UpdateObjectVisibility(true);
+				player->UpdateVisibilityForPlayer();
             }
 
             void OnCreatureCreate(Creature* creature) override

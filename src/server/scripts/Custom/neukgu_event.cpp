@@ -15,6 +15,7 @@
 #include "SpellAuras.h"
 #include "WorldSession.h"
 #include "Config.h"
+#include "CustomRP.h"
 
 #include "DiscordEvent.h"
 
@@ -289,6 +290,16 @@ static void AssignNeukgu(bool announce = true)
         16759040,
         "event"
     );
+
+	SendFcmCategory(
+        2,
+        "event",
+        "[방황하는 늑구] ",
+        Trinity::StringFormat(
+            "사건 발생! 늑구가 우리를 빠져나갔습니다!"
+        ),
+        0
+    );
 }
 
 /* =========================
@@ -296,7 +307,8 @@ static void AssignNeukgu(bool announce = true)
  * ========================= */
 static bool ShouldSpawnToday()
 {
-    return urand(0, 1) == 1;
+	return true;
+    //return urand(0, 1) == 1;
 }
 
 /* =========================
@@ -403,7 +415,7 @@ public:
 					uint32(player->GetDistance(neukgu))
 				);
 
-				player->GetSession()->SendNotification(msg.c_str());
+				player->GetSession()->SendNotification("%s", msg.c_str());
 			}
 
 			context.Repeat(Seconds(10));
@@ -497,7 +509,7 @@ public:
 };
 
 static constexpr uint32 SPELL_NEUKGU_CAPTURE = 31368;
-static constexpr uint32 NEUKGU_CAPTURE_RATE  = 4000;
+static constexpr uint32 NEUKGU_CAPTURE_RATE  = 8000;
 
 class spell_neukgu_capture : public SpellScriptLoader
 {
@@ -558,24 +570,35 @@ public:
             if (success)
             {
                 std::string msg = Trinity::StringFormat("수색 성공! {} 님이 늑구를 포획했습니다!", player->GetName());
-				SendServerDiscordEvent("방황하는 늑구", msg,"https://stimpack.pe.kr/auth/register", 16759040, "event");
+                SendServerDiscordEvent("방황하는 늑구", msg, "https://stimpack.pe.kr/auth/register", 16759040, "event");
+
+				SendFcmCategory(
+                    2,
+                    "event",
+                    "[방황하는 늑구] ",
+                    Trinity::StringFormat(
+                        "수색 성공! {} 님이 늑구를 포획했습니다!",
+                        player->GetName()
+                    ),
+                    0
+                );
 
                 player->GetSession()->SendNotification("늑구 포획 성공!");
                 sWorld->SendServerMessage(SERVER_MSG_STRING, msg.c_str());
 
-				player->AddItem(24515, 1);
-				creature->DespawnOrUnsummon(1s);
+                player->AddItem(24515, 1);
+                creature->DespawnOrUnsummon(1s);
 
-				UpdateNeukguEventStatus(player->GetGUID().GetCounter(), 3);
+                UpdateNeukguEventStatus(player->GetGUID().GetCounter(), 3);
 
-				g_Neukgu.guid = ObjectGuid::Empty;
-				g_Neukgu.mapId = 0;
-				g_Neukgu.active = false;
-				g_Neukgu.summons = true;
-				return;
+                g_Neukgu.guid = ObjectGuid::Empty;
+                g_Neukgu.mapId = 0;
+                g_Neukgu.active = false;
+                g_Neukgu.summons = true;
+                return;
             }
 
-            std::string failMsg = Trinity::StringFormat("늑구가 {} 님의 그물을 뿌리치고 도망쳤습니다!",player->GetName());
+            std::string failMsg = Trinity::StringFormat("늑구가 {} 님의 그물을 뿌리치고 도망쳤습니다!", player->GetName());
 
             player->GetSession()->SendNotification("포획 실패! 늑구가 도망쳤습니다.");
             sWorld->SendServerMessage(SERVER_MSG_STRING, failMsg.c_str());
@@ -583,9 +606,9 @@ public:
             g_Neukgu.guid = ObjectGuid::Empty;
             g_Neukgu.mapId = 0;
             g_Neukgu.active = false;
-			g_Neukgu.summons = false;
+            g_Neukgu.summons = false;
 
-            AssignNeukgu();
+            AssignNeukgu(false);
 
             if (IsNeukguFrameRunning())
                 SendNeukguHint();
@@ -595,33 +618,13 @@ public:
         {
             OnEffectApply += AuraEffectApplyFn(
                 spell_neukgu_capture_AuraScript::OnApply,
-                EFFECT_0,
-                SPELL_AURA_MOD_ROOT,
-                AURA_EFFECT_HANDLE_REAL);
-            OnEffectApply += AuraEffectApplyFn(
-                spell_neukgu_capture_AuraScript::OnApply,
                 EFFECT_1,
-                SPELL_AURA_MOD_ROOT,
-                AURA_EFFECT_HANDLE_REAL);
-            OnEffectApply += AuraEffectApplyFn(
-                spell_neukgu_capture_AuraScript::OnApply,
-                EFFECT_2,
                 SPELL_AURA_MOD_ROOT,
                 AURA_EFFECT_HANDLE_REAL);
 
             AfterEffectRemove += AuraEffectRemoveFn(
                 spell_neukgu_capture_AuraScript::OnRemove,
-                EFFECT_0,
-                SPELL_AURA_MOD_ROOT,
-                AURA_EFFECT_HANDLE_REAL);
-            AfterEffectRemove += AuraEffectRemoveFn(
-                spell_neukgu_capture_AuraScript::OnRemove,
                 EFFECT_1,
-                SPELL_AURA_MOD_ROOT,
-                AURA_EFFECT_HANDLE_REAL);
-            AfterEffectRemove += AuraEffectRemoveFn(
-                spell_neukgu_capture_AuraScript::OnRemove,
-                EFFECT_2,
                 SPELL_AURA_MOD_ROOT,
                 AURA_EFFECT_HANDLE_REAL);
         }
@@ -704,19 +707,69 @@ public:
 				REWARD_RP_AMOUNT
 			);
 
-			static constexpr uint32 NEUKGU_LUCKY_ITEM = 23162;
-			static constexpr uint32 NEUKGU_LUCKY_ROLL_MAX = 10000;
-			static constexpr uint32 NEUKGU_LUCKY_ROLL_CHANCE = 100; // 100 / 10000 = 1%
-
-			if (urand(1, NEUKGU_LUCKY_ROLL_MAX) <= NEUKGU_LUCKY_ROLL_CHANCE)
+			struct NeukguBonusReward
 			{
-				player->AddItem(NEUKGU_LUCKY_ITEM, 1);
+				uint32 itemId;
+				uint32 count;
+				uint32 weight;
+				char const* name;
+			};
 
-				std::string msg = Trinity::StringFormat("늑구 구출 보상! {} 님이 [광활한 여행자의 가방] 획득!", player->GetName());
-				SendServerDiscordEvent("방황하는 늑구", msg,"https://stimpack.pe.kr/auth/register", 16759040, "event");
+			static constexpr uint32 ITEM_EMBLEM_OF_FROST = 49426;
+			static constexpr uint32 ITEM_LICH_KING_BATTLE_MASK = 13215;      // TODO: 리치왕의 전투 가면 item entry 입력
+			static constexpr uint32 ITEM_DEATHRACE_BAG = 21193;              // TODO: 데스레이스 가방 item entry 입력
+			static constexpr uint32 ITEM_PROFESSION_EXPANSION_BOOK = 1136;  // TODO: 전문기술 확장서 item entry 입력
+			static constexpr uint32 ITEM_PORTABLE_HOLE = 23162;          // 광활한 여행자의 가방
 
-				std::string msg1 = Trinity::StringFormat("|cffFFD700[늑구 구출 보상]|r [광활한 여행자의 가방] 획득!");
-				sWorld->SendServerMessage(SERVER_MSG_STRING, msg1.c_str(), 0);
+			static constexpr NeukguBonusReward NEUKGU_BONUS_REWARDS[] =
+			{
+				{ ITEM_EMBLEM_OF_FROST,              2, 5000, "서리의 문장 2개" },
+				{ ITEM_LICH_KING_BATTLE_MASK,        1, 2000, "리치왕의 전투 가면" },
+				{ ITEM_DEATHRACE_BAG,                1, 1000, "데스레이스 가방" },
+				{ ITEM_PROFESSION_EXPANSION_BOOK,    1, 1000, "전문기술 확장서" },
+				{ ITEM_PORTABLE_HOLE,                1, 1000, "광활한 여행자의 가방" }
+			};
+
+			uint32 bonusRoll = urand(1, 10000);
+			uint32 bonusAcc = 0;
+			NeukguBonusReward const* selectedReward = nullptr;
+
+			for (NeukguBonusReward const& reward : NEUKGU_BONUS_REWARDS)
+			{
+				bonusAcc += reward.weight;
+
+				if (bonusRoll <= bonusAcc)
+				{
+					selectedReward = &reward;
+					break;
+				}
+			}
+
+			if (selectedReward && selectedReward->itemId != 0)
+			{
+				player->AddItem(selectedReward->itemId, selectedReward->count);
+
+				std::string msg = Trinity::StringFormat(
+					"늑구 구출 보상! {} 님이 [{}] 획득!",
+					player->GetName(),
+					selectedReward->name
+				);
+
+				SendServerDiscordEvent(
+					"방황하는 늑구",
+					msg,
+					"https://stimpack.pe.kr/auth/register",
+					16759040,
+					"event"
+				);
+
+				std::string worldMsg = Trinity::StringFormat(
+					"|cffFFD700[늑구 구출 보상]|r {} 님이 [{}] 획득!",
+					player->GetName(),
+					selectedReward->name
+				);
+
+				sWorld->SendServerMessage(SERVER_MSG_STRING, worldMsg.c_str(), 0);
 			}
 
 			FinishNeukguEventLog(player->GetGUID().GetCounter(), 4);

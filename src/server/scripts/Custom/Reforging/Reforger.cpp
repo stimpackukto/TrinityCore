@@ -69,7 +69,7 @@ namespace RP
 } // namespace RP
 
 // ── 비용 ────────────────────────────────────────────────────────────────────
-static constexpr uint32 REFORGE_COST_RP = 10000; // 연마
+static constexpr uint32 REFORGE_COST_RP = 1000; // 연마
 static constexpr uint32 RESTORE_COST_RP = 500;  // 삭제
 
 static inline uint32 GetAccountId(Player* player)
@@ -123,7 +123,8 @@ static const ItemModType statTypes[] =
     ITEM_MOD_HIT_RATING,
     ITEM_MOD_CRIT_RATING,
     ITEM_MOD_HASTE_RATING,
-    ITEM_MOD_EXPERTISE_RATING
+    ITEM_MOD_EXPERTISE_RATING,
+	ITEM_MOD_ARMOR_PENETRATION_RATING
 };
 static const uint8 stat_type_max = sizeof(statTypes) / sizeof(*statTypes);
 
@@ -138,6 +139,7 @@ static const char* GetStatName(uint32 ItemStatType)
         case ITEM_MOD_CRIT_RATING:        return "치명타 숙련";
         case ITEM_MOD_HASTE_RATING:       return "가속 숙련";
         case ITEM_MOD_EXPERTISE_RATING:   return "숙련";
+		case ITEM_MOD_ARMOR_PENETRATION_RATING:     return "방어구 관통력";
         default:                          return nullptr;
     }
 }

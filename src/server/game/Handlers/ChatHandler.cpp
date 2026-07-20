@@ -6,10 +6,10 @@
  * Free Software Foundation; either version 2 of the License, or (at your
  * option) any later version.
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
- * more details.
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General
+ * Public License for more details.
  *
  * You should have received a copy of the GNU General Public License along
  * with this program. If not, see <http://www.gnu.org/licenses/>.
@@ -30,6 +30,7 @@
 #include "Group.h"
 #include "Guild.h"
 #include "GuildMgr.h"
+#include "Item.h"
 #include "Language.h"
 #include "Log.h"
 #include "ObjectAccessor.h"
@@ -43,6 +44,8 @@
 #include "World.h"
 #include "WorldPacket.h"
 #include <algorithm>
+#include <array>
+#include <vector>
 
 #include "TicketMgr.h"
 #include "DatabaseEnv.h"
@@ -54,6 +57,213 @@ inline bool isNasty(uint8 c)
     if (c <= '\037') // ASCII control block
         return true;
     return false;
+}
+
+namespace
+{
+    std::array<EnchantmentSlot, 5> const CustomUpgradeChatSlots =
+    {
+        PROP_ENCHANTMENT_SLOT_0,
+        PROP_ENCHANTMENT_SLOT_1,
+        PROP_ENCHANTMENT_SLOT_2,
+        PROP_ENCHANTMENT_SLOT_3,
+        PROP_ENCHANTMENT_SLOT_4
+    };
+
+    uint32 ParseCustomItemLinkEntry(std::string const& msg, size_t hitemPos)
+    {
+        size_t entryStart = hitemPos + 7; // |Hitem:
+        size_t entryEnd = msg.find(':', entryStart);
+
+        if (entryEnd == std::string::npos)
+            return 0;
+
+        if (entryEnd <= entryStart)
+            return 0;
+
+        uint32 entry = 0;
+
+        for (size_t i = entryStart; i < entryEnd; ++i)
+        {
+            char c = msg[i];
+
+            if (c < '0' || c > '9')
+                return 0;
+
+            entry = entry * 10 + uint32(c - '0');
+        }
+
+        return entry;
+    }
+
+    std::string CleanCustomUpgradeDescription(std::string text)
+    {
+        std::string result;
+        result.reserve(text.size());
+
+        for (char c : text)
+        {
+            if (c == '|' || c == '[' || c == ']' || c == '{' || c == '}' || c == '\n' || c == '\r')
+                continue;
+
+            result += c;
+        }
+
+        return result;
+    }
+
+    std::string GetCustomUpgradeDescriptionForChat(uint32 enchantId)
+    {
+        if (enchantId == 0)
+            return "";
+
+        std::string sql = Trinity::StringFormat(
+            "SELECT description "
+            "FROM appdata.data_wotlk_spellitemenchantment "
+            "WHERE id = {} "
+            "AND custom_upgrade_enabled = 1 "
+            "LIMIT 1",
+            enchantId
+        );
+
+        QueryResult result = LoginDatabase.Query(sql.c_str());
+
+        if (!result)
+            return "";
+
+        Field* fields = result->Fetch();
+        std::string description = fields[0].GetString();
+
+        if (description.empty())
+            return "";
+
+        return CleanCustomUpgradeDescription(description);
+    }
+
+    std::string BuildCustomUpgradeTextForChat(Item* item)
+    {
+        if (!item)
+            return "";
+
+        std::vector<std::string> descriptions;
+
+        for (EnchantmentSlot slot : CustomUpgradeChatSlots)
+        {
+            uint32 enchantId = item->GetEnchantmentId(slot);
+
+            if (enchantId == 0)
+                continue;
+
+            std::string description = GetCustomUpgradeDescriptionForChat(enchantId);
+
+            if (description.empty())
+                continue;
+
+            descriptions.push_back(description);
+        }
+
+        if (descriptions.empty())
+            return "";
+
+        std::string text = " {";
+
+        for (size_t i = 0; i < descriptions.size(); ++i)
+        {
+            if (i != 0)
+                text += " / ";
+
+            text += descriptions[i];
+        }
+
+        text += "}";
+
+        return text;
+    }
+
+    std::string GetCustomUpgradeTextForLinkedItem(Player* player, uint32 itemEntry)
+    {
+        if (!player || itemEntry == 0)
+            return "";
+
+        for (uint8 slot = EQUIPMENT_SLOT_START; slot < EQUIPMENT_SLOT_END; ++slot)
+        {
+            Item* item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
+
+            if (!item)
+                continue;
+
+            if (item->GetEntry() != itemEntry)
+                continue;
+
+            std::string text = BuildCustomUpgradeTextForChat(item);
+
+            if (!text.empty())
+                return text;
+        }
+
+        return "";
+    }
+
+    void AppendCustomUpgradeTextInsideItemLinks(Player* player, std::string& msg)
+    {
+        if (!player)
+            return;
+
+        size_t pos = 0;
+
+        while ((pos = msg.find("|Hitem:", pos)) != std::string::npos)
+        {
+            uint32 itemEntry = ParseCustomItemLinkEntry(msg, pos);
+
+            size_t textStart = msg.find("|h[", pos);
+
+            if (textStart == std::string::npos)
+            {
+                pos += 7;
+                continue;
+            }
+
+            textStart += 3;
+
+            size_t textEnd = msg.find("]|h|r", textStart);
+
+            if (textEnd == std::string::npos)
+            {
+                pos = textStart;
+                continue;
+            }
+
+            if (itemEntry == 0)
+            {
+                pos = textEnd + 5;
+                continue;
+            }
+
+            std::string upgradeText = GetCustomUpgradeTextForLinkedItem(player, itemEntry);
+
+            if (upgradeText.empty())
+            {
+                pos = textEnd + 5;
+                continue;
+            }
+
+            if (textEnd >= upgradeText.size() &&
+                msg.compare(textEnd - upgradeText.size(), upgradeText.size(), upgradeText) == 0)
+            {
+                pos = textEnd + 5;
+                continue;
+            }
+
+            if (msg.size() + upgradeText.size() > 255)
+            {
+                pos = textEnd + 5;
+                continue;
+            }
+
+            msg.insert(textEnd, upgradeText);
+            pos = textEnd + upgradeText.size() + 5;
+        }
+    }
 }
 
 void WorldSession::HandleMessagechatOpcode(WorldPacket& recvData)
@@ -320,6 +530,11 @@ void WorldSession::HandleMessagechatOpcode(WorldPacket& recvData)
         // validate hyperlinks
         if (!ValidateHyperlinksAndMaybeKick(msg))
             return;
+
+        // 커스텀 강화는 PROP_ENCHANTMENT_SLOT_0~4에 저장되어 기본 아이템 링크 툴팁에 표시되지 않는다.
+        // 그래서 채팅으로 나가기 전 링크 표시명 안에 강화 설명을 붙인다.
+        // 예: [어둠한 {힘 +30 / 치명 +20}]
+        AppendCustomUpgradeTextInsideItemLinks(sender, msg);
     }
 
     switch (type)

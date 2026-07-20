@@ -15,6 +15,12 @@
  * with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
+/*
+ * Custom Update - 2026-06-30
+ *
+ * Trial of the Champion Grand Champions defeat state stabilization
+ */
+
 #include "CellImpl.h"
 #include "GridNotifiersImpl.h"
 #include "Player.h"
@@ -263,27 +269,33 @@ struct boss_grand_championAI : BossAI
 
     bool GrandChampionsOutOfVehicles()
     {
-        for (int i = 0; i < 3; i++)
+        for (int i = 0; i < 3; ++i)
         {
-            if (Creature* pGrandChampion = ObjectAccessor::GetCreature(*me, instance->GetGuidData(DATA_GRAND_CHAMPION_1 + i)))
-            {
-                if (pGrandChampion->GetVehicleBase())
-                    return false;
-            }
+            Creature* pGrandChampion = ObjectAccessor::GetCreature(*me, instance->GetGuidData(DATA_GRAND_CHAMPION_1 + i));
+
+            if (!pGrandChampion)
+                return false;
+
+            if (pGrandChampion->GetVehicleBase())
+                return false;
         }
+
         return true;
     }
 
     bool GrandChampionsDefeated()
     {
-        for (int i = 0; i < 3; i++)
+        for (int i = 0; i < 3; ++i)
         {
-            if (Creature* pGrandChampion = ObjectAccessor::GetCreature(*me, instance->GetGuidData(DATA_GRAND_CHAMPION_1 + i)))
-            {
-                if (!pGrandChampion->HasAura(SPELL_KNEEL))
-                    return false;
-            }
+            Creature* pGrandChampion = ObjectAccessor::GetCreature(*me, instance->GetGuidData(DATA_GRAND_CHAMPION_1 + i));
+
+            if (!pGrandChampion)
+                return false;
+
+            if (!pGrandChampion->HasAura(SPELL_KNEEL))
+                return false;
         }
+
         return true;
     }
 
@@ -359,6 +371,56 @@ struct boss_grand_championAI : BossAI
         _JustReachedHome();
     }
 
+	void MoveToGroundPhaseHome()
+    {
+        bHome = true;
+
+        me->GetThreatManager().ClearAllThreat();
+        me->CombatStop(true);
+        me->AttackStop();
+
+        me->SetReactState(REACT_PASSIVE);
+        me->SetFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_NON_ATTACKABLE);
+
+        me->SetWalk(true);
+        me->GetMotionMaster()->Clear();
+        me->GetMotionMaster()->MoveTargetedHome();
+    }
+
+    void CompleteGrandChampionsEncounter()
+    {
+        if (instance->GetBossState(DATA_GRAND_CHAMPIONS) != DONE)
+            _JustDied();
+
+        for (int i = 0; i < 3; ++i)
+        {
+            Creature* champion = ObjectAccessor::GetCreature(*me, instance->GetGuidData(DATA_GRAND_CHAMPION_1 + i));
+
+            if (!champion)
+                continue;
+
+            champion->RemoveAura(SPELL_KNEEL);
+            champion->RemoveAura(SPELL_EARTH_SHIELD);
+            champion->RemoveAura(SPELL_HASTE);
+            champion->RemoveAura(SPELL_LIGHTNING_ARROWS_AURA);
+            champion->RemoveAura(SPELL_BLADESTORM);
+
+            champion->CombatStop(true);
+            champion->AttackStop();
+            champion->GetThreatManager().ClearAllThreat();
+
+            champion->SetReactState(REACT_PASSIVE);
+            champion->SetFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_NON_ATTACKABLE);
+            champion->SetRegenerateHealth(false);
+
+            instance->DoUpdateAchievementCriteria(ACHIEVEMENT_CRITERIA_TYPE_BE_SPELL_TARGET, SPELL_ACHIEVEMENT_CREDIT, 0, champion);
+
+            champion->SetWalk(true);
+            champion->GetMotionMaster()->Clear();
+            champion->GetMotionMaster()->MovePoint(POINT_DESPAWN, bossExitPos);
+        }
+    }
+
 	void SpellHitTarget(WorldObject* caster, SpellInfo const* spellInfo) override
     {
         if (spellInfo->Id == SPELL_TRAMPLE_AURA && LookingForMount && uiPhase == 0 && !me->IsImmunedToSpell(spellInfo, caster))
@@ -423,173 +485,147 @@ struct boss_grand_championAI : BossAI
             me->DisappearAndDie();
     }
 
-	void DamageTaken(Unit* /*attacker*/, uint32& damage, DamageEffectType /*damageType*/, SpellInfo const* /*spellInfo = nullptr*/) override
-{
-    // 0) 이미 전투 끝났으면 아무 피해도 받지 않음
-    if (bDone)
+    void DamageTaken(Unit* /*attacker*/, uint32& damage, DamageEffectType /*damageType*/, SpellInfo const* /*spellInfo = nullptr*/) override
     {
-        damage = 0;
-        return;
-    }
-
-    // 1) 이미 "다운 상태"면(무릎 포함) 피해 무시
-    if (IsChampionDown || me->HasAura(SPELL_KNEEL))
-    {
-        damage = 0;
-        return;
-    }
-
-    // 2) 기마 페이즈(마운트 위에서 싸우는 단계) 처리
-    //    MountedPhaseDone == false 인 동안은 기존 로직 유지
-    if (!MountedPhaseDone)
-    {
-        // 2-1) 말 타고 있는 상태에서 치명타 발생 → 말에서 떨어지고 새 탈 것 찾으러 감
-        if (me->GetVehicleBase() && damage >= me->GetHealth())
+        if (bDone)
         {
             damage = 0;
-            LookingForMount = true;
-            uiPhase = 1;
+            return;
+        }
 
-            // 더 이상 짓밟히지 않도록 면역
-            me->ApplySpellImmune(SPELL_TRAMPLE_AURA, IMMUNITY_ID, SPELL_TRAMPLE_AURA, true);
+        if (IsChampionDown || me->HasAura(SPELL_KNEEL))
+        {
+            damage = 0;
+            return;
+        }
 
-            // 말에서 내리기
-            me->ExitVehicle();
-            me->RemoveAllAuras();
-            DoCastPennant(me);
-            me->SetReactState(REACT_PASSIVE);
-            me->SetHealth(1);
-            me->CombatStop(true);
-            me->SetRegenerateHealth(false); // 아직은 회복 X
-            me->GetMotionMaster()->MoveIdle();
-            me->SetWalk(true);
-
-            // 현재 말은 문 쪽으로 뛰어가서 사라짐, 챔피언은 새 말 찾으러 감
-            if (Creature* mount = FindMyMount(me))
+        /*
+         * Mounted phase.
+         * While on a mount, fatal damage makes the champion dismount and look for a new mount.
+         */
+        if (!MountedPhaseDone)
+        {
+            if (me->GetVehicleBase() && damage >= me->GetHealth())
             {
-                mount->GetMotionMaster()->Clear();
-                mount->SetWalk(false);
-                mount->SetReactState(REACT_PASSIVE);
-                mount->SetFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_NON_ATTACKABLE);
+                damage = 0;
+                LookingForMount = true;
+                uiPhase = 1;
 
-                uint32 newMountEntry = instance->GetData(DATA_TEAM_IN_INSTANCE) == ALLIANCE ? VEHICLE_ARGENT_BATTLEWORG_COSMETIC : VEHICLE_ARGENT_WARHORSE_COSMETIC;
-                Creature* newMount = nullptr;
-                float dist = 0.0f;
-                std::list<Creature*> tempList;
+                me->ApplySpellImmune(SPELL_TRAMPLE_AURA, IMMUNITY_ID, SPELL_TRAMPLE_AURA, true);
 
-                Trinity::AllCreaturesOfEntryInRange check(me, newMountEntry, 100);
-                Trinity::CreatureListSearcher<Trinity::AllCreaturesOfEntryInRange> searcher(me, tempList, check);
-                Cell::VisitGridObjects(me, searcher, me->GetGridActivationRange());
+                me->ExitVehicle();
+                me->RemoveAllAuras();
+                DoCastPennant(me);
+                me->SetReactState(REACT_PASSIVE);
+                me->SetHealth(1);
+                me->CombatStop(true);
+                me->SetRegenerateHealth(false);
+                me->GetMotionMaster()->MoveIdle();
+                me->SetWalk(true);
 
-                for (std::list<Creature*>::const_iterator itr = tempList.begin(); itr != tempList.end(); ++itr)
-                {
-                    Creature* tmpMount = *itr;
-
-                    if (instance->GetGuidData(DATA_GRAND_CHAMPION_VEHICLE_1) == tmpMount->GetGUID() ||
-                        instance->GetGuidData(DATA_GRAND_CHAMPION_VEHICLE_2) == tmpMount->GetGUID() ||
-                        instance->GetGuidData(DATA_GRAND_CHAMPION_VEHICLE_3) == tmpMount->GetGUID())
-                        continue;
-
-                    if (!tmpMount->IsAlive())
-                        continue;
-
-                    if (dist == 0.0f)
-                    {
-                        dist = me->GetDistance(tmpMount);
-                        newMount = tmpMount;
-                    }
-                    else if (me->GetDistance(tmpMount) < dist)
-                    {
-                        dist = me->GetDistance(tmpMount);
-                        newMount = tmpMount;
-                    }
-                }
-
-                if (newMount)
-                {
-                    if (instance->GetGuidData(DATA_GRAND_CHAMPION_1) == me->GetGUID())
-                        instance->SetGuidData(DATA_GRAND_CHAMPION_VEHICLE_1, newMount->GetGUID());
-                    else if (instance->GetGuidData(DATA_GRAND_CHAMPION_2) == me->GetGUID())
-                        instance->SetGuidData(DATA_GRAND_CHAMPION_VEHICLE_2, newMount->GetGUID());
-                    else if (instance->GetGuidData(DATA_GRAND_CHAMPION_3) == me->GetGUID())
-                        instance->SetGuidData(DATA_GRAND_CHAMPION_VEHICLE_3, newMount->GetGUID());
-
-                    newMount->SetHomePosition(mount->GetHomePosition());
-                }
-                else
-                {
-                    // 쓸 수 있는 탈 것이 더 없으면 새 탈 것 소환
-                    (void)FindMyMount(me, true);
-                }
-
-                // 기존 말은 중앙으로 뛰어가서 사라짐
-                if (Creature* announcer = instance->GetCreature(DATA_ANNOUNCER))
+                if (Creature* mount = FindMyMount(me))
                 {
                     mount->GetMotionMaster()->Clear();
-                    mount->GetMotionMaster()->MovePoint(1, announcer->GetHomePosition());
+                    mount->SetWalk(false);
+                    mount->SetReactState(REACT_PASSIVE);
+                    mount->SetFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_NON_ATTACKABLE);
+
+                    uint32 newMountEntry = instance->GetData(DATA_TEAM_IN_INSTANCE) == ALLIANCE ? VEHICLE_ARGENT_BATTLEWORG_COSMETIC : VEHICLE_ARGENT_WARHORSE_COSMETIC;
+                    Creature* newMount = nullptr;
+                    float dist = 0.0f;
+                    std::list<Creature*> tempList;
+
+                    Trinity::AllCreaturesOfEntryInRange check(me, newMountEntry, 100.0f);
+                    Trinity::CreatureListSearcher<Trinity::AllCreaturesOfEntryInRange> searcher(me, tempList, check);
+                    Cell::VisitGridObjects(me, searcher, me->GetGridActivationRange());
+
+                    for (Creature* tmpMount : tempList)
+                    {
+                        if (instance->GetGuidData(DATA_GRAND_CHAMPION_VEHICLE_1) == tmpMount->GetGUID() ||
+                            instance->GetGuidData(DATA_GRAND_CHAMPION_VEHICLE_2) == tmpMount->GetGUID() ||
+                            instance->GetGuidData(DATA_GRAND_CHAMPION_VEHICLE_3) == tmpMount->GetGUID())
+                            continue;
+
+                        if (!tmpMount->IsAlive())
+                            continue;
+
+                        if (dist == 0.0f || me->GetDistance(tmpMount) < dist)
+                        {
+                            dist = me->GetDistance(tmpMount);
+                            newMount = tmpMount;
+                        }
+                    }
+
+                    if (newMount)
+                    {
+                        if (instance->GetGuidData(DATA_GRAND_CHAMPION_1) == me->GetGUID())
+                            instance->SetGuidData(DATA_GRAND_CHAMPION_VEHICLE_1, newMount->GetGUID());
+                        else if (instance->GetGuidData(DATA_GRAND_CHAMPION_2) == me->GetGUID())
+                            instance->SetGuidData(DATA_GRAND_CHAMPION_VEHICLE_2, newMount->GetGUID());
+                        else if (instance->GetGuidData(DATA_GRAND_CHAMPION_3) == me->GetGUID())
+                            instance->SetGuidData(DATA_GRAND_CHAMPION_VEHICLE_3, newMount->GetGUID());
+
+                        newMount->SetHomePosition(mount->GetHomePosition());
+                    }
+                    else
+                        (void)FindMyMount(me, true);
+
+                    if (Creature* announcer = instance->GetCreature(DATA_ANNOUNCER))
+                    {
+                        mount->GetMotionMaster()->Clear();
+                        mount->GetMotionMaster()->MovePoint(1, announcer->GetHomePosition());
+                    }
                 }
+
+                events.ScheduleEvent(EVENT_WALK_TO_MOUNT, 3s);
+                return;
             }
 
-            // 약간의 딜레이 후 새 말로 향하도록 이벤트
-            events.ScheduleEvent(EVENT_WALK_TO_MOUNT, 3s);
+            if (LookingForMount && damage >= me->GetHealth())
+            {
+                damage = 0;
+                return;
+            }
+
             return;
         }
 
-        // 2-2) 이미 새 말 찾으러 뛰어가는 중( LookingForMount )인데 치명타가 들어오면 무시
-        if (LookingForMount && damage >= me->GetHealth())
-        {
-            damage = 0;
-            return;
-        }
-
-        // 기마 페이즈에서는 이 함수에서 더 할 일 없음 → 나머지 피해는 그대로 적용
-        return;
-    }
-
-    // 3) 여기부터는 지상 페이즈 (MountedPhaseDone == true)
-
-    // 한 번도 다운되지 않은 상태에서만 "무릎" 트리거
-    if (!IsChampionDown)
-    {
-        // 몇 % 이하로 떨어지면 다운시킬지 임계값 (원하면 1, 3, 10 등으로 조정 가능)
+        /*
+         * Ground phase.
+         * Champions do not die directly. They stay kneeling until all three champions are defeated.
+         */
         constexpr uint8 KneelThresholdPct = 5;
 
-        // 이번 피해까지 포함했을 때 HP가 KneelThresholdPct% 아래로 떨어지는 순간 트리거
         if (me->HealthBelowPctDamaged(KneelThresholdPct, damage))
         {
-            // 실제로 죽지는 않게 막음
             damage = 0;
             IsChampionDown = true;
 
-            // 타겟팅은 막되, 전투/위협 리스트는 유지
             me->SetFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_NON_ATTACKABLE);
             me->SetReactState(REACT_PASSIVE);
             me->AttackStop();
             me->SetRegenerateHealth(false);
             me->GetMotionMaster()->MoveIdle();
 
-            // 체력은 임계 퍼센트로 세팅 (원하면 1 체력으로 바꿔도 됨)
             me->SetHealth(me->CountPctFromMaxHealth(KneelThresholdPct));
 
-            // 전투용 버프 제거
             me->RemoveAura(SPELL_EARTH_SHIELD);
             me->RemoveAura(SPELL_HASTE);
             me->RemoveAura(SPELL_LIGHTNING_ARROWS_AURA);
             me->RemoveAura(SPELL_BLADESTORM);
 
-            // 무릎
             me->CastSpell(me, SPELL_KNEEL, true);
 
-            // 여유 있는 무릎 유지 시간 (지금은 8초, 취향대로 조절 가능)
-            events.ScheduleEvent(EVENT_KNEEL_TIMEOUT, 8s);
+            if (GrandChampionsDefeated())
+            {
+                bDone = true;
+                uiPhase = 6;
+                events.ScheduleEvent(EVENT_DESPAWN, 2s);
+            }
+
             return;
         }
     }
-
-    // 지상 페이즈에서, 다운 상태도 아니고(위에서 걸리지 않았고),
-    // Encounter도 안 끝났으면 나머지 피해는 그대로 적용
-}
-
 
     void JustEngagedWith(Unit* who) override
     {
@@ -671,57 +707,17 @@ struct boss_grand_championAI : BossAI
                         me->GetMotionMaster()->MovePoint(0, mount->GetPosition());
                     break;
                 case EVENT_EVADE_MODE:
-                    // Entering to evade mode after jousting event is done
-                    bHome = true;
-                    EnterEvadeMode();
+                    MoveToGroundPhaseHome();
                     break;
                 case EVENT_START_ATTACK_REAL:
                     // Searches an enemy to attack after waited a while after jousting event
                     AttackRandomPlayer();
                     break;
                 case EVENT_DESPAWN:
-                    // Despawning
-                    _JustDied();
-                    me->RemoveAura(SPELL_KNEEL);
-                    instance->DoUpdateAchievementCriteria(ACHIEVEMENT_CRITERIA_TYPE_BE_SPELL_TARGET, SPELL_ACHIEVEMENT_CREDIT, 0, me);
-                    me->SetWalk(true);
-                    me->GetMotionMaster()->MovePoint(POINT_DESPAWN, bossExitPos);
+                    CompleteGrandChampionsEncounter();
                     break;
-				case EVENT_KNEEL_TIMEOUT:
-				{
-					// 이미 전투 종료(bDone)면 아무것도 하지 않음
-					if (bDone)
-						break;
-
-					// 혹시 이 타이밍에 세 명이 다 무릎 상태면, 여기서도 한 번 더 확인해서 종료
-					if (GrandChampionsDefeated())
-					{
-						// 여유롭게 한 번 더 승리 처리
-						bDone = true;
-						uiPhase = 6;
-						events.ScheduleEvent(EVENT_DESPAWN, 2s);
-						break;
-					}
-
-					// 아직 전부 무릎 아니면, 이 보스는 다시 일어나서 전투 재개
-					if (me->HasAura(SPELL_KNEEL))
-						me->RemoveAurasDueToSpell(SPELL_KNEEL);
-
-					IsChampionDown = false;
-
-					me->RemoveFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_NON_ATTACKABLE);
-					me->SetReactState(REACT_AGGRESSIVE);
-
-					// 풀피로 다시 시작 (원하면 MaxHealth의 일부만 채워도 됨)
-					me->SetHealth(me->GetMaxHealth());
-					me->SetRegenerateHealth(true);
-
-					// 근처 플레이어 찾아서 다시 어그로
-					if (Player* target = me->SelectNearestPlayer(50.0f))
-						AttackStart(target);
-
-					break;
-				}
+                case EVENT_KNEEL_TIMEOUT:
+                    break;
                 default:
                     break;
             }

@@ -13,9 +13,18 @@
  *
  * You should have received a copy of the GNU General Public License along
  * with this program. If not, see <http://www.gnu.org/licenses/>.
+ *
+ * Custom Update - 2026-06-19
+ * - Added custom Zangarmarsh outdoor war flow.
+ * - During custom war, both beacons unlock grave guardian phase.
+ * - Graveyard can be captured only after guardian NPCs are killed.
+ * - Captured graveyard starts attack wave hold phase.
+ * - Holding the graveyard for 5 minutes triggers custom victory.
+ * - If either beacon is lost during the event, guardians, waves and graveyard control reset.
  */
 
 #include "OutdoorPvPZM.h"
+#include "../Custom/outdoorpvp/CustomOutdoorPvpWarController.h"
 #include "Creature.h"
 #include "GossipDef.h"
 #include "MapManager.h"
@@ -25,6 +34,9 @@
 #include "Player.h"
 #include "ScriptMgr.h"
 #include "WorldStatePackets.h"
+
+bool OutdoorPvpWar_IsZangarmarshWarActive();
+void OutdoorPvpWar_OnZangarmarshVictory(uint32 winnerTeam);
 
 uint8 const OutdoorPvPZMBuffZonesNum = 5;
 
@@ -47,6 +59,67 @@ creature_type const ZM_HordeFieldScout = { 18564, 530, { 296.625f, 7818.4f, 42.6
 
 // alliance field scout spawn data
 creature_type const ZM_AllianceFieldScout = { 18581, 530, { 374.395f, 6230.08f, 22.8351f, 0.593412f } };
+
+uint32 const ZM_WAR_GRAVE_ELITE_ENTRY = 0;
+uint32 const ZM_WAR_GRAVE_GUARD_ENTRY = 0;
+uint32 const ZM_WAR_ALLIANCE_WAVE_ENTRY = 0;
+uint32 const ZM_WAR_HORDE_WAVE_ENTRY = 0;
+
+uint32 const ZM_WAR_GRAVE_GUARD_COUNT = 9;
+uint32 const ZM_WAR_WAVE_COUNT = 8;
+uint32 const ZM_WAR_HOLD_TIME = 5 * 60 * 1000;
+uint32 const ZM_WAR_WAVE_RESPAWN_TIME = 60 * 1000;
+
+creature_type const ZM_WarGraveElite = { ZM_WAR_GRAVE_ELITE_ENTRY, 530, { 253.54f, 7083.81f, 36.7728f, 3.14f } };
+
+creature_type const ZM_WarGraveGuards[8] =
+{
+    { ZM_WAR_GRAVE_GUARD_ENTRY, 530, { 244.54f, 7075.81f, 36.7728f, 0.78f } },
+    { ZM_WAR_GRAVE_GUARD_ENTRY, 530, { 253.54f, 7071.81f, 36.7728f, 1.57f } },
+    { ZM_WAR_GRAVE_GUARD_ENTRY, 530, { 262.54f, 7075.81f, 36.7728f, 2.35f } },
+    { ZM_WAR_GRAVE_GUARD_ENTRY, 530, { 266.54f, 7083.81f, 36.7728f, 3.14f } },
+    { ZM_WAR_GRAVE_GUARD_ENTRY, 530, { 262.54f, 7091.81f, 36.7728f, 3.92f } },
+    { ZM_WAR_GRAVE_GUARD_ENTRY, 530, { 253.54f, 7095.81f, 36.7728f, 4.71f } },
+    { ZM_WAR_GRAVE_GUARD_ENTRY, 530, { 244.54f, 7091.81f, 36.7728f, 5.49f } },
+    { ZM_WAR_GRAVE_GUARD_ENTRY, 530, { 240.54f, 7083.81f, 36.7728f, 0.00f } }
+};
+
+creature_type const ZM_WarAttackWavePositions[8] =
+{
+    { 0, 530, { 215.54f, 7048.81f, 36.7728f, 0.70f } },
+    { 0, 530, { 226.54f, 7041.81f, 36.7728f, 0.80f } },
+    { 0, 530, { 281.54f, 7048.81f, 36.7728f, 2.40f } },
+    { 0, 530, { 292.54f, 7058.81f, 36.7728f, 2.50f } },
+    { 0, 530, { 292.54f, 7108.81f, 36.7728f, 3.70f } },
+    { 0, 530, { 281.54f, 7118.81f, 36.7728f, 3.80f } },
+    { 0, 530, { 226.54f, 7118.81f, 36.7728f, 5.40f } },
+    { 0, 530, { 215.54f, 7108.81f, 36.7728f, 5.50f } }
+};
+
+uint32 const ZM_WarGraveCreatureTypes[9] =
+{
+    ZM_WAR_GRAVE_ELITE,
+    ZM_WAR_GRAVE_GUARD_1,
+    ZM_WAR_GRAVE_GUARD_2,
+    ZM_WAR_GRAVE_GUARD_3,
+    ZM_WAR_GRAVE_GUARD_4,
+    ZM_WAR_GRAVE_GUARD_5,
+    ZM_WAR_GRAVE_GUARD_6,
+    ZM_WAR_GRAVE_GUARD_7,
+    ZM_WAR_GRAVE_GUARD_8
+};
+
+uint32 const ZM_WarWaveCreatureTypes[8] =
+{
+    ZM_WAR_WAVE_1,
+    ZM_WAR_WAVE_2,
+    ZM_WAR_WAVE_3,
+    ZM_WAR_WAVE_4,
+    ZM_WAR_WAVE_5,
+    ZM_WAR_WAVE_6,
+    ZM_WAR_WAVE_7,
+    ZM_WAR_WAVE_8
+};
 
 struct zm_beacon
 {
@@ -168,6 +241,10 @@ bool OutdoorPvPZM::Update(uint32 diff)
         else
             m_Graveyard->SetBeaconState(0);
     }
+
+    if (m_Graveyard)
+        m_Graveyard->UpdateCustomWar(diff);
+
     return changed;
 }
 
@@ -225,6 +302,9 @@ bool OutdoorPvPZM::SetupOutdoorPvP()
 
 void OutdoorPvPZM::HandleKillImpl(Player* player, Unit* killed)
 {
+    if (m_Graveyard && m_Graveyard->HandleCustomWarCreatureDeath(killed))
+        return;
+
     if (killed->GetTypeId() != TYPEID_PLAYER)
         return;
 
@@ -243,6 +323,9 @@ bool OPvPCapturePointZM_Graveyard::Update(uint32 /*diff*/)
 
 int32 OPvPCapturePointZM_Graveyard::HandleOpenGo(Player* player, GameObject* go)
 {
+    if (IsCustomWarActive() && !IsCustomWarCenterReady())
+        return -1;
+
     int32 retval = OPvPCapturePoint::HandleOpenGo(player, go);
     if (retval >= 0)
     {
@@ -256,6 +339,9 @@ int32 OPvPCapturePointZM_Graveyard::HandleOpenGo(Player* player, GameObject* go)
             m_PvP->TeamApplyBuff(TEAM_ALLIANCE, ZM_CAPTURE_BUFF);
             player->RemoveAurasDueToSpell(ZM_BATTLE_STANDARD_A);
             m_PvP->SendDefenseMessage(ZM_GRAVEYARD_ZONE, TEXT_TWIN_SPIRE_RUINS_TAKEN_ALLIANCE);
+
+            if (IsCustomWarActive())
+                StartCustomWarHold(ALLIANCE);
         }
         else if (player->HasAura(ZM_BATTLE_STANDARD_H) && m_GraveyardState != ZM_GRAVEYARD_H)
         {
@@ -267,6 +353,9 @@ int32 OPvPCapturePointZM_Graveyard::HandleOpenGo(Player* player, GameObject* go)
             m_PvP->TeamApplyBuff(TEAM_HORDE, ZM_CAPTURE_BUFF);
             player->RemoveAurasDueToSpell(ZM_BATTLE_STANDARD_H);
             m_PvP->SendDefenseMessage(ZM_GRAVEYARD_ZONE, TEXT_TWIN_SPIRE_RUINS_TAKEN_HORDE);
+
+            if (IsCustomWarActive())
+                StartCustomWarHold(HORDE);
         }
         UpdateTowerState();
     }
@@ -278,6 +367,13 @@ OPvPCapturePointZM_Graveyard::OPvPCapturePointZM_Graveyard(OutdoorPvP* pvp) : OP
     m_BothControllingFaction = 0;
     m_GraveyardState = ZM_GRAVEYARD_N;
     m_FlagCarrierGUID.Clear();
+
+    m_CustomWarState = ZM_WAR_STATE_NONE;
+    m_CustomWarBeaconOwner = 0;
+    m_CustomWarHoldTimer = 0;
+    m_CustomWarWaveTimer = 0;
+    m_CustomWarGraveGuardsAlive = 0;
+
     // add field scouts here
     AddCreature(ZM_ALLIANCE_FIELD_SCOUT, ZM_AllianceFieldScout.entry, ZM_AllianceFieldScout.map, ZM_AllianceFieldScout.pos);
     AddCreature(ZM_HORDE_FIELD_SCOUT, ZM_HordeFieldScout.entry, ZM_HordeFieldScout.map, ZM_HordeFieldScout.pos);
@@ -349,12 +445,24 @@ void OPvPCapturePointZM_Graveyard::SetBeaconState(uint32 controlling_faction)
         }
         break;
     }
+
+    if (IsCustomWarActive())
+    {
+        if (!IsCustomWarBeaconOwnerValid())
+            ResetCustomWarBattle();
+        else if (m_CustomWarState != ZM_WAR_STATE_NONE && m_CustomWarState != ZM_WAR_STATE_WAIT_BEACONS && m_CustomWarBeaconOwner != m_BothControllingFaction)
+            ResetCustomWarBattle();
+    }
+
     // send worldstateupdate
     UpdateTowerState();
 }
 
 bool OPvPCapturePointZM_Graveyard::CanTalkTo(Player* player, Creature* c, GossipMenuItems const& /*gso*/)
 {
+    if (IsCustomWarActive() && !IsCustomWarCenterReady())
+        return false;
+
     std::map<uint32, uint32>::iterator itr = m_CreatureTypes.find(c->GetSpawnId());
 
     if (itr != m_CreatureTypes.end())
@@ -369,6 +477,9 @@ bool OPvPCapturePointZM_Graveyard::CanTalkTo(Player* player, Creature* c, Gossip
 
 bool OPvPCapturePointZM_Graveyard::HandleGossipOption(Player* player, Creature* creature, uint32 /*gossipid*/)
 {
+    if (IsCustomWarActive() && !IsCustomWarCenterReady())
+        return false;
+
     std::map<uint32, uint32>::iterator itr = m_CreatureTypes.find(creature->GetSpawnId());
 
     if (itr != m_CreatureTypes.end())
@@ -410,6 +521,285 @@ bool OPvPCapturePointZM_Graveyard::HandleDropFlag(Player* /*player*/, uint32 spe
 uint32 OPvPCapturePointZM_Graveyard::GetGraveyardState() const
 {
     return m_GraveyardState;
+}
+
+bool OPvPCapturePointZM_Graveyard::IsCustomWarActive() const
+{
+    return OutdoorPvpWar_IsZangarmarshWarActive();
+}
+
+bool OPvPCapturePointZM_Graveyard::IsCustomWarBeaconOwnerValid() const
+{
+    return m_BothControllingFaction == ALLIANCE || m_BothControllingFaction == HORDE;
+}
+
+bool OPvPCapturePointZM_Graveyard::IsCustomWarCenterReady() const
+{
+    return m_CustomWarState == ZM_WAR_STATE_CENTER_READY;
+}
+
+void OPvPCapturePointZM_Graveyard::UpdateCustomWar(uint32 diff)
+{
+    if (!IsCustomWarActive())
+    {
+        if (m_CustomWarState != ZM_WAR_STATE_NONE)
+            ResetCustomWarBattle();
+
+        return;
+    }
+
+    if (!IsCustomWarBeaconOwnerValid())
+    {
+        if (m_CustomWarState != ZM_WAR_STATE_WAIT_BEACONS)
+            ResetCustomWarBattle();
+
+        m_CustomWarState = ZM_WAR_STATE_WAIT_BEACONS;
+        return;
+    }
+
+    if (m_CustomWarState != ZM_WAR_STATE_NONE && m_CustomWarState != ZM_WAR_STATE_WAIT_BEACONS && m_CustomWarBeaconOwner != m_BothControllingFaction)
+    {
+        ResetCustomWarBattle();
+        return;
+    }
+
+    if (m_CustomWarState == ZM_WAR_STATE_NONE || m_CustomWarState == ZM_WAR_STATE_WAIT_BEACONS)
+    {
+        StartCustomWarGuardPhase(m_BothControllingFaction);
+        return;
+    }
+
+    if (m_CustomWarState == ZM_WAR_STATE_CENTER_HOLD)
+        UpdateCustomWarHold(diff);
+}
+
+void OPvPCapturePointZM_Graveyard::ResetCustomWarBattle()
+{
+    DespawnCustomWarGraveGuards();
+    DespawnCustomWarAttackWave();
+
+    m_CustomWarBeaconOwner = 0;
+    m_CustomWarHoldTimer = 0;
+    m_CustomWarWaveTimer = 0;
+    m_CustomWarGraveGuardsAlive = 0;
+    m_CustomWarState = IsCustomWarActive() ? ZM_WAR_STATE_WAIT_BEACONS : ZM_WAR_STATE_NONE;
+
+    ResetCustomWarCenterToNeutral();
+}
+
+void OPvPCapturePointZM_Graveyard::ResetCustomWarCenterToNeutral()
+{
+    if (!m_FlagCarrierGUID.IsEmpty())
+    {
+        if (Player* player = ObjectAccessor::FindPlayer(m_FlagCarrierGUID))
+        {
+            player->RemoveAurasDueToSpell(ZM_BATTLE_STANDARD_A);
+            player->RemoveAurasDueToSpell(ZM_BATTLE_STANDARD_H);
+        }
+
+        m_FlagCarrierGUID.Clear();
+    }
+
+    m_GraveyardState = ZM_GRAVEYARD_N;
+
+    DelObject(0);
+    AddObject(0, ZM_Banner_N.entry, ZM_Banner_N.map, ZM_Banner_N.pos, ZM_Banner_N.rot);
+
+    sObjectMgr->RemoveGraveyardLink(ZM_GRAVEYARD_ID, ZM_GRAVEYARD_ZONE, ALLIANCE);
+    sObjectMgr->RemoveGraveyardLink(ZM_GRAVEYARD_ID, ZM_GRAVEYARD_ZONE, HORDE);
+
+    UpdateTowerState();
+}
+
+void OPvPCapturePointZM_Graveyard::StartCustomWarGuardPhase(uint32 controllingFaction)
+{
+    if (!IsCustomWarActive())
+        return;
+
+    if (controllingFaction != ALLIANCE && controllingFaction != HORDE)
+        return;
+
+    if (m_CustomWarState == ZM_WAR_STATE_GRAVE_GUARDS || m_CustomWarState == ZM_WAR_STATE_CENTER_READY || m_CustomWarState == ZM_WAR_STATE_CENTER_HOLD)
+        return;
+
+    ResetCustomWarCenterToNeutral();
+
+    m_CustomWarBeaconOwner = controllingFaction;
+    SpawnCustomWarGraveGuards(controllingFaction);
+
+    m_CustomWarState = ZM_WAR_STATE_GRAVE_GUARDS;
+}
+
+void OPvPCapturePointZM_Graveyard::SpawnCustomWarGraveGuards(uint32 /*controllingFaction*/)
+{
+    DespawnCustomWarGraveGuards();
+
+    m_CustomWarGraveGuardsAlive = 0;
+
+    if (ZM_WAR_GRAVE_ELITE_ENTRY != 0)
+    {
+        AddCreature(ZM_WAR_GRAVE_ELITE, ZM_WarGraveElite.entry, ZM_WarGraveElite.map, ZM_WarGraveElite.pos);
+        ++m_CustomWarGraveGuardsAlive;
+    }
+
+    for (uint8 i = 0; i < 8; ++i)
+    {
+        if (ZM_WAR_GRAVE_GUARD_ENTRY == 0)
+            continue;
+
+        AddCreature(ZM_WarGraveCreatureTypes[i + 1], ZM_WarGraveGuards[i].entry, ZM_WarGraveGuards[i].map, ZM_WarGraveGuards[i].pos);
+        ++m_CustomWarGraveGuardsAlive;
+    }
+
+    if (m_CustomWarGraveGuardsAlive == 0)
+        UnlockCustomWarCenter();
+}
+
+void OPvPCapturePointZM_Graveyard::DespawnCustomWarGraveGuards()
+{
+    for (uint8 i = 0; i < ZM_WAR_GRAVE_GUARD_COUNT; ++i)
+        DelCreature(ZM_WarGraveCreatureTypes[i]);
+}
+
+bool OPvPCapturePointZM_Graveyard::HandleCustomWarCreatureDeath(Unit* killed)
+{
+    if (!killed)
+        return false;
+
+    if (!IsCustomWarActive())
+        return false;
+
+    if (killed->GetTypeId() != TYPEID_UNIT)
+        return false;
+
+    Creature* creature = killed->ToCreature();
+    if (!creature)
+        return false;
+
+    std::map<uint32, uint32>::iterator itr = m_CreatureTypes.find(creature->GetSpawnId());
+    if (itr == m_CreatureTypes.end())
+        return false;
+
+    uint32 creatureType = itr->second;
+
+    for (uint8 i = 0; i < ZM_WAR_GRAVE_GUARD_COUNT; ++i)
+    {
+        if (creatureType != ZM_WarGraveCreatureTypes[i])
+            continue;
+
+        if (m_CustomWarGraveGuardsAlive > 0)
+            --m_CustomWarGraveGuardsAlive;
+
+        if (m_CustomWarGraveGuardsAlive == 0)
+            UnlockCustomWarCenter();
+
+        return true;
+    }
+
+    return false;
+}
+
+void OPvPCapturePointZM_Graveyard::UnlockCustomWarCenter()
+{
+    if (!IsCustomWarActive())
+        return;
+
+    if (!IsCustomWarBeaconOwnerValid())
+    {
+        ResetCustomWarBattle();
+        return;
+    }
+
+    m_CustomWarState = ZM_WAR_STATE_CENTER_READY;
+    UpdateTowerState();
+}
+
+void OPvPCapturePointZM_Graveyard::StartCustomWarHold(uint32 controllingFaction)
+{
+    if (!IsCustomWarActive())
+        return;
+
+    if (m_CustomWarState != ZM_WAR_STATE_CENTER_READY)
+        return;
+
+    if (controllingFaction != m_BothControllingFaction)
+    {
+        ResetCustomWarBattle();
+        return;
+    }
+
+    m_CustomWarHoldTimer = 0;
+    m_CustomWarWaveTimer = 0;
+    m_CustomWarState = ZM_WAR_STATE_CENTER_HOLD;
+
+    SpawnCustomWarAttackWave(controllingFaction);
+}
+
+void OPvPCapturePointZM_Graveyard::UpdateCustomWarHold(uint32 diff)
+{
+    if (!IsCustomWarBeaconOwnerValid())
+    {
+        ResetCustomWarBattle();
+        return;
+    }
+
+    if (m_CustomWarBeaconOwner != m_BothControllingFaction)
+    {
+        ResetCustomWarBattle();
+        return;
+    }
+
+    uint32 graveyardOwner = 0;
+
+    if (m_GraveyardState & ZM_GRAVEYARD_A)
+        graveyardOwner = ALLIANCE;
+    else if (m_GraveyardState & ZM_GRAVEYARD_H)
+        graveyardOwner = HORDE;
+
+    if (graveyardOwner == 0 || graveyardOwner != m_BothControllingFaction)
+    {
+        ResetCustomWarBattle();
+        return;
+    }
+
+    m_CustomWarHoldTimer += diff;
+    m_CustomWarWaveTimer += diff;
+
+    if (m_CustomWarWaveTimer >= ZM_WAR_WAVE_RESPAWN_TIME)
+    {
+        m_CustomWarWaveTimer = 0;
+        SpawnCustomWarAttackWave(graveyardOwner);
+    }
+
+    if (m_CustomWarHoldTimer >= ZM_WAR_HOLD_TIME)
+    {
+        OutdoorPvpWar_OnZangarmarshVictory(graveyardOwner);
+        ResetCustomWarBattle();
+    }
+}
+
+void OPvPCapturePointZM_Graveyard::SpawnCustomWarAttackWave(uint32 controllingFaction)
+{
+    DespawnCustomWarAttackWave();
+
+    uint32 waveEntry = 0;
+
+    if (controllingFaction == ALLIANCE)
+        waveEntry = ZM_WAR_HORDE_WAVE_ENTRY;
+    else if (controllingFaction == HORDE)
+        waveEntry = ZM_WAR_ALLIANCE_WAVE_ENTRY;
+
+    if (waveEntry == 0)
+        return;
+
+    for (uint8 i = 0; i < ZM_WAR_WAVE_COUNT; ++i)
+        AddCreature(ZM_WarWaveCreatureTypes[i], waveEntry, ZM_WarAttackWavePositions[i].map, ZM_WarAttackWavePositions[i].pos);
+}
+
+void OPvPCapturePointZM_Graveyard::DespawnCustomWarAttackWave()
+{
+    for (uint8 i = 0; i < ZM_WAR_WAVE_COUNT; ++i)
+        DelCreature(ZM_WarWaveCreatureTypes[i]);
 }
 
 uint32 OutdoorPvPZM::GetAllianceTowersControlled() const

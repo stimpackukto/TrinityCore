@@ -476,7 +476,7 @@ void WorldSession::HandleAuctionSellItem(WorldPacket& recvData)
 
         GetPlayer()->UpdateAchievementCriteria(ACHIEVEMENT_CRITERIA_TYPE_CREATE_AUCTION, 1);
 
-		uint32 rp = GetRP(accountId) - deposit;
+		uint32 rp = GetRP(accountId);
 		ChatHandler(_player->GetSession()).PSendSysMessage("아이템등록후 현재 RP: %lld ", rp);
     }
 }
@@ -599,7 +599,7 @@ void WorldSession::HandleAuctionPlaceBid(WorldPacket& recvData)
         SendAuctionCommandResult(auction, AUCTION_PLACE_BID, ERR_AUCTION_OK);
 
 		uint32 accountId = GetPlayer()->GetSession()->GetAccountId();
-		uint32 rp = GetRP(accountId) - price;
+		uint32 rp = GetRP(accountId);
 		ChatHandler(GetPlayer()->GetSession()).PSendSysMessage("입찰 RP: %lld 입찰후 현재 RP: %lld", auction->bid, rp);
     }
     else
@@ -640,7 +640,7 @@ void WorldSession::HandleAuctionPlaceBid(WorldPacket& recvData)
         SendAuctionCommandResult(auction, AUCTION_PLACE_BID, ERR_AUCTION_OK);
 
 		uint32 accountId = GetPlayer()->GetSession()->GetAccountId();
-		uint32 rp = GetRP(accountId) - price;
+		uint32 rp = GetRP(accountId);
 		ChatHandler(GetPlayer()->GetSession()).PSendSysMessage("즉시구매후 현재 RP: %lld", rp);
 
         auction->DeleteFromDB(trans);

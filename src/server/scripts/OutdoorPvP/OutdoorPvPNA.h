@@ -6,37 +6,43 @@
  * Free Software Foundation; either version 2 of the License, or (at your
  * option) any later version.
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
- * more details.
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License along
  * with this program. If not, see <http://www.gnu.org/licenses/>.
+ */
+
+/*
+ * Custom Update - 2026-06-17:
+ * Halaa NPC GUID memory split into normal/guard lists for Horde and Alliance.
+ * NPCs are created once during SetupOutdoorPvP and later controlled by phase/visibility only.
  */
 
 #ifndef OUTDOOR_PVP_NA_
 #define OUTDOOR_PVP_NA_
 
 #include "OutdoorPvP.h"
+#include "ObjectGuid.h"
+#include <vector>
 
 enum DefenseMessages
 {
-    TEXT_ALL_GUARDS_DEFEATED                = 15017, // (NYI) '|cffffff00All the guards have been defeated!|r'
-    TEXT_HALAA_TAKEN_ALLIANCE               = 15018, // '|cffffff00The Alliance has taken control of Halaa!|r'
-    TEXT_HALAA_TAKEN_HORDE                  = 15019, // '|cffffff00The Horde has taken control of Halaa!|r'
-    TEXT_HALAA_DEFENSELESS                  = 15020, // (NYI) '|cffffff00Halaa is defenseless!|r'
-    TEXT_HALAA_GAINING_CONTROL_HORDE        = 15493, // (NYI) '|cffffff00The Horde is gaining control of Halaa!|r'
-    TEXT_HALAA_GAINING_CONTROL_ALLIANCE     = 15494  // (NYI) '|cffffff00The Alliance is gaining control of Halaa!|r'
+    TEXT_ALL_GUARDS_DEFEATED                = 15017,
+    TEXT_HALAA_TAKEN_ALLIANCE               = 15018,
+    TEXT_HALAA_TAKEN_HORDE                  = 15019,
+    TEXT_HALAA_DEFENSELESS                  = 15020,
+    TEXT_HALAA_GAINING_CONTROL_HORDE        = 15493,
+    TEXT_HALAA_GAINING_CONTROL_ALLIANCE     = 15494
 };
-
-/// @todo "sometimes" set to neutral
 
 enum OutdoorPvPNASpells
 {
     NA_KILL_TOKEN_ALLIANCE = 33005,
     NA_KILL_TOKEN_HORDE = 33004,
-    NA_CAPTURE_BUFF = 33795  // strength of the halaani
+    NA_CAPTURE_BUFF = 33795
 };
 
 enum OutdoorPvPNAWorldStates
@@ -73,7 +79,6 @@ enum OutdoorPvPNAWorldStates
     NA_MAP_HALAA_ALLIANCE = 2673
 };
 
-// used to access the elements of Horde/AllyControlGOs
 enum ControlGOTypes
 {
     NA_ROOST_S = 0,
@@ -148,6 +153,16 @@ enum HalaaStates
 
 class Unit;
 class Creature;
+class GameObject;
+class Player;
+
+// 일반 NPC GUID 목록.
+extern std::vector<ObjectGuid> CustomHalaaHordeNpcGuids;
+extern std::vector<ObjectGuid> CustomHalaaAllianceNpcGuids;
+
+// 가드 NPC GUID 목록.
+extern std::vector<ObjectGuid> CustomHalaaHordeGuardNpcGuids;
+extern std::vector<ObjectGuid> CustomHalaaAllianceGuardNpcGuids;
 
 class OPvPCapturePointNA : public OPvPCapturePoint
 {
@@ -162,15 +177,42 @@ class OPvPCapturePointNA : public OPvPCapturePoint
 
         uint32 GetAliveGuardsCount();
         uint32 GetControllingFaction() const;
-        void FactionTakeOver(uint32 team); // called when a faction takes control
-        void DeSpawnNPCs();
-        void DeSpawnGOs();
+
+        void FactionTakeOver(uint32 team, bool saveState = true);
+
+        void HandleGuardDeath(Unit* killed);
+        void ApplyCustomCapturePointArtKit();
+        void LoadCustomState();
+        void SaveCustomState();
+
+        // 서버 시작 시 호드/얼라이언스 NPC를 1회 생성하고 GUID를 메모리에 보관한다.
+        void CreateControlNPCsForTeam();
+
+        // 저장된 가드 수 기준으로 표시 상태를 복원한다.
+        void ApplyStoredGuardVisibility(uint32 team, uint32 guardsAlive);
+
+        // 현재 점령 진영 기준으로 NPC 표시/숨김을 적용한다.
+        void ApplyNPCPhaseForOwner();
+        void ApplyNPCPhaseForOwner(bool respawnGuards);
+
+        // 실제 생성이 아니라 이미 생성된 NPC의 표시/숨김만 갱신한다.
         void SpawnNPCsForTeam(uint32 team);
+
+        void DeSpawnGOs();
         void SpawnGOsForTeam(uint32 team);
         void UpdateWyvernRoostWorldState(uint32 roost);
         void UpdateHalaaWorldState();
+		void ResetForEventStartNeutral();
 
     private:
+		 Creature* SpawnCreature(uint32 entry, Position const& pos);
+
+        // NPC 숨김 처리.
+        void HideNpc(Creature* creature);
+
+        // NPC 표시 처리.
+        void ShowNpc(Creature* creature, bool aggressive);
+
         bool m_capturable;
         uint32 m_GuardsAlive;
         uint32 m_ControllingFaction;
@@ -181,6 +223,7 @@ class OPvPCapturePointNA : public OPvPCapturePoint
         uint32 m_HalaaState;
         uint32 m_RespawnTimer;
         uint32 m_GuardCheckTimer;
+        uint32 m_CustomStateSaveTimer;
 };
 
 class OutdoorPvPNA : public OutdoorPvP

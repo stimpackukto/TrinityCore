@@ -22,3 +22,6 @@ void LogAuctionHistory(uint32 accountId, uint32 guid, uint32 auctionId, uint32 i
 
                                             //계정아이디          옥션아이디                  타입            환불
 void UpdateAuctionHistory(uint32 accountId, uint32 auctionId, std::string type, bool claimable);
+
+// FCM 카테고리 알림 발송
+void SendFcmCategory(uint32 categoryId, std::string const& categoryCode, std::string const& title, std::string const& body, uint32 targetAccountId = 0);

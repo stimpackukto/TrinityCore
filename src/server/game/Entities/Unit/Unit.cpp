@@ -19,6 +19,7 @@
 #include "AbstractFollower.h"
 #include "Battlefield.h"
 #include "BattlefieldMgr.h"
+#include "Bag.h"
 #include "Battleground.h"
 #include "BattlegroundPackets.h"
 #include "BattlegroundScore.h"
@@ -83,6 +84,74 @@
 #include "WorldPacket.h"
 #include "WorldSession.h"
 #include <cmath>
+
+namespace
+{
+    enum CustomPrecisionShotData
+    {
+        // 실제 사용하는 최상급 화살통 / 탄약주머니 Entry로 확인해서 맞춰라.
+        // 기본값은 리분 최상급 계열 후보값이다.
+        CUSTOM_PRECISION_QUIVER_ENTRY     = 44448,
+        CUSTOM_PRECISION_AMMO_POUCH_ENTRY = 44447,
+
+        CUSTOM_PRECISION_CRIT_BONUS_X100  = 200
+    };
+
+    static bool IsCustomPrecisionContainer(uint32 entry)
+    {
+        switch (entry)
+        {
+            case CUSTOM_PRECISION_QUIVER_ENTRY:
+            case CUSTOM_PRECISION_AMMO_POUCH_ENTRY:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    static bool PlayerHasCustomPrecisionAmmo(Player const* player)
+    {
+        if (!player)
+            return false;
+
+        if (player->GetClass() != CLASS_HUNTER)
+            return false;
+
+        uint32 const ammoEntry = player->GetUInt32Value(PLAYER_AMMO_ID);
+        if (!ammoEntry)
+            return false;
+
+        for (uint8 bagSlot = INVENTORY_SLOT_BAG_START; bagSlot < INVENTORY_SLOT_BAG_END; ++bagSlot)
+        {
+            Bag const* bag = player->GetBagByPos(bagSlot);
+            if (!bag)
+                continue;
+
+            if (!IsCustomPrecisionContainer(bag->GetEntry()))
+                continue;
+
+            for (uint32 slot = 0; slot < bag->GetBagSize(); ++slot)
+            {
+                Item const* item = bag->GetItemByPos(slot);
+                if (!item)
+                    continue;
+
+                if (item->GetEntry() == ammoEntry)
+                    return true;
+            }
+        }
+
+        return false;
+    }
+
+    static void SendCustomPrecisionShotNotice(Player* player)
+    {
+        if (!player || !player->GetSession())
+            return;
+
+        player->GetSession()->SendAreaTriggerMessage("정밀 장전!");
+    }
+}
 
 float baseMoveSpeed[MAX_MOVE_TYPE] =
 {
@@ -875,13 +944,26 @@ bool Unit::HasBreakableByDamageCrowdControlAura(Unit* excludeCasterChannel) cons
     if (victim->GetTypeId() == TYPEID_PLAYER)
         victim->ToPlayer()->UpdateAchievementCriteria(ACHIEVEMENT_CRITERIA_TYPE_HIGHEST_HIT_RECEIVED, damage);
     else if (!victim->IsControlledByPlayer() || victim->IsVehicle())
-    {
-        if (!victim->ToCreature()->hasLootRecipient())
-            victim->ToCreature()->SetLootRecipient(attacker);
+	{
+		Creature* creatureVictim = victim->ToCreature();
 
-        if (!attacker || attacker->IsControlledByPlayer() || (attacker->ToTempSummon() && attacker->ToTempSummon()->GetSummonerUnit() && attacker->ToTempSummon()->GetSummonerUnit()->GetTypeId() == TYPEID_PLAYER))
-            victim->ToCreature()->LowerPlayerDamageReq(health < damage ?  health : damage);
-    }
+		Player* ownerPlayer = nullptr;
+
+		if (attacker)
+			ownerPlayer = attacker->GetCharmerOrOwnerPlayerOrPlayerItself();
+
+		// 커스텀: 일반 NPC가 먼저 때렸더라도 루팅 권한을 NPC에게 주지 않는다.
+		// 유저 또는 유저 소유/조종 유닛이 유효 피해를 준 순간에만 권한을 부여한다.
+		if (ownerPlayer)
+		{
+			if (!creatureVictim->hasLootRecipient())
+				creatureVictim->SetLootRecipient(ownerPlayer);
+
+			// 커스텀: NPC가 대부분의 피해/어그로를 가져도 유저가 전투에 참여했으면 보상 조건을 충족시킨다.
+			// health 기준으로 낮춰서 IsDamageEnoughForLootingAndReward()가 통과되도록 한다.
+			creatureVictim->LowerPlayerDamageReq(health);
+		}
+	}
 
     if (health <= damage)
     {
@@ -1020,6 +1102,11 @@ void Unit::CalculateSpellDamageTaken(SpellNonMeleeDamage* damageInfo, int32 dama
                 if (crit)
                 {
                     damageInfo->HitInfo |= SPELL_HIT_TYPE_CRIT;
+
+					if (attackType == RANGED_ATTACK)
+						if (Player* player = ToPlayer())
+							if (PlayerHasCustomPrecisionAmmo(player))
+								SendCustomPrecisionShotNotice(player);
 
                     // Calculate crit bonus
                     uint32 crit_bonus = damage;
@@ -2780,6 +2867,12 @@ float Unit::GetUnitCriticalChanceTaken(Unit const* attacker, WeaponAttackType at
 float Unit::GetUnitCriticalChanceAgainst(WeaponAttackType attackType, Unit const* victim) const
 {
     float chance = GetUnitCriticalChanceDone(attackType);
+
+    if (attackType == RANGED_ATTACK)
+        if (Player const* player = ToPlayer())
+            if (PlayerHasCustomPrecisionAmmo(player))
+                chance += float(CUSTOM_PRECISION_CRIT_BONUS_X100) / 100.0f;
+
     return victim->GetUnitCriticalChanceTaken(this, attackType, chance);
 }
 

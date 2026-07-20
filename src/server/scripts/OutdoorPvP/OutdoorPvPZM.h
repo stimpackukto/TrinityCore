@@ -13,6 +13,14 @@
  *
  * You should have received a copy of the GNU General Public License along
  * with this program. If not, see <http://www.gnu.org/licenses/>.
+ *
+ * Custom Update - 2026-06-19
+ * - Added custom Zangarmarsh outdoor war flow.
+ * - During custom war, both beacons unlock grave guardian phase.
+ * - Graveyard can be captured only after guardian NPCs are killed.
+ * - Captured graveyard starts attack wave hold phase.
+ * - Holding the graveyard for 5 minutes triggers custom victory.
+ * - If either beacon is lost during the event, guardians, waves and graveyard control reset.
  */
 
 #ifndef OUTDOOR_PVP_ZM_
@@ -52,6 +60,26 @@ enum ZMCreatureTypes
 {
     ZM_ALLIANCE_FIELD_SCOUT = 0,
     ZM_HORDE_FIELD_SCOUT,
+
+    ZM_WAR_GRAVE_ELITE,
+    ZM_WAR_GRAVE_GUARD_1,
+    ZM_WAR_GRAVE_GUARD_2,
+    ZM_WAR_GRAVE_GUARD_3,
+    ZM_WAR_GRAVE_GUARD_4,
+    ZM_WAR_GRAVE_GUARD_5,
+    ZM_WAR_GRAVE_GUARD_6,
+    ZM_WAR_GRAVE_GUARD_7,
+    ZM_WAR_GRAVE_GUARD_8,
+
+    ZM_WAR_WAVE_1,
+    ZM_WAR_WAVE_2,
+    ZM_WAR_WAVE_3,
+    ZM_WAR_WAVE_4,
+    ZM_WAR_WAVE_5,
+    ZM_WAR_WAVE_6,
+    ZM_WAR_WAVE_7,
+    ZM_WAR_WAVE_8,
+
     ZM_CREATURE_NUM
 };
 
@@ -118,6 +146,15 @@ enum ZM_GraveyardState
     ZM_GRAVEYARD_H = 4
 };
 
+enum ZM_CustomWarState
+{
+    ZM_WAR_STATE_NONE = 0,
+    ZM_WAR_STATE_WAIT_BEACONS,
+    ZM_WAR_STATE_GRAVE_GUARDS,
+    ZM_WAR_STATE_CENTER_READY,
+    ZM_WAR_STATE_CENTER_HOLD
+};
+
 class OPvPCapturePointZM_Graveyard : public OPvPCapturePoint
 {
     public:
@@ -135,10 +172,37 @@ class OPvPCapturePointZM_Graveyard : public OPvPCapturePoint
         void SetBeaconState(uint32 controlling_team); // not good atm
         uint32 GetGraveyardState() const;
 
+        void UpdateCustomWar(uint32 diff);
+        void ResetCustomWarBattle();
+        bool HandleCustomWarCreatureDeath(Unit* killed);
+
     protected:
+        bool IsCustomWarActive() const;
+        bool IsCustomWarBeaconOwnerValid() const;
+        bool IsCustomWarCenterReady() const;
+
+        void StartCustomWarGuardPhase(uint32 controllingFaction);
+        void UnlockCustomWarCenter();
+        void StartCustomWarHold(uint32 controllingFaction);
+        void UpdateCustomWarHold(uint32 diff);
+
+        void SpawnCustomWarGraveGuards(uint32 controllingFaction);
+        void DespawnCustomWarGraveGuards();
+
+        void SpawnCustomWarAttackWave(uint32 controllingFaction);
+        void DespawnCustomWarAttackWave();
+
+        void ResetCustomWarCenterToNeutral();
+
         uint32 m_BothControllingFaction;
         ObjectGuid m_FlagCarrierGUID;
         uint32 m_GraveyardState;
+
+        uint32 m_CustomWarState;
+        uint32 m_CustomWarBeaconOwner;
+        uint32 m_CustomWarHoldTimer;
+        uint32 m_CustomWarWaveTimer;
+        uint32 m_CustomWarGraveGuardsAlive;
 };
 
 /// @todo flag carrier death/leave/mount/activitychange should give back the gossip options

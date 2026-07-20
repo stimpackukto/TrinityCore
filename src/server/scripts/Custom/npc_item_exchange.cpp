@@ -54,15 +54,17 @@ namespace
     // 운영값
     // ─────────────────────────────────────────────
     static constexpr uint32 PAGE_SIZE      = 10;
-    static constexpr uint32 BASE_PER_ILVL  = 400;
-    static constexpr uint32 MIN_RP_FLOOR   = 9000;
+    static constexpr uint32 BASE_PER_ILVL  = 300;
+    static constexpr uint32 MIN_RP_FLOOR   = 10000;
 
-    static constexpr float  BIND_MULT_SOULBOUND = 1.30f;
+    static constexpr float  BIND_MULT_SOULBOUND = 1.15f;
     static constexpr float  BIND_MULT_UNBOUND   = 1.00f;
 
     // 신품/중고 2단계
     static constexpr float  USED_MULT_NEW  = 1.00f;
-    static constexpr float  USED_MULT_USED = 1.50f; // 중고 가중치(원하는 값으로 조절)
+    static constexpr float  USED_MULT_USED = 1.20f; // 중고 가중치(원하는 값으로 조절)
+
+	static constexpr uint32 MAX_ITEM_LEVEL_GAP = 45;
 
 	// ─────────────────────────────────────────────
 	// [ADD] 불일치 가중치
@@ -561,12 +563,12 @@ namespace
             return false;
 
         // 요구 조건(레벨/직업제한/종족/스킬 등)
-  /*      if (player->CanUseItem(proto) != EQUIP_ERR_OK)
+        if (player->CanUseItem(proto) != EQUIP_ERR_OK)
             return false;
 
         // [CHANGED] 숙련/장착 가능 여부(사슬/판금 같은 케이스)까지 확인
         if (!CanEquipSomewhere(player, it))
-            return false; */
+            return false; 
 
         return true;
     }
@@ -672,6 +674,9 @@ namespace
 
             if (!IsMatchTargetBySourceProto(srcProto, tgt))
                 continue;
+
+			if (tgt->ItemLevel > srcProto->ItemLevel + MAX_ITEM_LEVEL_GAP)
+				continue;
 
             // 진영 전용 아이템이면 플레이어 진영에 맞는 것만 노출 (Flags2 우선)
             if (!IsTargetFactionOkForPlayer(player, tgt))
@@ -811,11 +816,11 @@ namespace
     // ─────────────────────────────────────────────
     static float SlotMult(std::string const& slotType)
     {
-        if (slotType == "WEAPON")  return 2.00f;
-        if (slotType == "TRINKET") return 1.80f;
-        if (slotType == "RING")    return 1.50f;
-        if (slotType == "NECK")    return 1.50f;
-        if (slotType == "CLOAK")   return 1.30f;
+        if (slotType == "WEAPON")  return 1.50f;
+        if (slotType == "TRINKET") return 1.40f;
+        if (slotType == "RING")    return 1.30f;
+        if (slotType == "NECK")    return 1.30f;
+        if (slotType == "CLOAK")   return 1.15f;
         return 1.00f;
     }
 

@@ -15,6 +15,12 @@
  * with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
+/*
+ * Custom Update - 2026-06-30
+ *
+ * Trial of the Champion Grand Champions reset protection
+ */
+
 #include "GameObject.h"
 #include "InstanceScript.h"
 #include "Player.h"
@@ -165,8 +171,24 @@ public:
                     c->DespawnOrUnsummon();
             };
 
+            EncounterState const grandChampionsState = GetBossState(DATA_GRAND_CHAMPIONS);
+            EncounterState const argentChallengeState = GetBossState(DATA_ARGENT_CHALLENGE);
+
+            bool const resetGrandChampions =
+                grandChampionsState == NOT_STARTED ||
+                grandChampionsState == TO_BE_DECIDED ||
+                grandChampionsState == FAIL;
+
+            bool const resetArgentChallenge =
+                grandChampionsState == DONE &&
+                (
+                    argentChallengeState == NOT_STARTED ||
+                    argentChallengeState == TO_BE_DECIDED ||
+                    argentChallengeState == FAIL
+                );
+
             // 1넴이 아직 DONE이 아닌 경우에만 정리/초기화
-            if (GetBossState(DATA_GRAND_CHAMPIONS) != DONE)
+            if (resetGrandChampions)
             {
                 // 1) 그랜드 챔피언 본체 10명(얼/호드 모두) 제거
                 static uint32 const sGrandChampEntries[] =
@@ -256,7 +278,7 @@ public:
             }
 
 			// 2넴이 아직 DONE이 아닌 경우에만 정리/초기화
-            if (GetBossState(DATA_ARGENT_CHALLENGE) != DONE)
+            if (resetArgentChallenge)
             {
                 static uint32 const sBossArgentEntries[] =
                 {

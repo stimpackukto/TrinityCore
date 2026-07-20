@@ -330,6 +330,34 @@ Battleground* BattlegroundMgr::CreateNewBattleground(BattlegroundTypeId original
 {
     BattlegroundTypeId bgTypeId = GetRandomBG(originalBgTypeId);
 
+    // FOREVER STIMPACK
+    // BATTLEGROUND_AA는 아레나 전체 큐입니다.
+    // 1:1 커스텀 투기장, 2:2, 3:3, 5:5 전체가 실제 아레나맵 중 하나를 랜덤으로 선택하게 합니다.
+    if (originalBgTypeId == BATTLEGROUND_AA)
+    {
+        BattlegroundTypeId const arenaMaps[] =
+        {
+            BATTLEGROUND_NA, // 나그란드 투기장
+            BATTLEGROUND_BE, // 칼날 산맥 투기장
+            BATTLEGROUND_RL, // 로데론의 폐허
+            BATTLEGROUND_DS, // 달라란 하수도
+            BATTLEGROUND_RV  // 용맹의 투기장
+        };
+
+        uint32 const arenaMapCount = sizeof(arenaMaps) / sizeof(arenaMaps[0]);
+
+        for (uint8 i = 0; i < 10; ++i)
+        {
+            BattlegroundTypeId selectedBgTypeId = arenaMaps[urand(0, arenaMapCount - 1)];
+
+            if (GetBattlegroundTemplate(selectedBgTypeId))
+            {
+                bgTypeId = selectedBgTypeId;
+                break;
+            }
+        }
+    }
+
     // get the template BG
     Battleground* bg_template = GetBattlegroundTemplate(bgTypeId);
 
@@ -340,6 +368,7 @@ Battleground* BattlegroundMgr::CreateNewBattleground(BattlegroundTypeId original
     }
 
     Battleground* bg = nullptr;
+
     // create a copy of the BG template
     switch (bgTypeId)
     {
@@ -387,8 +416,9 @@ Battleground* BattlegroundMgr::CreateNewBattleground(BattlegroundTypeId original
     bg->SetBracket(bracketEntry);
     bg->SetInstanceID(sMapMgr->GenerateInstanceId());
     bg->SetClientInstanceID(CreateClientVisibleInstanceId(originalBgTypeId, bracketEntry->GetBracketId()));
-    bg->Reset();                     // reset the new bg (set status to status_wait_queue from status_none)
-    bg->SetStatus(STATUS_WAIT_JOIN); // start the joining of the bg
+    bg->Reset();
+    bg->SetStatus(STATUS_WAIT_JOIN);
+
     bg->SetArenaType(arenaType);
     bg->SetTypeID(originalBgTypeId);
     bg->SetRandomTypeID(bgTypeId);
@@ -399,6 +429,7 @@ Battleground* BattlegroundMgr::CreateNewBattleground(BattlegroundTypeId original
     if (bg->isArena())
     {
         uint32 maxPlayersPerTeam = 0;
+
         switch (arenaType)
         {
             case ARENA_TYPE_2v2:

@@ -15,6 +15,16 @@
  * with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
+/*
+ * Custom Update - 2026-07-17
+ *
+ * Culling of Stratholme Arthas scripted RP recovery
+ *
+ * - Keep Arthas invulnerable during the non-combat Uther/Jaina and entrance RPs.
+ * - If a fatal engine or environmental event still removes him during either RP,
+ *   continue from that RP's next stable checkpoint instead of replaying it.
+ */
+
 #include "culling_of_stratholme.h"
 #include "Containers.h"
 #include "GameObject.h"
@@ -1532,6 +1542,16 @@ public:
                 Talk(LINE_SLAY_ZOMBIE, who);
         }
 
+        void DamageTaken(Unit* /*attacker*/, uint32& damage, DamageEffectType /*damageType*/, SpellInfo const* /*spellInfo*/) override
+        {
+            COSProgressStates const state = GetCurrentProgress();
+
+            // These are non-combat dialogue and movement sequences. Arthas must not
+            // enter the instance failure path before their next checkpoint is reached.
+            if (state == UTHER_TALK || state == PURGE_STARTING)
+                damage = 0;
+        }
+
         void JustEngagedWith(Unit* who) override
         {
             TC_LOG_TRACE("scripts.cos", "npc_arthas_stratholmeAI::JustEngagedWith: RP in progress? '{}'", _progressRP ? "YES" : "NO");
@@ -1580,6 +1600,22 @@ public:
 
         void JustDied(Unit* /*killer*/) override
         {
+            COSProgressStates const state = GetCurrentProgress();
+
+            if (state == UTHER_TALK)
+            {
+                TC_LOG_WARN("scripts.cos", "npc_arthas_stratholmeAI::JustDied: Arthas died during the Uther/Jaina RP. Continuing at the purge dialogue.");
+                instance->SetData(DATA_UTHER_FINISHED, 1);
+                return;
+            }
+
+            if (state == PURGE_STARTING)
+            {
+                TC_LOG_WARN("scripts.cos", "npc_arthas_stratholmeAI::JustDied: Arthas died during the purge transition. Continuing with the wave event.");
+                instance->SetData(DATA_START_WAVES, 1);
+                return;
+            }
+
             // Instance failure: regress back to last stable state
             instance->SetData(DATA_ARTHAS_DIED, 1);
             me->DespawnOrUnsummon(5s);

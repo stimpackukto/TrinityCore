@@ -128,6 +128,25 @@ static const Position rimefangPos[10] =
 
 static Position const miscPos = { 1018.376f, 167.2495f, 628.2811f, 0.000000f }; // tyrannus combat start position
 
+/*
+ * Custom Update - 2026-06-20
+ * Restore Tyrannus vehicle accessory when Rimefang exists but Tyrannus is missing.
+ */
+static void TryRestoreTyrannusAccessory(Creature* rimefang, InstanceScript* instance)
+{
+    if (!rimefang || !instance)
+        return;
+
+    if (instance->GetBossState(DATA_TYRANNUS) == DONE)
+        return;
+
+    if (ObjectAccessor::GetCreature(*rimefang, instance->GetGuidData(DATA_TYRANNUS)))
+        return;
+
+    if (Vehicle* vehicle = rimefang->GetVehicleKit())
+        vehicle->InstallAllAccessories(false);
+}
+
 struct boss_tyrannus : public BossAI
 {
     boss_tyrannus(Creature* creature) : BossAI(creature, DATA_TYRANNUS)
@@ -294,20 +313,21 @@ struct boss_rimefang : public ScriptedAI
     }
 
     void Reset() override
-    {
-        _events.Reset();
-        _events.SetPhase(PHASE_NONE);
-        Initialize();
-        me->SetCanFly(true);
-        me->SetReactState(REACT_PASSIVE);
-        me->SetUnitFlag(UNIT_FLAG_NON_ATTACKABLE);
-    }
+	{
+		_events.Reset();
+		_events.SetPhase(PHASE_NONE);
+		Initialize();
+		me->SetCanFly(true);
+		me->SetReactState(REACT_PASSIVE);
+		me->SetUnitFlag(UNIT_FLAG_NON_ATTACKABLE);
+
+		TryRestoreTyrannusAccessory(me, me->GetInstanceScript());
+	}
 
     void JustReachedHome() override
-    {
-        if (Vehicle* _vehicle = me->GetVehicleKit())
-            _vehicle->InstallAllAccessories(false);
-    }
+	{
+		TryRestoreTyrannusAccessory(me, me->GetInstanceScript());
+	}
 
     void DoAction(int32 actionId) override
     {
@@ -496,14 +516,23 @@ class at_tyrannus_event_starter : public AreaTriggerScript
             if (player->IsGameMaster() || !instance)
                 return false;
 
-            if (instance->GetBossState(DATA_TYRANNUS) != IN_PROGRESS && instance->GetBossState(DATA_TYRANNUS) != DONE)
-                if (Creature* tyrannus = ObjectAccessor::GetCreature(*player, instance->GetGuidData(DATA_TYRANNUS)))
+            if (instance->GetBossState(DATA_TYRANNUS) == IN_PROGRESS || instance->GetBossState(DATA_TYRANNUS) == DONE)
+                return false;
+
+            Creature* tyrannus = ObjectAccessor::GetCreature(*player, instance->GetGuidData(DATA_TYRANNUS));
+
+            if (!tyrannus)
+                if (Creature* rimefang = ObjectAccessor::GetCreature(*player, instance->GetGuidData(DATA_RIMEFANG)))
                 {
-                    tyrannus->AI()->DoAction(ACTION_START_INTRO);
-                    return true;
+                    TryRestoreTyrannusAccessory(rimefang, instance);
+                    tyrannus = ObjectAccessor::GetCreature(*player, instance->GetGuidData(DATA_TYRANNUS));
                 }
 
-            return false;
+            if (!tyrannus)
+                return false;
+
+            tyrannus->AI()->DoAction(ACTION_START_INTRO);
+            return true;
         }
 };
 

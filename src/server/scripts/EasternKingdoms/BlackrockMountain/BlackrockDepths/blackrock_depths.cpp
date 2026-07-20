@@ -28,6 +28,11 @@
 #include "TemporarySummon.h"
 #include "WorldSession.h"
 
+#include "EventMap.h"
+#include "Map.h"
+#include "ObjectAccessor.h"
+#include <sstream>
+
 //go_shadowforge_brazier
 class go_shadowforge_brazier : public GameObjectScript
 {
@@ -142,18 +147,51 @@ public:
     {
         npc_grimstoneAI(Creature* creature) : EscortAI(creature)
         {
-            Initialize();
             instance = creature->GetInstanceScript();
-            MobSpawnId = rand32() % 6;
+            Initialize();
         }
+
+        enum GrimstoneEvents
+        {
+            EVENT_START_INTRO       = 1,
+            EVENT_RESUME_TO_POINT_1 = 2,
+            EVENT_OPEN_MOB_GATE     = 3,
+            EVENT_SUMMON_MOB_1      = 4,
+            EVENT_SUMMON_MOB_2      = 5,
+            EVENT_SUMMON_MOB_4      = 6,
+            EVENT_MOB_WAVE_DONE     = 7,
+            EVENT_OPEN_BOSS_GATE    = 8,
+            EVENT_SUMMON_BOSS       = 9
+        };
+
+        InstanceScript* instance;
+
+        EventMap _events;
+
+        uint8 MobSpawnId;
+        uint8 MobSpawnCount;
+        uint8 MobAliveCount;
+
+        ObjectGuid RingMobGUID[MAX_NPC_AMOUNT];
+        ObjectGuid RingBossGUID;
+
+        bool CanWalk;
+        bool WaitingForMobs;
+        bool WaitingForBoss;
+        bool EventDone;
 
         void Initialize()
         {
-            EventPhase = 0;
-            Event_Timer = 1000;
+            _events.Reset();
 
-            MobCount = 0;
-            MobDeath_Timer = 0;
+            MobSpawnId = rand32() % 6;
+
+            MobSpawnCount = 0;
+            MobAliveCount = 0;
+
+            WaitingForMobs = false;
+            WaitingForBoss = false;
+            EventDone = false;
 
             for (uint8 i = 0; i < MAX_NPC_AMOUNT; ++i)
                 RingMobGUID[i].Clear();
@@ -163,196 +201,392 @@ public:
             CanWalk = false;
         }
 
-        InstanceScript* instance;
-
-        uint8 EventPhase;
-        uint32 Event_Timer;
-
-        uint8 MobSpawnId;
-        uint8 MobCount;
-        uint32 MobDeath_Timer;
-
-        ObjectGuid RingMobGUID[4];
-        ObjectGuid RingBossGUID;
-
-        bool CanWalk;
-
         void Reset() override
         {
             Initialize();
+            me->SetVisible(true);
         }
 
-        /// @todo move them to center
-        void SummonRingMob()
+        void JustAppeared() override
         {
-            if (Creature* tmp = me->SummonCreature(RingMob[MobSpawnId], 608.960f, -235.322f, -53.907f, 1.857f, TEMPSUMMON_DEAD_DESPAWN))
-                RingMobGUID[MobCount] = tmp->GetGUID();
-
-            ++MobCount;
-
-            if (MobCount == MAX_NPC_AMOUNT)
-                MobDeath_Timer = 2500;
+            /*
+             * 그림스톤이 소환되면 1초 뒤 이벤트 시작.
+             */
+            _events.ScheduleEvent(EVENT_START_INTRO, Milliseconds(1000));
         }
 
-        /// @todo move them to center
-        void SummonRingBoss()
+        void SendRingMessageToPlayers(std::string const& text)
         {
-            if (Creature* tmp = me->SummonCreature(RingBoss[rand32() % 6], 644.300f, -175.989f, -53.739f, 3.418f, TEMPSUMMON_DEAD_DESPAWN))
-                RingBossGUID = tmp->GetGUID();
+            if (!me->GetMap())
+                return;
 
-            MobDeath_Timer = 2500;
+            Map::PlayerList const& players = me->GetMap()->GetPlayers();
+
+            if (players.isEmpty())
+                return;
+
+            for (Map::PlayerList::const_iterator itr = players.begin(); itr != players.end(); ++itr)
+            {
+                Player* player = itr->GetSource();
+
+                if (!player)
+                    continue;
+
+                if (!player->IsInWorld())
+                    continue;
+
+                if (!player->GetSession())
+                    continue;
+
+                if (player->GetDistance(me) > 120.0f)
+                    continue;
+
+                player->GetSession()->SendAreaTriggerMessage(text.c_str());
+            }
+        }
+
+        void SendRingMobCounter()
+        {
+            std::ostringstream message;
+            message << "법의 심판장 몬스터: "
+                    << uint32(MobAliveCount)
+                    << "/"
+                    << uint32(MAX_NPC_AMOUNT);
+
+            SendRingMessageToPlayers(message.str());
+        }
+
+        void HandleGameObject(uint32 id, bool open)
+        {
+            if (!instance)
+                return;
+
+            instance->HandleGameObject(instance->GetGuidData(id), open);
         }
 
         void WaypointReached(uint32 waypointId, uint32 /*pathId*/) override
         {
+            /*
+             * 이벤트 발생형 구조에서는 WaypointReached가 완료 처리를 하지 않는다.
+             * 이동 도착 후 필요한 다음 이벤트 예약만 담당한다.
+             */
+
             switch (waypointId)
             {
                 case 0:
                     Talk(SAY_TEXT1);
                     CanWalk = false;
-                    Event_Timer = 5000;
+                    _events.ScheduleEvent(EVENT_RESUME_TO_POINT_1, Milliseconds(5000));
                     break;
+
                 case 1:
                     Talk(SAY_TEXT2);
                     CanWalk = false;
-                    Event_Timer = 5000;
+                    _events.ScheduleEvent(EVENT_OPEN_MOB_GATE, Milliseconds(5000));
                     break;
+
                 case 2:
                     CanWalk = false;
                     break;
+
                 case 3:
                     Talk(SAY_TEXT3);
                     break;
+
                 case 4:
                     Talk(SAY_TEXT4);
                     CanWalk = false;
-                    Event_Timer = 5000;
                     break;
+
                 case 5:
-                    instance->UpdateEncounterStateForKilledCreature(NPC_GRIMSTONE, me);
-                    instance->SetData(TYPE_RING_OF_LAW, DONE);
-                    TC_LOG_DEBUG("scripts", "npc_grimstone: event reached end and set complete.");
+                    /*
+                     * 기존 원본은 여기서 DONE 처리했지만,
+                     * 이제 완료 처리는 UpdateAI의 CheckRingBossState() 한 곳에서만 한다.
+                     */
+                    CanWalk = false;
                     break;
             }
         }
 
-        void HandleGameObject(uint32 id, bool open)
+        void SummonRingMob()
         {
-            instance->HandleGameObject(instance->GetGuidData(id), open);
+            if (MobSpawnCount >= MAX_NPC_AMOUNT)
+                return;
+
+            if (Creature* summon = me->SummonCreature(RingMob[MobSpawnId], 608.960f, -235.322f, -53.907f, 1.857f, TEMPSUMMON_DEAD_DESPAWN))
+            {
+                RingMobGUID[MobSpawnCount] = summon->GetGUID();
+                ++MobAliveCount;
+            }
+
+            ++MobSpawnCount;
+        }
+
+        void SummonRingBoss()
+        {
+            /*
+             * 보스 완료 처리는 SummonedCreatureDies에서 하지 않는다.
+             * UpdateAI의 CheckRingBossState()가 RingBossGUID를 계속 확인해서 처리한다.
+             */
+            WaitingForBoss = true;
+            RingBossGUID.Clear();
+
+            if (Creature* summon = me->SummonCreature(RingBoss[rand32() % 6], 644.300f, -175.989f, -53.739f, 3.418f, TEMPSUMMON_DEAD_DESPAWN))
+                RingBossGUID = summon->GetGUID();
+        }
+
+        void TryFinishMobWave()
+        {
+            if (!WaitingForMobs)
+                return;
+
+            if (MobSpawnCount < MAX_NPC_AMOUNT)
+                return;
+
+            if (MobAliveCount)
+                return;
+
+            WaitingForMobs = false;
+
+            SendRingMobCounter();
+
+            _events.ScheduleEvent(EVENT_MOB_WAVE_DONE, Milliseconds(1000));
+        }
+
+        void MarkRingMobRemoved(ObjectGuid const& guid)
+        {
+            if (guid.IsEmpty())
+                return;
+
+            for (uint8 i = 0; i < MAX_NPC_AMOUNT; ++i)
+            {
+                if (RingMobGUID[i] != guid)
+                    continue;
+
+                RingMobGUID[i].Clear();
+
+                if (MobAliveCount)
+                    --MobAliveCount;
+
+                SendRingMobCounter();
+
+                TryFinishMobWave();
+                return;
+            }
+        }
+
+        void SummonedCreatureDies(Creature* summon, Unit* /*killer*/) override
+        {
+            if (!summon)
+                return;
+
+            /*
+             * 여기서는 1웨이브 쫄 카운트만 처리한다.
+             * 보스 완료 처리는 CheckRingBossState() 한 곳에서만 처리한다.
+             */
+            MarkRingMobRemoved(summon->GetGUID());
+        }
+
+        void SummonedCreatureDespawn(Creature* summon) override
+        {
+            if (!summon)
+                return;
+
+            /*
+             * 쫄이 죽음 훅 없이 despawn만 들어와도 카운트 처리.
+             * 보스 완료 처리는 여기서 하지 않는다.
+             */
+            MarkRingMobRemoved(summon->GetGUID());
+        }
+
+        void CompleteRingOfLaw()
+        {
+            if (EventDone)
+                return;
+
+            EventDone = true;
+
+            me->SetVisible(true);
+
+            /*
+             * 보스 사망 후 법의 심판장 창살 전부 개방.
+             */
+            HandleGameObject(DATA_ARENA1, true);
+            HandleGameObject(DATA_ARENA2, true);
+            HandleGameObject(DATA_ARENA3, true);
+            HandleGameObject(DATA_ARENA4, true);
+
+            if (instance)
+            {
+                instance->UpdateEncounterStateForKilledCreature(NPC_GRIMSTONE, me);
+                instance->SetData(TYPE_RING_OF_LAW, DONE);
+            }
+
+            RingBossGUID.Clear();
+            WaitingForBoss = false;
+            WaitingForMobs = false;
+            CanWalk = false;
+
+            /*
+             * 완료 후 남아있는 예약 이벤트 제거.
+             * 중복 실행을 막는다.
+             */
+            _events.Reset();
+
+            TC_LOG_DEBUG("scripts", "npc_grimstone: event completed by UpdateAI boss state check.");
+
+            /*
+             * 그림스톤은 법의 심판장 진행용 소환 NPC이므로
+             * 완료 처리 후 3초 뒤 소환 해제한다.
+             */
+            me->DespawnOrUnsummon(Milliseconds(3000));
+        }
+
+        void CheckRingBossState()
+        {
+            if (EventDone)
+                return;
+
+            if (!WaitingForBoss)
+                return;
+
+            /*
+             * 보스 소환 실패 또는 GUID가 비어 있는 상태.
+             * 이 경우도 UpdateAI의 보스 체크 경로에서 완료 처리한다.
+             */
+            if (RingBossGUID.IsEmpty())
+            {
+                CompleteRingOfLaw();
+                return;
+            }
+
+            Creature* boss = ObjectAccessor::GetCreature(*me, RingBossGUID);
+
+            /*
+             * 보스가 월드에서 사라졌거나 죽은 상태면 완료 처리.
+             * 보스 완료는 이 함수 하나에서만 한다.
+             */
+            if (!boss || !boss->IsAlive() || boss->isDead())
+            {
+                CompleteRingOfLaw();
+                return;
+            }
         }
 
         void UpdateAI(uint32 diff) override
         {
-            if (MobDeath_Timer)
+            /*
+             * 보스 완료 처리 단일 경로.
+             *
+             * SummonedCreatureDies / SummonedCreatureDespawn에서는 보스 완료를 처리하지 않는다.
+             * WaitingForBoss 상태가 되면 UpdateAI가 계속 RingBossGUID를 확인하다가
+             * 보스가 죽었거나 사라지면 CompleteRingOfLaw()를 실행한다.
+             */
+            CheckRingBossState();
+
+            if (EventDone)
+                return;
+
+            _events.Update(diff);
+
+            while (uint32 eventId = _events.ExecuteEvent())
             {
-                if (MobDeath_Timer <= diff)
+                switch (eventId)
                 {
-                    MobDeath_Timer = 2500;
-
-                    if (!RingBossGUID.IsEmpty())
+                    case EVENT_START_INTRO:
                     {
-                        Creature* boss = ObjectAccessor::GetCreature(*me, RingBossGUID);
-                        if (boss && !boss->IsAlive() && boss->isDead())
-                        {
-                            RingBossGUID.Clear();
-                            Event_Timer = 5000;
-                            MobDeath_Timer = 0;
-                            return;
-                        }
-                        return;
-                    }
-
-                    for (uint8 i = 0; i < MAX_NPC_AMOUNT; ++i)
-                    {
-                        Creature* mob = ObjectAccessor::GetCreature(*me, RingMobGUID[i]);
-                        if (mob && !mob->IsAlive() && mob->isDead())
-                        {
-                            RingMobGUID[i].Clear();
-                            --MobCount;
-
-                            //seems all are gone, so set timer to continue and discontinue this
-                            if (!MobCount)
-                            {
-                                Event_Timer = 5000;
-                                MobDeath_Timer = 0;
-                            }
-                        }
-                    }
-                } else MobDeath_Timer -= diff;
-            }
-
-            if (Event_Timer)
-            {
-                if (Event_Timer <= diff)
-                {
-                    switch (EventPhase)
-                    {
-                    case 0:
                         Talk(SAY_TEXT5);
                         HandleGameObject(DATA_ARENA4, false);
+
                         LoadPath(PATH_ESCORT_GRIMSTONE);
                         Start(false);
+
                         CanWalk = true;
-                        Event_Timer = 0;
-                        break;
-                    case 1:
-                        CanWalk = true;
-                        Event_Timer = 0;
-                        break;
-                    case 2:
-                        Event_Timer = 2000;
-                        break;
-                    case 3:
-                        HandleGameObject(DATA_ARENA1, true);
-                        Event_Timer = 3000;
-                        break;
-                    case 4:
-                        CanWalk = true;
-                        me->SetVisible(false);
-                        SummonRingMob();
-                        Event_Timer = 8000;
-                        break;
-                    case 5:
-                        SummonRingMob();
-                        SummonRingMob();
-                        Event_Timer = 8000;
-                        break;
-                    case 6:
-                        SummonRingMob();
-                        Event_Timer = 5000;
-                        break;
-                    case 7:
-                        me->SetVisible(true);
-                        HandleGameObject(DATA_ARENA1, false);
-                        Talk(SAY_TEXT6);
-                        CanWalk = true;
-                        Event_Timer = 5000;
-                        break;
-                    case 8:
-                        HandleGameObject(DATA_ARENA2, true);
-                        Event_Timer = 5000;
-                        break;
-                    case 9:
-                        me->SetVisible(false);
-                        SummonRingBoss();
-                        Event_Timer = 0;
-                        break;
-                    case 10:
-                        //if quest, complete
-                        HandleGameObject(DATA_ARENA2, false);
-                        HandleGameObject(DATA_ARENA3, true);
-                        HandleGameObject(DATA_ARENA4, true);
-                        CanWalk = true;
-                        Event_Timer = 0;
                         break;
                     }
-                    ++EventPhase;
-                } else Event_Timer -= diff;
+
+                    case EVENT_RESUME_TO_POINT_1:
+                    {
+                        CanWalk = true;
+                        break;
+                    }
+
+                    case EVENT_OPEN_MOB_GATE:
+                    {
+                        HandleGameObject(DATA_ARENA1, true);
+                        _events.ScheduleEvent(EVENT_SUMMON_MOB_1, Milliseconds(3000));
+                        break;
+                    }
+
+                    case EVENT_SUMMON_MOB_1:
+                    {
+                        CanWalk = false;
+                        me->SetVisible(false);
+
+                        SummonRingMob();
+
+                        _events.ScheduleEvent(EVENT_SUMMON_MOB_2, Milliseconds(8000));
+                        break;
+                    }
+
+                    case EVENT_SUMMON_MOB_2:
+                    {
+                        SummonRingMob();
+                        SummonRingMob();
+
+                        _events.ScheduleEvent(EVENT_SUMMON_MOB_4, Milliseconds(8000));
+                        break;
+                    }
+
+                    case EVENT_SUMMON_MOB_4:
+                    {
+                        SummonRingMob();
+
+                        WaitingForMobs = true;
+
+                        SendRingMobCounter();
+                        TryFinishMobWave();
+                        break;
+                    }
+
+                    case EVENT_MOB_WAVE_DONE:
+                    {
+                        me->SetVisible(true);
+
+                        HandleGameObject(DATA_ARENA1, false);
+                        Talk(SAY_TEXT6);
+
+                        CanWalk = false;
+
+                        _events.ScheduleEvent(EVENT_OPEN_BOSS_GATE, Milliseconds(5000));
+                        break;
+                    }
+
+                    case EVENT_OPEN_BOSS_GATE:
+                    {
+                        HandleGameObject(DATA_ARENA2, true);
+
+                        _events.ScheduleEvent(EVENT_SUMMON_BOSS, Milliseconds(5000));
+                        break;
+                    }
+
+                    case EVENT_SUMMON_BOSS:
+                    {
+                        me->SetVisible(false);
+                        CanWalk = false;
+
+                        SummonRingBoss();
+                        break;
+                    }
+
+                    default:
+                        break;
+                }
             }
 
             if (CanWalk)
                 EscortAI::UpdateAI(diff);
-           }
+        }
     };
 };
 

@@ -15,6 +15,9 @@
  * with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
+// Custom Update - 2026-06-23
+// - Blackwing Lair Razorgore 1~2 player mode support.
+
 #include "ScriptMgr.h"
 #include "blackwing_lair.h"
 #include "InstanceScript.h"
@@ -22,7 +25,11 @@
 #include "GameObjectAI.h"
 #include "Player.h"
 #include "ScriptedCreature.h"
+#include "SpellHistory.h"
 #include "SpellScript.h"
+
+#include <algorithm>
+#include <vector>
 
 enum Say
 {
@@ -64,9 +71,73 @@ enum EVENTS
     EVENT_CONFLAGRATION     = 4
 };
 
+namespace
+{
+    constexpr uint32 RAZORGORE_PHASE_TWO_HEALTH_PERCENT = 25;
+    constexpr uint32 RAZORGORE_PHASE_TWO_DAMAGE_REDUCTION_PERCENT = 65;
+    constexpr uint32 RAZORGORE_ORB_PLAYER_DAMAGE_REDUCTION_PERCENT = 90;
+
+    std::vector<ObjectGuid> RazorgoreOrbProtectedPlayers;
+
+    bool IsRazorgoreAddEntry(uint32 entry)
+    {
+        switch (entry)
+        {
+            case NPC_ELITE_DRACHKIN:
+            case NPC_ELITE_WARRIOR:
+            case NPC_WARRIOR:
+            case NPC_MAGE:
+            case NPC_WARLOCK:
+                return true;
+            default:
+                break;
+        }
+
+        return false;
+    }
+
+    bool HasRazorgoreOrbProtection(Player* player)
+    {
+        if (!player)
+            return false;
+
+        return std::find(RazorgoreOrbProtectedPlayers.begin(), RazorgoreOrbProtectedPlayers.end(), player->GetGUID()) != RazorgoreOrbProtectedPlayers.end();
+    }
+
+    void AddRazorgoreOrbProtection(Player* player)
+    {
+        if (!player)
+            return;
+
+        if (HasRazorgoreOrbProtection(player))
+            return;
+
+        RazorgoreOrbProtectedPlayers.push_back(player->GetGUID());
+    }
+
+    void ClearRazorgoreOrbProtection()
+    {
+        RazorgoreOrbProtectedPlayers.clear();
+    }
+
+    void ApplyDamageReduction(uint32& damage, uint32 reductionPercent)
+    {
+        if (!damage)
+            return;
+
+        if (reductionPercent >= 100)
+        {
+            damage = 0;
+            return;
+        }
+
+        damage = uint32(uint64(damage) * (100 - reductionPercent) / 100);
+    }
+}
+
 struct boss_razorgore : public BossAI
 {
-    boss_razorgore(Creature* creature) : BossAI(creature, DATA_RAZORGORE_THE_UNTAMED)
+    boss_razorgore(Creature* creature) : BossAI(creature, DATA_RAZORGORE_THE_UNTAMED), originalMaxHealth(creature->GetMaxHealth())
     {
         Initialize();
     }
@@ -81,6 +152,12 @@ struct boss_razorgore : public BossAI
         _Reset();
 
         Initialize();
+
+        me->SetMaxHealth(originalMaxHealth);
+        me->SetFullHealth();
+
+        ClearRazorgoreOrbProtection();
+
         instance->SetData(DATA_EGG_EVENT, NOT_STARTED);
     }
 
@@ -88,6 +165,8 @@ struct boss_razorgore : public BossAI
     {
         _JustDied();
         Talk(SAY_DEATH);
+
+        ClearRazorgoreOrbProtection();
 
         instance->SetData(DATA_EGG_EVENT, NOT_STARTED);
     }
@@ -100,7 +179,16 @@ struct boss_razorgore : public BossAI
         events.ScheduleEvent(EVENT_CONFLAGRATION, 12s);
 
         secondPhase = true;
+
+        ClearRazorgoreOrbProtection();
+
         me->RemoveAllAuras();
+
+        uint32 phaseTwoHealth = originalMaxHealth * RAZORGORE_PHASE_TWO_HEALTH_PERCENT / 100;
+        if (!phaseTwoHealth)
+            phaseTwoHealth = 1;
+
+        me->SetMaxHealth(phaseTwoHealth);
         me->SetFullHealth();
     }
 
@@ -157,6 +245,7 @@ struct boss_razorgore : public BossAI
 
 private:
     bool secondPhase;
+    uint32 originalMaxHealth;
 };
 
 struct go_orb_of_domination : public GameObjectAI
@@ -171,6 +260,8 @@ struct go_orb_of_domination : public GameObjectAI
         {
             if (Creature* razorgore = instance->GetCreature(DATA_RAZORGORE_THE_UNTAMED))
             {
+                AddRazorgoreOrbProtection(player);
+
                 razorgore->Attack(player, true);
                 player->CastSpell(razorgore, SPELL_MINDCONTROL);
             }
@@ -188,6 +279,10 @@ class spell_egg_event : public SpellScript
     {
         if (InstanceScript* instance = GetCaster()->GetInstanceScript())
             instance->SetData(DATA_EGG_EVENT, SPECIAL);
+
+        if (Unit* caster = GetCaster())
+            if (SpellHistory* spellHistory = caster->GetSpellHistory())
+                spellHistory->ResetCooldown(SPELL_EGG_DESTROY, true);
     }
 
     void Register() override
@@ -196,9 +291,37 @@ class spell_egg_event : public SpellScript
     }
 };
 
+class razorgore_one_two_player_mode : public UnitScript
+{
+public:
+    razorgore_one_two_player_mode() : UnitScript("razorgore_one_two_player_mode") { }
+
+    void OnDamage(Unit* attacker, Unit* victim, uint32& damage) override
+    {
+        if (!attacker || !victim || !damage)
+            return;
+
+        if (attacker->GetMapId() != 469 || victim->GetMapId() != 469)
+            return;
+
+        if (Player* player = victim->ToPlayer())
+        {
+            if (HasRazorgoreOrbProtection(player) && IsRazorgoreAddEntry(attacker->GetEntry()))
+            {
+                ApplyDamageReduction(damage, RAZORGORE_ORB_PLAYER_DAMAGE_REDUCTION_PERCENT);
+                return;
+            }
+        }
+
+        if (attacker->GetEntry() == NPC_RAZORGORE)
+            ApplyDamageReduction(damage, RAZORGORE_PHASE_TWO_DAMAGE_REDUCTION_PERCENT);
+    }
+};
+
 void AddSC_boss_razorgore()
 {
     RegisterBlackwingLairCreatureAI(boss_razorgore);
     RegisterBlackwingLairGameObjectAI(go_orb_of_domination);
     RegisterSpellScript(spell_egg_event);
+    new razorgore_one_two_player_mode();
 }

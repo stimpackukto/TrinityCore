@@ -407,6 +407,10 @@ class BattlefieldWG : public Battlefield
 
 		void UpdateDefenderPortals();
 
+		void CreateWorkshopCapturePoint(GameObject* go, uint8 workshopId);
+		void SpawnWorkshopCapturePoints();
+		void RemoveWorkshopCapturePoints();
+
     protected:
         bool m_isRelicInteractible;
 
@@ -533,7 +537,18 @@ enum WintergraspText
     BATTLEFIELD_WG_TEXT_RANK_FIRST_LIEUTENANT           = 38,
 	
 	BATTLEFIELD_WG_TEXT_SIEGE_WAVE_LEADY           = 39,
-	BATTLEFIELD_WG_TEXT_SIEGE_WAVE_START           = 40
+	BATTLEFIELD_WG_TEXT_SIEGE_WAVE_START           = 40,
+
+	BATTLEFIELD_WG_TEXT_EAST_WALL_DAMAGED      = 62,
+	BATTLEFIELD_WG_TEXT_EAST_WALL_DESTROYED    = 63,
+	BATTLEFIELD_WG_TEXT_WEST_WALL_DAMAGED      = 64,
+	BATTLEFIELD_WG_TEXT_WEST_WALL_DESTROYED    = 65,
+	BATTLEFIELD_WG_TEXT_MAIN_GATE_DAMAGED      = 66,
+	BATTLEFIELD_WG_TEXT_MAIN_GATE_DESTROYED    = 67,
+	BATTLEFIELD_WG_TEXT_RELIC_GATE_DAMAGED      = 68,
+	BATTLEFIELD_WG_TEXT_RELIC_GATE_DESTROYED    = 69,
+	BATTLEFIELD_WG_TEXT_MIDDLE_GATE_DAMAGED	= 70,
+	BATTLEFIELD_WG_TEXT_MIDDLE_GATE_DESTROYED	= 71,
 };
 
 enum WintergraspGameObject

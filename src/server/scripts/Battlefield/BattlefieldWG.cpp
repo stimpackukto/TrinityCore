@@ -41,6 +41,7 @@
 #include "World.h"
 #include "WorldSession.h"
 #include "WorldStatePackets.h"
+#include "DatabaseEnv.h"
 
 #include <unordered_map>
 #include "../Custom/DiscordEvent.h"
@@ -54,6 +55,7 @@
 #include "Spell.h"
 #include "SpellMgr.h"
 #include "GridNotifiersImpl.h"
+#include "CustomRP.h"
 
 struct BfWGCoordGY
 {
@@ -222,6 +224,64 @@ uint8 const WG_MAX_TELEPORTER       = 12;
 uint8 const WG_MAX_WORKSHOP         = 6;
 uint8 const WG_MAX_TOWER            = 7;
 
+//*****************************************************
+//**********  겨손 웹 상황판 **********
+
+static void SaveWintergraspBattleStatusSnapshot(BattlefieldWG* wg, bool isActive, char const* eventName)
+{
+    if (!wg)
+        return;
+
+    uint32 defenderTeam = uint32(wg->GetDefenderTeam());
+    uint32 attackerTeam = uint32(wg->GetAttackerTeam());
+
+    LoginDatabase.PExecute(
+        "INSERT INTO appdata.wg_battle_status "
+        "(id, is_active, defender_team, attacker_team, last_event) "
+        "VALUES (1, {}, {}, {}, '{}') "
+        "ON DUPLICATE KEY UPDATE "
+        "is_active = VALUES(is_active), "
+        "defender_team = VALUES(defender_team), "
+        "attacker_team = VALUES(attacker_team), "
+        "last_event = VALUES(last_event)",
+        isActive ? 1 : 0,
+        defenderTeam,
+        attackerTeam,
+        eventName ? eventName : ""
+    );
+}
+
+static void UpdateWintergraspStructureDamageSnapshot(
+    uint32 worldStateId,
+    uint32 entry,
+    TeamId defenderTeam,
+    uint8 damageState
+)
+{
+    if (damageState > 2)
+        return;
+
+    LoginDatabase.PExecute(
+        "UPDATE appdata.wg_structure_status "
+        "SET damage_state = {}, "
+        "defender_team = {}, "
+        "active = 1 "
+        "WHERE ws_id = {}",
+        uint32(damageState),
+        uint32(defenderTeam),
+        uint32(worldStateId)
+    );
+
+    TC_LOG_INFO(
+        "bg.battlefield",
+        "WG structure damage snapshot updated. ws_id={}, entry={}, defenderTeam={}, damageState={}",
+        uint32(worldStateId),
+        uint32(entry),
+        uint32(defenderTeam),
+        uint32(damageState)
+    );
+}
+
 // *****************************************************
 // ************ Destructible (Wall, Tower..) ***********
 // *****************************************************
@@ -239,37 +299,37 @@ WintergraspBuildingSpawnData const WGGameObjectBuilding[WG_MAX_OBJ] =
 {
     // Wall (Not spawned in db)
     // Entry  WS      X          Y          Z           O                rX   rY   rZ             rW             Type
-    { 190219, 3749, { 5371.457f, 3047.472f, 407.5710f,  3.14159300f }, { 0.f, 0.f, -1.000000000f, 0.00000000f }, BATTLEFIELD_WG_OBJECTTYPE_WALL },
-    { 190220, 3750, { 5331.264f, 3047.105f, 407.9228f,  0.05235888f }, { 0.f, 0.f,  0.026176450f, 0.99965730f }, BATTLEFIELD_WG_OBJECTTYPE_WALL },
-    { 191795, 3764, { 5385.841f, 2909.490f, 409.7127f,  0.00872424f }, { 0.f, 0.f,  0.004362106f, 0.99999050f }, BATTLEFIELD_WG_OBJECTTYPE_WALL },
-    { 191796, 3772, { 5384.452f, 2771.835f, 410.2704f,  3.14159300f }, { 0.f, 0.f, -1.000000000f, 0.00000000f }, BATTLEFIELD_WG_OBJECTTYPE_WALL },
-    { 191799, 3762, { 5371.436f, 2630.610f, 408.8163f,  3.13285800f }, { 0.f, 0.f,  0.999990500f, 0.00436732f }, BATTLEFIELD_WG_OBJECTTYPE_WALL },
-    { 191800, 3766, { 5301.838f, 2909.089f, 409.8661f,  0.00872424f }, { 0.f, 0.f,  0.004362106f, 0.99999050f }, BATTLEFIELD_WG_OBJECTTYPE_WALL },
-    { 191801, 3770, { 5301.063f, 2771.411f, 409.9014f,  3.14159300f }, { 0.f, 0.f, -1.000000000f, 0.00000000f }, BATTLEFIELD_WG_OBJECTTYPE_WALL },
-    { 191802, 3751, { 5280.197f, 2995.583f, 408.8249f,  1.61442800f }, { 0.f, 0.f,  0.722363500f, 0.69151360f }, BATTLEFIELD_WG_OBJECTTYPE_WALL },
-    { 191803, 3752, { 5279.136f, 2956.023f, 408.6041f,  1.57079600f }, { 0.f, 0.f,  0.707106600f, 0.70710690f }, BATTLEFIELD_WG_OBJECTTYPE_WALL },
-    { 191804, 3767, { 5278.685f, 2882.513f, 409.5388f,  1.57079600f }, { 0.f, 0.f,  0.707106600f, 0.70710690f }, BATTLEFIELD_WG_OBJECTTYPE_WALL },
-    { 191806, 3769, { 5279.502f, 2798.945f, 409.9983f,  1.57079600f }, { 0.f, 0.f,  0.707106600f, 0.70710690f }, BATTLEFIELD_WG_OBJECTTYPE_WALL },
-    { 191807, 3759, { 5279.937f, 2724.766f, 409.9452f,  1.56207000f }, { 0.f, 0.f,  0.704014800f, 0.71018530f }, BATTLEFIELD_WG_OBJECTTYPE_WALL },
-    { 191808, 3760, { 5279.601f, 2683.786f, 409.8488f,  1.55334100f }, { 0.f, 0.f,  0.700908700f, 0.71325110f }, BATTLEFIELD_WG_OBJECTTYPE_WALL },
-    { 191809, 3761, { 5330.955f, 2630.777f, 409.2826f,  3.13285800f }, { 0.f, 0.f,  0.999990500f, 0.00436732f }, BATTLEFIELD_WG_OBJECTTYPE_WALL },
-    { 190369, 3753, { 5256.085f, 2933.963f, 409.3571f,  3.13285800f }, { 0.f, 0.f,  0.999990500f, 0.00436732f }, BATTLEFIELD_WG_OBJECTTYPE_WALL },
-    { 190370, 3758, { 5257.463f, 2747.327f, 409.7427f, -3.13285800f }, { 0.f, 0.f, -0.999990500f, 0.00436732f }, BATTLEFIELD_WG_OBJECTTYPE_WALL },
-    { 190371, 3754, { 5214.960f, 2934.089f, 409.1905f, -0.00872424f }, { 0.f, 0.f, -0.004362106f, 0.99999050f }, BATTLEFIELD_WG_OBJECTTYPE_WALL },
-    { 190372, 3757, { 5215.821f, 2747.566f, 409.1884f, -3.13285800f }, { 0.f, 0.f, -0.999990500f, 0.00436732f }, BATTLEFIELD_WG_OBJECTTYPE_WALL },
-    { 190374, 3755, { 5162.273f, 2883.043f, 410.2556f,  1.57952200f }, { 0.f, 0.f,  0.710185100f, 0.70401500f }, BATTLEFIELD_WG_OBJECTTYPE_WALL },
-    { 190376, 3756, { 5163.724f, 2799.838f, 409.2270f,  1.57952200f }, { 0.f, 0.f,  0.710185100f, 0.70401500f }, BATTLEFIELD_WG_OBJECTTYPE_WALL },
+    { 190219, 3749, { 5371.457f, 3047.472f, 407.5710f,  3.14159300f }, { 0.f, 0.f, -1.000000000f, 0.00000000f }, BATTLEFIELD_WG_OBJECTTYPE_WALL }, //서쪽 외벽 1
+    { 190220, 3750, { 5331.264f, 3047.105f, 407.9228f,  0.05235888f }, { 0.f, 0.f,  0.026176450f, 0.99965730f }, BATTLEFIELD_WG_OBJECTTYPE_WALL },  //서쪽 외벽 2
+    { 191795, 3764, { 5385.841f, 2909.490f, 409.7127f,  0.00872424f }, { 0.f, 0.f,  0.004362106f, 0.99999050f }, BATTLEFIELD_WG_OBJECTTYPE_WALL }, //서쪽 내벽 1
+	{ 191800, 3766, { 5301.838f, 2909.089f, 409.8661f,  0.00872424f }, { 0.f, 0.f,  0.004362106f, 0.99999050f }, BATTLEFIELD_WG_OBJECTTYPE_WALL }, //서쪽 내벽 2
+    { 191799, 3762, { 5371.436f, 2630.610f, 408.8163f,  3.13285800f }, { 0.f, 0.f,  0.999990500f, 0.00436732f }, BATTLEFIELD_WG_OBJECTTYPE_WALL }, // 동쪽 외벽 1
+	{ 191809, 3761, { 5330.955f, 2630.777f, 409.2826f,  3.13285800f }, { 0.f, 0.f,  0.999990500f, 0.00436732f }, BATTLEFIELD_WG_OBJECTTYPE_WALL },  //동쪽 외벽2
+	{ 191796, 3772, { 5384.452f, 2771.835f, 410.2704f,  3.14159300f }, { 0.f, 0.f, -1.000000000f, 0.00000000f }, BATTLEFIELD_WG_OBJECTTYPE_WALL }, //동쪽 내벽 1
+    { 191801, 3770, { 5301.063f, 2771.411f, 409.9014f,  3.14159300f }, { 0.f, 0.f, -1.000000000f, 0.00000000f }, BATTLEFIELD_WG_OBJECTTYPE_WALL }, //동쪽 내벽2
+    { 191802, 3751, { 5280.197f, 2995.583f, 408.8249f,  1.61442800f }, { 0.f, 0.f,  0.722363500f, 0.69151360f }, BATTLEFIELD_WG_OBJECTTYPE_WALL }, //중앙벽 1
+    { 191803, 3752, { 5279.136f, 2956.023f, 408.6041f,  1.57079600f }, { 0.f, 0.f,  0.707106600f, 0.70710690f }, BATTLEFIELD_WG_OBJECTTYPE_WALL }, //중앙벽 2
+    { 191804, 3767, { 5278.685f, 2882.513f, 409.5388f,  1.57079600f }, { 0.f, 0.f,  0.707106600f, 0.70710690f }, BATTLEFIELD_WG_OBJECTTYPE_WALL }, //중앙벽 3
+    { 191806, 3769, { 5279.502f, 2798.945f, 409.9983f,  1.57079600f }, { 0.f, 0.f,  0.707106600f, 0.70710690f }, BATTLEFIELD_WG_OBJECTTYPE_WALL }, //중앙벽 4
+    { 191807, 3759, { 5279.937f, 2724.766f, 409.9452f,  1.56207000f }, { 0.f, 0.f,  0.704014800f, 0.71018530f }, BATTLEFIELD_WG_OBJECTTYPE_WALL }, //중앙벽 5
+    { 191808, 3760, { 5279.601f, 2683.786f, 409.8488f,  1.55334100f }, { 0.f, 0.f,  0.700908700f, 0.71325110f }, BATTLEFIELD_WG_OBJECTTYPE_WALL }, //증앙벽 6
+    { 190369, 3753, { 5256.085f, 2933.963f, 409.3571f,  3.13285800f }, { 0.f, 0.f,  0.999990500f, 0.00436732f }, BATTLEFIELD_WG_OBJECTTYPE_WALL }, //중아아래서쪽 외벽 1   
+    { 190371, 3754, { 5214.960f, 2934.089f, 409.1905f, -0.00872424f }, { 0.f, 0.f, -0.004362106f, 0.99999050f }, BATTLEFIELD_WG_OBJECTTYPE_WALL },//중아아래서쪽 외벽 2
+	{ 190370, 3758, { 5257.463f, 2747.327f, 409.7427f, -3.13285800f }, { 0.f, 0.f, -0.999990500f, 0.00436732f }, BATTLEFIELD_WG_OBJECTTYPE_WALL },//중아아래동쪽 외벽 1
+    { 190372, 3757, { 5215.821f, 2747.566f, 409.1884f, -3.13285800f }, { 0.f, 0.f, -0.999990500f, 0.00436732f }, BATTLEFIELD_WG_OBJECTTYPE_WALL },//중아아래동쪽 외벽 2
+    { 190374, 3755, { 5162.273f, 2883.043f, 410.2556f,  1.57952200f }, { 0.f, 0.f,  0.710185100f, 0.70401500f }, BATTLEFIELD_WG_OBJECTTYPE_WALL },//북쪽 서쪽
+    { 190376, 3756, { 5163.724f, 2799.838f, 409.2270f,  1.57952200f }, { 0.f, 0.f,  0.710185100f, 0.70401500f }, BATTLEFIELD_WG_OBJECTTYPE_WALL },//북쪽 동쪽
 
-    // Tower of keep (Not spawned in db)
+    // Tower of keep (Not spawned in db)   5371.436 2630.610f, 408.8163f,  3.13285800f
     { 190221, 3711, { 5281.154f, 3044.588f, 407.8434f,  3.115388f }, { 0.f, 0.f,  0.9999142f, 0.013101960f }, BATTLEFIELD_WG_OBJECTTYPE_KEEP_TOWER }, // NW
     { 190373, 3713, { 5163.757f, 2932.228f, 409.1904f,  3.124123f }, { 0.f, 0.f,  0.9999619f, 0.008734641f }, BATTLEFIELD_WG_OBJECTTYPE_KEEP_TOWER }, // SW
     { 190377, 3714, { 5166.397f, 2748.368f, 409.1884f, -1.570796f }, { 0.f, 0.f, -0.7071066f, 0.707106900f }, BATTLEFIELD_WG_OBJECTTYPE_KEEP_TOWER }, // SE
     { 190378, 3712, { 5281.192f, 2632.479f, 409.0985f, -1.588246f }, { 0.f, 0.f, -0.7132492f, 0.700910500f }, BATTLEFIELD_WG_OBJECTTYPE_KEEP_TOWER }, // NE
 
-    // Wall (with passage) (Not spawned in db)
-    { 191797, 3765, { 5343.290f, 2908.860f, 409.5757f, 0.00872424f }, { 0.f, 0.f,  0.004362106f, 0.9999905f }, BATTLEFIELD_WG_OBJECTTYPE_WALL },
-    { 191798, 3771, { 5342.719f, 2771.386f, 409.6249f, 3.14159300f }, { 0.f, 0.f, -1.000000000f, 0.0000000f }, BATTLEFIELD_WG_OBJECTTYPE_WALL },
-    { 191805, 3768, { 5279.126f, 2840.797f, 409.7826f, 1.57952200f }, { 0.f, 0.f,  0.710185100f, 0.7040150f }, BATTLEFIELD_WG_OBJECTTYPE_WALL },
+    // Wall (with passage) (Not spawned in db) 5342.719 2771.386 409.6249 571 3.14159300
+    { 191797, 3765, { 5343.290f, 2908.860f, 409.5757f, 0.00872424f }, { 0.f, 0.f,  0.004362106f, 0.9999905f }, BATTLEFIELD_WG_OBJECTTYPE_WALL },  //서쪽내벽도어벽
+    { 191798, 3771, { 5342.719f, 2771.386f, 409.6249f, 3.14159300f }, { 0.f, 0.f, -1.000000000f, 0.0000000f }, BATTLEFIELD_WG_OBJECTTYPE_WALL },  //동쪽내벽도어벅
+    { 191805, 3768, { 5279.126f, 2840.797f, 409.7826f, 1.57952200f }, { 0.f, 0.f,  0.710185100f, 0.7040150f }, BATTLEFIELD_WG_OBJECTTYPE_WALL },  //중앙내벽도어벽
 
     // South tower (Not spawned in db)
     { 190356, 3704, { 4557.173f, 3623.943f, 395.8828f,  1.675516f }, { 0.f, 0.f,  0.7431450f, 0.669130400f }, BATTLEFIELD_WG_OBJECTTYPE_TOWER }, // W
@@ -285,7 +345,7 @@ WintergraspBuildingSpawnData const WGGameObjectBuilding[WG_MAX_OBJ] =
 
 struct StaticWintergraspTowerInfo
 {
-    uint8 TowerId;
+    uint32 Entry;
 
     struct
     {
@@ -294,16 +354,140 @@ struct StaticWintergraspTowerInfo
     } TextIds;
 };
 
-StaticWintergraspTowerInfo const TowerData[WG_MAX_TOWER] =
+StaticWintergraspTowerInfo const TowerData[] =
 {
-    { BATTLEFIELD_WG_TOWER_FORTRESS_NW,   { BATTLEFIELD_WG_TEXT_NW_KEEPTOWER_DAMAGE,   BATTLEFIELD_WG_TEXT_NW_KEEPTOWER_DESTROY   } },
-    { BATTLEFIELD_WG_TOWER_FORTRESS_SW,   { BATTLEFIELD_WG_TEXT_SW_KEEPTOWER_DAMAGE,   BATTLEFIELD_WG_TEXT_SW_KEEPTOWER_DESTROY   } },
-    { BATTLEFIELD_WG_TOWER_FORTRESS_SE,   { BATTLEFIELD_WG_TEXT_SE_KEEPTOWER_DAMAGE,   BATTLEFIELD_WG_TEXT_SE_KEEPTOWER_DESTROY   } },
-    { BATTLEFIELD_WG_TOWER_FORTRESS_NE,   { BATTLEFIELD_WG_TEXT_NE_KEEPTOWER_DAMAGE,   BATTLEFIELD_WG_TEXT_NE_KEEPTOWER_DESTROY   } },
-    { BATTLEFIELD_WG_TOWER_SHADOWSIGHT,   { BATTLEFIELD_WG_TEXT_WESTERN_TOWER_DAMAGE,  BATTLEFIELD_WG_TEXT_WESTERN_TOWER_DESTROY  } },
-    { BATTLEFIELD_WG_TOWER_WINTER_S_EDGE, { BATTLEFIELD_WG_TEXT_SOUTHERN_TOWER_DAMAGE, BATTLEFIELD_WG_TEXT_SOUTHERN_TOWER_DESTROY } },
-    { BATTLEFIELD_WG_TOWER_FLAMEWATCH,    { BATTLEFIELD_WG_TEXT_EASTERN_TOWER_DAMAGE,  BATTLEFIELD_WG_TEXT_EASTERN_TOWER_DESTROY  } }
+    // 요새 탑
+    { GO_WINTERGRASP_FORTRESS_TOWER_1, { BATTLEFIELD_WG_TEXT_NW_KEEPTOWER_DAMAGE, BATTLEFIELD_WG_TEXT_NW_KEEPTOWER_DESTROY } },
+    { GO_WINTERGRASP_FORTRESS_TOWER_2, { BATTLEFIELD_WG_TEXT_SW_KEEPTOWER_DAMAGE, BATTLEFIELD_WG_TEXT_SW_KEEPTOWER_DESTROY } },
+    { GO_WINTERGRASP_FORTRESS_TOWER_3, { BATTLEFIELD_WG_TEXT_SE_KEEPTOWER_DAMAGE, BATTLEFIELD_WG_TEXT_SE_KEEPTOWER_DESTROY } },
+    { GO_WINTERGRASP_FORTRESS_TOWER_4, { BATTLEFIELD_WG_TEXT_NE_KEEPTOWER_DAMAGE, BATTLEFIELD_WG_TEXT_NE_KEEPTOWER_DESTROY } },
+
+    // 외곽 경비탑
+    { GO_WINTERGRASP_SHADOWSIGHT_TOWER,   { BATTLEFIELD_WG_TEXT_WESTERN_TOWER_DAMAGE,  BATTLEFIELD_WG_TEXT_WESTERN_TOWER_DESTROY } },
+    { GO_WINTERGRASP_WINTER_S_EDGE_TOWER, { BATTLEFIELD_WG_TEXT_SOUTHERN_TOWER_DAMAGE, BATTLEFIELD_WG_TEXT_SOUTHERN_TOWER_DESTROY } },
+    { GO_WINTERGRASP_FLAMEWATCH_TOWER,    { BATTLEFIELD_WG_TEXT_EASTERN_TOWER_DAMAGE,  BATTLEFIELD_WG_TEXT_EASTERN_TOWER_DESTROY } },
+
+    // 서쪽 성벽
+    { 190219, { BATTLEFIELD_WG_TEXT_WEST_WALL_DAMAGED, BATTLEFIELD_WG_TEXT_WEST_WALL_DESTROYED } },
+    { 190220, { BATTLEFIELD_WG_TEXT_WEST_WALL_DAMAGED, BATTLEFIELD_WG_TEXT_WEST_WALL_DESTROYED } },
+    { 191795, { BATTLEFIELD_WG_TEXT_WEST_WALL_DAMAGED, BATTLEFIELD_WG_TEXT_WEST_WALL_DESTROYED } },
+    { 191800, { BATTLEFIELD_WG_TEXT_WEST_WALL_DAMAGED, BATTLEFIELD_WG_TEXT_WEST_WALL_DESTROYED } },
+    { 191797, { BATTLEFIELD_WG_TEXT_WEST_WALL_DAMAGED, BATTLEFIELD_WG_TEXT_WEST_WALL_DESTROYED } },
+
+    // 동쪽 성벽
+    { 191799, { BATTLEFIELD_WG_TEXT_EAST_WALL_DAMAGED, BATTLEFIELD_WG_TEXT_EAST_WALL_DESTROYED } },
+    { 191809, { BATTLEFIELD_WG_TEXT_EAST_WALL_DAMAGED, BATTLEFIELD_WG_TEXT_EAST_WALL_DESTROYED } },
+    { 191796, { BATTLEFIELD_WG_TEXT_EAST_WALL_DAMAGED, BATTLEFIELD_WG_TEXT_EAST_WALL_DESTROYED } },
+    { 191801, { BATTLEFIELD_WG_TEXT_EAST_WALL_DAMAGED, BATTLEFIELD_WG_TEXT_EAST_WALL_DESTROYED } },
+    { 191798, { BATTLEFIELD_WG_TEXT_EAST_WALL_DAMAGED, BATTLEFIELD_WG_TEXT_EAST_WALL_DESTROYED } },
+
+    // 중앙 / 요새 진입 성벽 중앙
+    { 191802, { BATTLEFIELD_WG_TEXT_MAIN_GATE_DAMAGED, BATTLEFIELD_WG_TEXT_MAIN_GATE_DESTROYED } },
+    { 191803, { BATTLEFIELD_WG_TEXT_MAIN_GATE_DAMAGED, BATTLEFIELD_WG_TEXT_MAIN_GATE_DESTROYED } },
+    { 191804, { BATTLEFIELD_WG_TEXT_MAIN_GATE_DAMAGED, BATTLEFIELD_WG_TEXT_MAIN_GATE_DESTROYED } },
+    { 191806, { BATTLEFIELD_WG_TEXT_MAIN_GATE_DAMAGED, BATTLEFIELD_WG_TEXT_MAIN_GATE_DESTROYED } },
+    { 191807, { BATTLEFIELD_WG_TEXT_MAIN_GATE_DAMAGED, BATTLEFIELD_WG_TEXT_MAIN_GATE_DESTROYED } },
+    { 191808, { BATTLEFIELD_WG_TEXT_MAIN_GATE_DAMAGED, BATTLEFIELD_WG_TEXT_MAIN_GATE_DESTROYED } },
+    { 191805, { BATTLEFIELD_WG_TEXT_MAIN_GATE_DAMAGED, BATTLEFIELD_WG_TEXT_MAIN_GATE_DESTROYED } },
+
+	//정문
+    { 190369, { BATTLEFIELD_WG_TEXT_MAIN_GATE_DAMAGED, BATTLEFIELD_WG_TEXT_MAIN_GATE_DESTROYED } },
+    { 190371, { BATTLEFIELD_WG_TEXT_MAIN_GATE_DAMAGED, BATTLEFIELD_WG_TEXT_MAIN_GATE_DESTROYED } },
+    { 190370, { BATTLEFIELD_WG_TEXT_MAIN_GATE_DAMAGED, BATTLEFIELD_WG_TEXT_MAIN_GATE_DESTROYED } },
+    { 190372, { BATTLEFIELD_WG_TEXT_MAIN_GATE_DAMAGED, BATTLEFIELD_WG_TEXT_MAIN_GATE_DESTROYED } },
+    { 190374, { BATTLEFIELD_WG_TEXT_MAIN_GATE_DAMAGED, BATTLEFIELD_WG_TEXT_MAIN_GATE_DESTROYED } },
+    { 190375, { BATTLEFIELD_WG_TEXT_MAIN_GATE_DAMAGED, BATTLEFIELD_WG_TEXT_MAIN_GATE_DESTROYED } },
+    { 190376, { BATTLEFIELD_WG_TEXT_MAIN_GATE_DAMAGED, BATTLEFIELD_WG_TEXT_MAIN_GATE_DESTROYED } },
+
+    // 관문
+    { GO_WINTERGRASP_VAULT_GATE,    { BATTLEFIELD_WG_TEXT_RELIC_GATE_DAMAGED, BATTLEFIELD_WG_TEXT_RELIC_GATE_DESTROYED } }
 };
+
+static StaticWintergraspTowerInfo const* GetWintergraspBuildingWarningInfo(uint32 entry)
+{
+    static StaticWintergraspTowerInfo const WestWall =
+    {
+        0,
+        { BATTLEFIELD_WG_TEXT_WEST_WALL_DAMAGED, BATTLEFIELD_WG_TEXT_WEST_WALL_DESTROYED }
+    };
+
+    static StaticWintergraspTowerInfo const EastWall =
+    {
+        0,
+        { BATTLEFIELD_WG_TEXT_EAST_WALL_DAMAGED, BATTLEFIELD_WG_TEXT_EAST_WALL_DESTROYED }
+    };
+
+    static StaticWintergraspTowerInfo const MiddleWall =
+    {
+        0,
+        { BATTLEFIELD_WG_TEXT_MIDDLE_GATE_DAMAGED, BATTLEFIELD_WG_TEXT_MIDDLE_GATE_DESTROYED }
+    };
+
+	 static StaticWintergraspTowerInfo const MainWall =
+    {
+        0,
+        { BATTLEFIELD_WG_TEXT_MAIN_GATE_DAMAGED, BATTLEFIELD_WG_TEXT_MAIN_GATE_DESTROYED }
+    };
+
+    static StaticWintergraspTowerInfo const RelicGate =
+    {
+        0,
+        { BATTLEFIELD_WG_TEXT_RELIC_GATE_DAMAGED, BATTLEFIELD_WG_TEXT_RELIC_GATE_DESTROYED }
+    };
+
+    switch (entry)
+    {
+        // 서쪽 성벽
+        case 190219:
+        case 190220:
+        case 191795:
+        case 191800:
+        case 191797:
+            return &WestWall;
+
+        // 동쪽 성벽
+        case 191799:
+        case 191809:
+        case 191796:
+        case 191801:
+        case 191798:
+            return &EastWall;
+ 
+        // 중앙 / 요새 진입 성벽 MiddleWall
+        case 191802:
+        case 191803:
+        case 191804:
+        case 191806:
+        case 191807:
+        case 191808:
+        case 191805:
+			return &MiddleWall;
+
+        case 190369:
+        case 190371:
+        case 190370:
+        case 190372:
+        case 190374:
+        case 190376:
+		case GO_WINTERGRASP_FORTRESS_GATE:
+            return &MainWall;
+
+        // 관문
+        case GO_WINTERGRASP_VAULT_GATE:
+            return &RelicGate;
+
+        default:
+            break;
+    }
+
+    for (StaticWintergraspTowerInfo const& data : TowerData)
+    {
+        if (data.Entry == entry)
+            return &data;
+    }
+
+    return nullptr;
+}
 
 Position const WGTurret[WG_MAX_TURRET] =
 {
@@ -730,10 +914,10 @@ uint32 const WG_MAX_TRASH_SPAWN = sizeof(WGTrashSpawns) / sizeof(WGTrashSpawns[0
 // 기존 함수명은 유지하지만 실제 동작은 작업장별 공성 전차 웨이브로 변경한다.
 // 헤더 수정 최소화를 위해 전역 관리값으로 처리한다.
 static constexpr uint32 WG_WORKSHOP_SIEGE_FIRST_DELAY = 2 * MINUTE * IN_MILLISECONDS;
-static constexpr uint32 WG_WORKSHOP_SIEGE_INTERVAL = 30 * IN_MILLISECONDS;
+static constexpr uint32 WG_WORKSHOP_SIEGE_INTERVAL = 1 * MINUTE * IN_MILLISECONDS;
 static constexpr uint8 WG_WORKSHOP_SIEGE_MAX_ALIVE = 5;
-static constexpr float WG_ELITE_DEMOLISHER_STRUCTURE_FRONT_ARC = 1.57079632f; // 전방 180도
-static constexpr uint32 WG_ELITE_DEMOLISHER_STRUCTURE_FAIL_LIMIT = 3;
+//static constexpr float WG_ELITE_DEMOLISHER_STRUCTURE_FRONT_ARC = 1.57079632f; // 전방 180도
+//static constexpr uint32 WG_ELITE_DEMOLISHER_STRUCTURE_FAIL_LIMIT = 3;
 
 static constexpr float WG_ELITE_DEMOLISHER_STRUCTURE_MELEE_SCAN_RANGE = 5.0f;
 static constexpr uint32 WG_ELITE_DEMOLISHER_STRUCTURE_MELEE_SCAN_TIMER = 500;
@@ -741,8 +925,128 @@ static constexpr uint32 WG_ELITE_DEMOLISHER_STRUCTURE_MELEE_SCAN_TIMER = 500;
 static uint32 WGWorkshopSiegeWaveTimer = 0;
 static bool WGWorkshopSiegeWaveEnabled = false;
 static bool WGWorkshopSiegeFirstWaveAnnounced = false;
+static bool WGWorkshopSiegeSkipFirstUpdate = false;
+static uint8 WGWorkshopSiegeNextWorkshopIndex = 0;
 
 static std::vector<ObjectGuid> WGWorkshopSiegeGuids[WG_MAX_WORKSHOP];
+
+static void RemoveWintergraspWorkshopSiegeGuid(ObjectGuid guid)
+{
+    if (guid.IsEmpty())
+        return;
+
+    for (uint8 i = 0; i < WG_MAX_WORKSHOP; ++i)
+    {
+        std::vector<ObjectGuid>& siegeList = WGWorkshopSiegeGuids[i];
+
+        for (auto itr = siegeList.begin(); itr != siegeList.end();)
+        {
+            if (*itr == guid)
+            {
+                itr = siegeList.erase(itr);
+                continue;
+            }
+
+            ++itr;
+        }
+    }
+}
+
+struct WintergraspWorkshopBannerSpawnData
+{
+    uint8 WorkshopId;
+    uint32 Entry;
+    Position Pos;
+    QuaternionData Rot;
+};
+
+static WintergraspWorkshopBannerSpawnData const WGWorkshopBannerSpawns[] =
+{
+    // 가라앉은 경기장 / NE
+    {
+        BATTLEFIELD_WG_WORKSHOP_NE,
+        GO_WINTERGRASP_FACTORY_BANNER_NE,
+        { 4949.34f, 2432.59f, 320.177f, 1.38621f },
+        { 0.f, 0.f, 0.638929f, 0.769266f }
+    },
+
+    // 파괴된 신전 / NW
+    {
+        BATTLEFIELD_WG_WORKSHOP_NW,
+        GO_WINTERGRASP_FACTORY_BANNER_NW,
+        { 4948.52f, 3342.34f, 376.875f, 4.40057f },
+        { 0.f, 0.f, 0.808329f, -0.588731f }
+    },
+
+    // 동부불꽃 작업장 / SE
+    {
+        BATTLEFIELD_WG_WORKSHOP_SE,
+        GO_WINTERGRASP_FACTORY_BANNER_SE,
+        { 4398.08f, 2356.50f, 376.190f, 0.525406f },
+        { 0.f, 0.f, 0.259692f, 0.965692f }
+    },
+
+    // 서부불꽃 작업장 / SW
+    {
+        BATTLEFIELD_WG_WORKSHOP_SW,
+        GO_WINTERGRASP_FACTORY_BANNER_SW,
+        { 4390.78f, 3304.09f, 372.429f, 6.09702f },
+        { 0.f, 0.f, 0.0929482f, -0.995671f }
+    }
+};
+
+static constexpr uint8 WG_WORKSHOP_BANNER_COUNT =
+    sizeof(WGWorkshopBannerSpawns) / sizeof(WGWorkshopBannerSpawns[0]);
+
+static ObjectGuid WGWorkshopBannerGuids[WG_MAX_WORKSHOP];
+
+static void SpawnWintergraspWorkshopBanners(BattlefieldWG* wg)
+{
+    if (!wg)
+        return;
+
+    for (uint8 i = 0; i < WG_WORKSHOP_BANNER_COUNT; ++i)
+    {
+        WintergraspWorkshopBannerSpawnData const& data = WGWorkshopBannerSpawns[i];
+
+        if (data.WorkshopId >= WG_MAX_WORKSHOP)
+            continue;
+
+        if (!WGWorkshopBannerGuids[data.WorkshopId].IsEmpty())
+        {
+            if (GameObject* oldBanner = wg->GetGameObject(WGWorkshopBannerGuids[data.WorkshopId]))
+            {
+                oldBanner->SetRespawnTime(RESPAWN_IMMEDIATELY);
+                continue;
+            }
+
+            WGWorkshopBannerGuids[data.WorkshopId].Clear();
+        }
+
+        if (GameObject* banner = wg->SpawnGameObject(data.Entry, data.Pos, data.Rot))
+        {
+            banner->SetRespawnTime(RESPAWN_IMMEDIATELY);
+            WGWorkshopBannerGuids[data.WorkshopId] = banner->GetGUID();
+        }
+    }
+}
+
+static void RemoveWintergraspWorkshopBanners(BattlefieldWG* wg)
+{
+    if (!wg)
+        return;
+
+    for (uint8 i = 0; i < WG_MAX_WORKSHOP; ++i)
+    {
+        if (WGWorkshopBannerGuids[i].IsEmpty())
+            continue;
+
+        if (GameObject* banner = wg->GetGameObject(WGWorkshopBannerGuids[i]))
+            banner->RemoveFromWorld();
+
+        WGWorkshopBannerGuids[i].Clear();
+    }
+}
 
 uint8 const WGWorkshopSiegeWorkshopIds[] =
 {
@@ -760,43 +1064,88 @@ struct WGEliteDemolisherPathData
     uint32 PointCount;
 };
 
+// ============================================================
+// 엘리트 공성전차 웨이포인트
+// 배열은 0부터 시작
+// 예: 6번째 좌표 = 배열 번호 5
+// ============================================================
+
+
 // 가라앉은 경기장
 Position const WGEliteDemolisherPath_SunkenRing[] =
 {
     { 4953.689941f, 2411.239990f, 320.977997f, 1.221730f },
-    { 4966.397461f, 2461.66333f, 323.027283f, 0.848202f },
+    { 4966.397461f, 2461.663330f, 323.027283f, 0.848202f },
     { 5015.941895f, 2550.250488f, 347.463776f, 0.294496f },
     { 5237.320801f, 2534.881348f, 372.781281f, 0.375396f },
-    { 5338.325195f, 2572.10376f, 397.799438f, 1.27703f },
-    { 5347.557617f, 2603.480713f, 405.499664f, 1.591190f },  //성벽앞
-	{ 5368.039062f, 2612.241211f, 408.273224f, 1.434895f },
-	{ 5369.510254f, 2649.468262f, 409.09903f, 2.023159f },  //우측성벽
-    { 5306.084473f, 2737.952637f, 409.191528f, 1.786754f },
+    { 5338.325195f, 2572.103760f, 397.799438f, 1.277030f },
+    { 5347.557617f, 2603.480713f, 405.499664f, 1.591190f },  // 6번째 - 성벽 앞
+    { 5368.039062f, 2612.241211f, 408.273224f, 1.434895f },
+    { 5369.510254f, 2649.468262f, 409.099030f, 2.023159f },  // 8번째 - 우측 성벽
+    { 5341.756836f, 2706.616211f, 409.166229f, 1.621849f },
+    { 5341.904785f, 2761.897705f, 409.190552f, 1.533878f }
 };
 
-/* 5237.320801 2534.881348 372.781281 571 0.375396
-  5329.477051 2571.198486 395.885132 571 0.375396
-  5329.669922 2614.481689 408.517822 571 1.437252f 
-  5347.557617 2603.480713 405.499664 571 1.591190
-  5368.039062 2612.241211 408.273224 571 1.434895f 
-  5369.510254 2649.468262 409.09903 571 2.023159
-  5330.087891 2643.87793 409.099518 571 1.594331
-  */
-// 나중에 추가 예정
+
 // 파괴된 신전
 Position const WGEliteDemolisherPath_BrokenTemple[] =
 {
+    { 4949.029785f, 3368.949951f, 379.847992f, 4.241150f },
+    { 5067.073242f, 3195.318115f, 356.791992f, 5.234289f },
+    { 5149.037598f, 3073.299316f, 379.451263f, 0.626358f },
+    { 5255.948242f, 3136.183838f, 386.953217f, 0.208526f },
+    { 5293.806641f, 3131.691162f, 388.857086f, 5.505251f },
+    { 5324.401855f, 3083.815674f, 402.495758f, 5.505251f },  // 6번째 - 190219 공격 4929.467295 3310.192627 376.706329 571 5.241753
+    { 5372.664062f, 3061.158936f, 407.705017f, 4.594189f },
+    { 5372.664062f, 3027.100342f, 409.188904f, 4.005141f },
+    { 5345.503906f, 3002.850830f, 409.191620f, 4.686081f },
+    { 5344.139648f, 2950.998779f, 409.191528f, 4.686081f },  // 10번째 - 191797 공격 5067.073242 3195.318115 356.791992 571 5.234289
+    { 5343.050293f, 2909.607910f, 409.587463f, 4.686081f }   // 11번째 - 도착
 };
 
 // 동부불꽃 작업장
 Position const WGEliteDemolisherPath_EastSpark[] =
 {
+	{ 4379.600098f, 2348.1999951f, 377.789001f, 6.178400f },
+    { 4495.209961f, 2324.803467f, 367.214539f, 6.149755f },
+    { 4723.126953f, 2413.752441f, 361.816193f, 0.344091f },
+    { 4832.854492f, 2537.374756f, 360.815063f, 0.085695f },
+    { 4960.761719f, 2548.362793f, 361.355103f, 1.031315f },
+    { 5015.555176f, 2639.879639f, 358.390594f, 1.819855f },
+    { 5013.506348f, 2725.547363f, 372.692413f, 1.558317f },
+    { 5047.610352f, 2776.424316f, 381.940704f, 0.980264f },
+    { 5049.987305f, 2839.557617f, 393.196503f, 4.670645f },  //입궁ㅇㅇㅇ
+    { 5117.601074f, 2836.786377f, 405.556732f, 6.221226f },  // 9번째 - 190375 공격 5117.601074 2836.786377 405.556732 571 6.221226f
+    { 5234.941895f, 2840.851807f, 409.191223f, 0.040140f },  // 10번째 - 191805 공격
+    { 5278.036621f, 2840.923096f, 409.794220f, 0.040140f }   // 11번째 - 도착
 };
 
 // 서부불꽃 작업장
+// 서부불꽃 작업장
 Position const WGEliteDemolisherPath_WestSpark[] =
 {
+    { 4373.520020f, 3298.909912f, 374.119995f, 6.178460f },
+    { 4383.123535f, 3243.952881f, 371.313599f, 4.797570f },
+    { 4389.570312f, 3168.452637f, 358.612274f, 4.797570f },
+    { 4412.726074f, 3052.312988f, 358.725372f, 4.829771f },
+    { 4410.083008f, 2955.386475f, 374.286957f, 4.648344f },
+    { 4407.918945f, 2921.642578f, 384.365204f, 4.648344f },
+    { 4498.933105f, 2858.063232f, 389.860626f, 5.334783f },
+    { 4508.132812f, 2829.478760f, 391.175049f, 5.023765f },
+    { 4552.400879f, 2836.061523f, 388.938019f, 0.281531f },
+    { 4605.437500f, 2849.020508f, 396.895020f, 0.156653f },
+    { 4685.712402f, 2861.699463f, 388.639160f, 0.156653f },
+    { 4813.549316f, 2895.754150f, 373.463776f, 0.250901f },
+    { 4970.601074f, 2873.621826f, 384.826752f, 5.849218f },
+    { 5048.683594f, 2848.387451f, 392.909241f, 6.089550f },
+    { 5115.314453f, 2850.791504f, 403.898773f, 6.202648f },
+    { 5223.649414f, 2847.503662f, 409.191223f, 6.281183f },
+    { 5279.216309f, 2841.464355f, 409.794281f, 6.281183f }
 };
+
+// ============================================================
+// 정비창별 경로 연결
+// ============================================================
 
 WGEliteDemolisherPathData const WGEliteDemolisherPaths[] =
 {
@@ -806,28 +1155,24 @@ WGEliteDemolisherPathData const WGEliteDemolisherPaths[] =
         WGEliteDemolisherPath_SunkenRing,
         uint32(sizeof(WGEliteDemolisherPath_SunkenRing) / sizeof(WGEliteDemolisherPath_SunkenRing[0]))
     },
-
-    // 나중에 좌표 채우면 주석 해제
-    /*
     {
         BATTLEFIELD_WG_WORKSHOP_NW,
         "파괴된 신전",
         WGEliteDemolisherPath_BrokenTemple,
         uint32(sizeof(WGEliteDemolisherPath_BrokenTemple) / sizeof(WGEliteDemolisherPath_BrokenTemple[0]))
     },
-    {
-        BATTLEFIELD_WG_WORKSHOP_SE,
-        "동부불꽃 작업장",
-        WGEliteDemolisherPath_EastSpark,
-        uint32(sizeof(WGEliteDemolisherPath_EastSpark) / sizeof(WGEliteDemolisherPath_EastSpark[0]))
-    },
+   {
+		BATTLEFIELD_WG_WORKSHOP_SE,
+		"동부불꽃 작업장",
+		WGEliteDemolisherPath_EastSpark,
+		uint32(sizeof(WGEliteDemolisherPath_EastSpark) / sizeof(WGEliteDemolisherPath_EastSpark[0]))
+	},
     {
         BATTLEFIELD_WG_WORKSHOP_SW,
         "서부불꽃 작업장",
         WGEliteDemolisherPath_WestSpark,
         uint32(sizeof(WGEliteDemolisherPath_WestSpark) / sizeof(WGEliteDemolisherPath_WestSpark[0]))
-    },
-    */
+    }
 };
 
 uint32 const WG_ELITE_DEMOLISHER_PATH_COUNT =
@@ -844,6 +1189,322 @@ uint32 const WG_ELITE_DEMOLISHER_PATH_COUNT =
     return nullptr;
 }
 
+static constexpr uint32 WG_DEFENDER_LAND_MINE_ENTRY = 7527;
+static constexpr uint32 WG_DEFENDER_LAND_MINE_DATA_TEAM = 1;
+
+static constexpr uint8 WG_DEFENDER_TOTAL_MINE_COUNT = 15;
+static constexpr uint32 WG_DEFENDER_WORKSHOP_MINE_MAINTAIN_TIMER = 5 * IN_MILLISECONDS;
+static constexpr uint32 WG_DEFENDER_MINE_RESPAWN_DELAY = 60 * IN_MILLISECONDS;
+static constexpr uint32 WG_DEFENDER_WORKSHOP_MINE_INVALID_POINT = 0xFFFFFFFF;
+
+static uint32 WGDefenderWorkshopMineTimer = 0;
+static uint32 WGDefenderWorkshopMineRespawnTimers[WG_DEFENDER_TOTAL_MINE_COUNT];
+static ObjectGuid WGDefenderWorkshopMineGuids[WG_DEFENDER_TOTAL_MINE_COUNT];
+
+struct WGDefenderWorkshopMineLocation
+{
+    uint8 WorkshopId;
+    uint32 PathPoint;
+};
+
+static WGDefenderWorkshopMineLocation WGDefenderWorkshopMineLocations[WG_DEFENDER_TOTAL_MINE_COUNT];
+
+static uint32 GetWintergraspDefenderMineFaction(TeamId defenderTeam)
+{
+    if (defenderTeam == TEAM_ALLIANCE)
+        return ::FACTION_ALLIANCE_GENERIC;
+
+    if (defenderTeam == TEAM_HORDE)
+        return ::FACTION_HORDE_GENERIC;
+
+    return ::FACTION_FRIENDLY;
+}
+
+static void SaveWintergraspDefenderMineSnapshot(
+    uint8 /*slot*/,
+    uint8 workshopId,
+    uint32 pathPoint,
+    Position const& /*pos*/,
+    TeamId defenderTeam
+)
+{
+    LoginDatabase.PExecute(
+        "UPDATE appdata.wg_defender_mines "
+        "SET active = 1, "
+        "defender_team = {} "
+        "WHERE workshop_id = {} "
+        "AND path_point = {}",
+        uint32(defenderTeam),
+        uint32(workshopId),
+        uint32(pathPoint)
+    );
+}
+
+static void DisableWintergraspDefenderMineSnapshot(uint8 workshopId, uint32 pathPoint)
+{
+    if (workshopId >= WG_MAX_WORKSHOP)
+        return;
+
+    if (pathPoint == WG_DEFENDER_WORKSHOP_MINE_INVALID_POINT)
+        return;
+
+    LoginDatabase.PExecute(
+        "UPDATE appdata.wg_defender_mines "
+        "SET active = 0 "
+        "WHERE workshop_id = {} "
+        "AND path_point = {}",
+        uint32(workshopId),
+        uint32(pathPoint)
+    );
+}
+
+static void DisableAllWintergraspDefenderMineSnapshots()
+{
+    LoginDatabase.PExecute(
+        "UPDATE appdata.wg_defender_mines "
+        "SET active = 0"
+    );
+}
+
+static void PrepareWintergraspDefenderMine(BattlefieldWG* wg, Creature* mine)
+{
+    if (!wg || !mine)
+        return;
+
+    TeamId defenderTeam = wg->GetDefenderTeam();
+
+    mine->SetFaction(GetWintergraspDefenderMineFaction(defenderTeam));
+    mine->SetReactState(REACT_PASSIVE);
+    mine->AttackStop();
+    mine->SetRespawnTime(0);
+
+    if (mine->AI())
+        mine->AI()->SetData(WG_DEFENDER_LAND_MINE_DATA_TEAM, uint32(defenderTeam));
+}
+
+static bool IsWintergraspDefenderMineLocationUsed(uint8 workshopId, uint32 pathPoint)
+{
+    for (uint8 slot = 0; slot < WG_DEFENDER_TOTAL_MINE_COUNT; ++slot)
+    {
+        if (WGDefenderWorkshopMineLocations[slot].WorkshopId == workshopId &&
+            WGDefenderWorkshopMineLocations[slot].PathPoint == pathPoint)
+            return true;
+    }
+
+    return false;
+}
+
+static bool IsWintergraspDefenderMinePositionUsed(Position const& pos)
+{
+    for (uint8 slot = 0; slot < WG_DEFENDER_TOTAL_MINE_COUNT; ++slot)
+    {
+        uint8 workshopId = WGDefenderWorkshopMineLocations[slot].WorkshopId;
+        uint32 pathPoint = WGDefenderWorkshopMineLocations[slot].PathPoint;
+
+        if (workshopId >= WG_MAX_WORKSHOP)
+            continue;
+
+        if (pathPoint == WG_DEFENDER_WORKSHOP_MINE_INVALID_POINT)
+            continue;
+
+        WGEliteDemolisherPathData const* path = GetEliteDemolisherPathByWorkshopId(workshopId);
+
+        if (!path || !path->Points || pathPoint >= path->PointCount)
+            continue;
+
+        Position const& oldPos = path->Points[pathPoint];
+
+        float dx = pos.GetPositionX() - oldPos.GetPositionX();
+        float dy = pos.GetPositionY() - oldPos.GetPositionY();
+        float dz = pos.GetPositionZ() - oldPos.GetPositionZ();
+
+        if (((dx * dx) + (dy * dy) + (dz * dz)) <= 1.0f)
+            return true;
+    }
+
+    return false;
+}
+
+struct WGDefenderMineCandidate
+{
+    uint8 WorkshopId;
+    uint32 PathPoint;
+    Position Pos;
+};
+
+static bool SelectRandomWintergraspDefenderMineLocation(uint8& outWorkshopId, uint32& outPathPoint, Position& outPos)
+{
+    std::vector<WGDefenderMineCandidate> candidates;
+
+    for (uint8 workshopId : WGWorkshopSiegeWorkshopIds)
+    {
+        if (workshopId >= WG_MAX_WORKSHOP)
+            continue;
+
+        WGEliteDemolisherPathData const* path = GetEliteDemolisherPathByWorkshopId(workshopId);
+
+        if (!path || !path->Points || path->PointCount < 2)
+            continue;
+
+        // 첫 번째 웨이포인트 0번은 제외하고 1번부터 후보에 포함
+        for (uint32 pathPoint = 1; pathPoint < path->PointCount; ++pathPoint)
+        {
+            Position const& pos = path->Points[pathPoint];
+
+            if (IsWintergraspDefenderMineLocationUsed(workshopId, pathPoint))
+                continue;
+
+            if (IsWintergraspDefenderMinePositionUsed(pos))
+                continue;
+
+            candidates.push_back({ workshopId, pathPoint, pos });
+        }
+    }
+
+    if (candidates.empty())
+        return false;
+
+    WGDefenderMineCandidate const& selected = candidates[urand(0, uint32(candidates.size() - 1))];
+
+    outWorkshopId = selected.WorkshopId;
+    outPathPoint = selected.PathPoint;
+    outPos = selected.Pos;
+
+    return true;
+}
+
+static void RemoveWintergraspDefenderWorkshopMines(BattlefieldWG* wg)
+{
+    if (!wg)
+        return;
+
+	DisableAllWintergraspDefenderMineSnapshots();
+
+    for (uint8 slot = 0; slot < WG_DEFENDER_TOTAL_MINE_COUNT; ++slot)
+    {
+        ObjectGuid& guid = WGDefenderWorkshopMineGuids[slot];
+
+        if (!guid.IsEmpty())
+        {
+            if (Creature* mine = wg->GetCreature(guid))
+            {
+                mine->CombatStop(true);
+                mine->AttackStop();
+                mine->SetTarget(ObjectGuid::Empty);
+                mine->GetMotionMaster()->Clear();
+                mine->RemoveAllAuras();
+                mine->SetRespawnTime(0);
+                mine->RemoveFromWorld();
+            }
+
+            guid.Clear();
+        }
+
+        WGDefenderWorkshopMineRespawnTimers[slot] = 0;
+        WGDefenderWorkshopMineLocations[slot].WorkshopId = WG_MAX_WORKSHOP;
+        WGDefenderWorkshopMineLocations[slot].PathPoint = WG_DEFENDER_WORKSHOP_MINE_INVALID_POINT;
+    }
+}
+
+static void MaintainWintergraspDefenderWorkshopMines(BattlefieldWG* wg)
+{
+    if (!wg)
+        return;
+
+    if (!wg->IsWarTime())
+        return;
+
+    TeamId defenderTeam = wg->GetDefenderTeam();
+
+    if (defenderTeam != TEAM_ALLIANCE && defenderTeam != TEAM_HORDE)
+        return;
+
+    for (uint8 slot = 0; slot < WG_DEFENDER_TOTAL_MINE_COUNT; ++slot)
+    {
+        ObjectGuid& guid = WGDefenderWorkshopMineGuids[slot];
+
+        if (!guid.IsEmpty())
+        {
+            Creature* existingMine = wg->GetCreature(guid);
+
+            if (existingMine && existingMine->IsAlive())
+                continue;
+
+            if (existingMine)
+            {
+                existingMine->CombatStop(true);
+                existingMine->AttackStop();
+                existingMine->SetTarget(ObjectGuid::Empty);
+                existingMine->GetMotionMaster()->Clear();
+                existingMine->RemoveAllAuras();
+                existingMine->SetRespawnTime(0);
+                existingMine->RemoveFromWorld();
+            }
+
+            guid.Clear();
+
+			DisableWintergraspDefenderMineSnapshot(
+				WGDefenderWorkshopMineLocations[slot].WorkshopId,
+				WGDefenderWorkshopMineLocations[slot].PathPoint
+			);
+
+            WGDefenderWorkshopMineLocations[slot].WorkshopId = WG_MAX_WORKSHOP;
+            WGDefenderWorkshopMineLocations[slot].PathPoint = WG_DEFENDER_WORKSHOP_MINE_INVALID_POINT;
+
+            // 폭파/삭제된 슬롯은 즉시 재매설하지 않고 1분 대기
+            WGDefenderWorkshopMineRespawnTimers[slot] = WG_DEFENDER_MINE_RESPAWN_DELAY;
+
+            TC_LOG_INFO(
+                "bg.battlefield",
+                "WG defender mine removed. slot={}, respawnDelayMs={}",
+                uint32(slot),
+                uint32(WG_DEFENDER_MINE_RESPAWN_DELAY)
+            );
+
+            continue;
+        }
+
+        // 비어 있는 슬롯이라도 재설치 대기 시간이 남아 있으면 아직 매설하지 않음
+        if (WGDefenderWorkshopMineRespawnTimers[slot] > 0)
+        {
+            if (WGDefenderWorkshopMineRespawnTimers[slot] > WG_DEFENDER_WORKSHOP_MINE_MAINTAIN_TIMER)
+                WGDefenderWorkshopMineRespawnTimers[slot] -= WG_DEFENDER_WORKSHOP_MINE_MAINTAIN_TIMER;
+            else
+                WGDefenderWorkshopMineRespawnTimers[slot] = 0;
+
+            continue;
+        }
+
+        uint8 workshopId = WG_MAX_WORKSHOP;
+        uint32 pathPoint = WG_DEFENDER_WORKSHOP_MINE_INVALID_POINT;
+        Position minePos;
+
+        if (!SelectRandomWintergraspDefenderMineLocation(workshopId, pathPoint, minePos))
+            continue;
+
+        Creature* mine = wg->SpawnCreature(WG_DEFENDER_LAND_MINE_ENTRY, minePos);
+
+        if (!mine)
+            continue;
+
+        PrepareWintergraspDefenderMine(wg, mine);
+        mine->SetFaction(WintergraspFaction[defenderTeam]);
+
+        guid = mine->GetGUID();
+
+        WGDefenderWorkshopMineLocations[slot].WorkshopId = workshopId;
+        WGDefenderWorkshopMineLocations[slot].PathPoint = pathPoint;
+        WGDefenderWorkshopMineRespawnTimers[slot] = 0;
+
+		SaveWintergraspDefenderMineSnapshot(
+			slot,
+			workshopId,
+			pathPoint,
+			minePos,
+			defenderTeam
+		);
+    }
+}
 
 // *********************************************************
 // *****************WorkShop Data & Element*****************
@@ -1115,6 +1776,84 @@ static int32 GetWintergraspWorkshopGraveyardId(uint8 workshopId)
     return -1;
 }
 
+static char const* GetWintergraspStatusOwnerSide(BattlefieldWG* wg, TeamId teamId)
+{
+    if (!wg)
+        return "attacker";
+
+    if (teamId == wg->GetDefenderTeam())
+        return "defender";
+
+    return "attacker";
+}
+
+static void SaveWintergraspWorkshopOwnerSnapshot(BattlefieldWG* wg, uint8 workshopId, TeamId teamId)
+{
+    if (!wg)
+        return;
+
+    if (teamId != TEAM_ALLIANCE && teamId != TEAM_HORDE)
+        return;
+
+    if (IsWintergraspKeepWorkshop(workshopId))
+        return;
+
+    char const* ownerSide = GetWintergraspStatusOwnerSide(wg, teamId);
+
+    LoginDatabase.PExecute(
+        "UPDATE appdata.wg_workshop_status "
+        "SET owner_side = '{}', "
+        "active = 1, "
+        "updated_at = NOW() "
+        "WHERE workshop_id = {}",
+        ownerSide,
+        uint32(workshopId)
+    );
+
+    TC_LOG_INFO(
+        "bg.battlefield",
+        "WG workshop status snapshot updated. workshopId={}, team={}, ownerSide={}",
+        uint32(workshopId),
+        uint32(teamId),
+        ownerSide
+    );
+}
+
+static void SaveWintergraspWorkshopGraveyardOwnerSnapshot(BattlefieldWG* wg, uint8 workshopId, TeamId teamId)
+{
+    if (!wg)
+        return;
+
+    if (teamId != TEAM_ALLIANCE && teamId != TEAM_HORDE)
+        return;
+
+    int32 graveyardId = GetWintergraspWorkshopGraveyardId(workshopId);
+
+    if (graveyardId < 0)
+        return;
+
+    char const* ownerSide = GetWintergraspStatusOwnerSide(wg, teamId);
+
+    LoginDatabase.PExecute(
+        "UPDATE appdata.wg_graveyard_status "
+        "SET owner_side = '{}', "
+        "active = 1, "
+        "updated_at = NOW() "
+        "WHERE graveyard_id = {}",
+        ownerSide,
+        uint32(graveyardId)
+    );
+
+    TC_LOG_INFO(
+        "bg.battlefield",
+        "WG graveyard status snapshot updated. workshopId={}, graveyardId={}, team={}, ownerSide={}",
+        uint32(workshopId),
+        uint32(graveyardId),
+        uint32(teamId),
+        ownerSide
+    );
+}
+
 static void GiveWintergraspWorkshopGraveyardControl(BattlefieldWG* wg, uint8 workshopId, TeamId teamId)
 {
     if (!wg)
@@ -1126,6 +1865,8 @@ static void GiveWintergraspWorkshopGraveyardControl(BattlefieldWG* wg, uint8 wor
 
     if (BfGraveyard* graveyard = wg->GetGraveyardById(uint8(graveyardId)))
         graveyard->GiveControlTo(teamId);
+
+    SaveWintergraspWorkshopGraveyardOwnerSnapshot(wg, workshopId, teamId);
 }
 
 BattlefieldWG::~BattlefieldWG()
@@ -1144,6 +1885,16 @@ bool BattlefieldWG::SetupBattlefield()
     m_ZoneId = AREA_WINTERGRASP;
     m_MapId = BATTLEFIELD_WG_MAPID;
     m_Map = sMapMgr->FindMap(m_MapId, 0);
+
+	WGDefenderWorkshopMineTimer = 0;
+
+	for (uint8 slot = 0; slot < WG_DEFENDER_TOTAL_MINE_COUNT; ++slot)
+	{
+		WGDefenderWorkshopMineGuids[slot].Clear();
+		WGDefenderWorkshopMineRespawnTimers[slot] = 0;
+		WGDefenderWorkshopMineLocations[slot].WorkshopId = WG_MAX_WORKSHOP;
+		WGDefenderWorkshopMineLocations[slot].PathPoint = WG_DEFENDER_WORKSHOP_MINE_INVALID_POINT;
+	}
 
     InitStalker(BATTLEFIELD_WG_NPC_STALKER, WintergraspStalkerPos);
 
@@ -1165,6 +1916,8 @@ bool BattlefieldWG::SetupBattlefield()
 	WGWorkshopSiegeWaveTimer = 0;
 	WGWorkshopSiegeWaveEnabled = false;
 	WGWorkshopSiegeFirstWaveAnnounced = false;
+	WGWorkshopSiegeSkipFirstUpdate = false;
+	WGWorkshopSiegeNextWorkshopIndex = 0;
 
 	for (uint8 i = 0; i < WG_MAX_WORKSHOP; ++i)
 		WGWorkshopSiegeGuids[i].clear();
@@ -1384,7 +2137,11 @@ bool BattlefieldWG::Update(uint32 diff)
 
 	if (WGWorkshopSiegeWaveEnabled && IsWarTime())
 	{
-		if (WGWorkshopSiegeWaveTimer <= diff)
+		if (WGWorkshopSiegeSkipFirstUpdate)
+		{
+			WGWorkshopSiegeSkipFirstUpdate = false;
+		}
+		else if (WGWorkshopSiegeWaveTimer <= diff)
 		{
 			WGWorkshopSiegeWaveTimer = WG_WORKSHOP_SIEGE_INTERVAL;
 			SpawnSingleEliteDemolisher();
@@ -1395,6 +2152,18 @@ bool BattlefieldWG::Update(uint32 diff)
 		}
 	}
 
+	if (IsWarTime())
+	{
+		if (WGDefenderWorkshopMineTimer <= diff)
+		{
+			WGDefenderWorkshopMineTimer = WG_DEFENDER_WORKSHOP_MINE_MAINTAIN_TIMER;
+			MaintainWintergraspDefenderWorkshopMines(this);
+		}
+		else
+		{
+			WGDefenderWorkshopMineTimer -= diff;
+		}
+	}
 
     return m_return;
 }
@@ -1402,13 +2171,17 @@ bool BattlefieldWG::Update(uint32 diff)
 void BattlefieldWG::OnBattleStart()
 {
 	HideTrashMobs();
+	RemoveSingleEliteDemolisher();
+	RemoveWintergraspDefenderWorkshopMines(this);
+
+	WGDefenderWorkshopMineTimer = WG_DEFENDER_WORKSHOP_MINE_MAINTAIN_TIMER;
+	MaintainWintergraspDefenderWorkshopMines(this);
 
 	WGWorkshopSiegeWaveEnabled = true;
 	WGWorkshopSiegeWaveTimer = WG_WORKSHOP_SIEGE_FIRST_DELAY;
 	WGWorkshopSiegeFirstWaveAnnounced = false;
-
-	for (uint8 i = 0; i < WG_MAX_WORKSHOP; ++i)
-		WGWorkshopSiegeGuids[i].clear();
+	WGWorkshopSiegeSkipFirstUpdate = true;
+	WGWorkshopSiegeNextWorkshopIndex = 0;
 
 	SendWarning(BATTLEFIELD_WG_TEXT_SIEGE_WAVE_LEADY);
 
@@ -1450,6 +2223,8 @@ void BattlefieldWG::OnBattleStart()
     for (WintergraspWorkshop* workshop : Workshops)
         workshop->UpdateGraveyardAndWorkshop();
 
+	SpawnWintergraspWorkshopBanners(this);
+
     for (uint8 team = 0; team < PVP_TEAMS_COUNT; ++team)
     {
         for (auto itr = m_players[team].begin(); itr != m_players[team].end(); ++itr)
@@ -1474,6 +2249,7 @@ void BattlefieldWG::OnBattleStart()
 
 	uint32 realmId = sConfigMgr->GetIntDefault("RealmID", 0);
 	if (realmId == 1)
+	{
 		SendWGDiscordEvent(
 			"battle_start",
 			"⚔️ 겨울손아귀 전투 시작",
@@ -1483,7 +2259,19 @@ void BattlefieldWG::OnBattleStart()
 			5
 		);
 
+		SendFcmCategory(
+			3,
+			"outdoor_pvp",
+			"[겨울손아귀] 전투 시작",
+			Trinity::StringFormat("공격팀: {} 방어팀: {} 겨울손아귀 전투가 시작되었습니다.", 
+			GetWGTeamName(GetAttackerTeam()), 
+			GetWGTeamName(GetDefenderTeam())),
+			0
+		);
+	}
+
     SendWarning(BATTLEFIELD_WG_TEXT_START_BATTLE);
+	SaveWintergraspBattleStatusSnapshot(this, true, "battle_start");
 }
 
 void BattlefieldWG::UpdateCounterVehicle(bool init)
@@ -1530,6 +2318,8 @@ void BattlefieldWG::OnBattleEnd(bool endByTimer)
 {
 	ClearWGResurrectQueue();
 	RemoveSingleEliteDemolisher();
+	RemoveWintergraspDefenderWorkshopMines(this);
+	RemoveWintergraspWorkshopBanners(this);
 
     // Remove relic
     if (!m_titansRelicGUID.IsEmpty())
@@ -1538,9 +2328,10 @@ void BattlefieldWG::OnBattleEnd(bool endByTimer)
     m_titansRelicGUID.Clear();
 
     // change collision wall state closed
-    for (BfWGGameObjectBuilding* building : BuildingsInZone)
+     for (BfWGGameObjectBuilding* building : BuildingsInZone)
     {
-        building->RebuildGate();
+        building->Rebuild();
+        building->UpdateTurretAttack(false);
     }
 
     // successful defense
@@ -1579,13 +2370,23 @@ void BattlefieldWG::OnBattleEnd(bool endByTimer)
 		if (!workshop)
 			continue;
 
-		UpdateWintergraspControlledGuardGroup(this, WG_CONTROL_TYPE_WORKSHOP, workshop->GetId(), workshop->GetTeamControl());
+		// 전투 종료 후 새 방어팀/공격팀 기준으로 작업장 월드스테이트를 다시 갱신한다.
+		// 내부 공성장: 새 방어팀 소유
+		// 외부 공성장: 새 공격팀 소유
+		workshop->UpdateGraveyardAndWorkshop();
+
+		UpdateWintergraspControlledGuardGroup(
+			this,
+			WG_CONTROL_TYPE_WORKSHOP,
+			workshop->GetId(),
+			workshop->GetTeamControl()
+		);
 	}
 
-    // Update portals
-    UpdateDefenderPortals();
+	// 전투 종료 후 새 방어팀 기준으로 포탈 갱신
+	UpdateDefenderPortals();
 
-    // Saving data
+	// Saving data
     for (BfWGGameObjectBuilding* building : BuildingsInZone)
         building->Save();
 
@@ -1647,6 +2448,15 @@ void BattlefieldWG::OnBattleEnd(bool endByTimer)
         SendWarning(GetDefenderTeam() == TEAM_ALLIANCE ? BATTLEFIELD_WG_TEXT_FORTRESS_CAPTURE_ALLIANCE : BATTLEFIELD_WG_TEXT_FORTRESS_CAPTURE_HORDE);
     else // defend alli/horde
         SendWarning(GetDefenderTeam() == TEAM_ALLIANCE ? BATTLEFIELD_WG_TEXT_FORTRESS_DEFEND_ALLIANCE : BATTLEFIELD_WG_TEXT_FORTRESS_DEFEND_HORDE);
+
+		// 전투 종료 시 M키 지도 / 월드스테이트 강제 리프레시
+	SendInitWorldStatesToAll();
+
+	SaveWintergraspBattleStatusSnapshot(
+		this,
+		false,
+		endByTimer ? "battle_defended" : "battle_captured"
+	);
 }
 
 // *******************************************************
@@ -2146,34 +2956,47 @@ void BattlefieldWG::ProcessEvent(WorldObject* obj, uint32 eventId)
     if (!obj || !IsWarTime())
         return;
 
-    // We handle only gameobjects here
     GameObject* go = obj->ToGameObject();
     if (!go)
         return;
 
-    // On click on titan relic
     if (go->GetEntry() == GO_WINTERGRASP_TITAN_S_RELIC)
     {
         if (CanInteractWithRelic())
             EndBattle(false);
         else if (GameObject* relic = GetRelic())
             relic->SetRespawnTime(RESPAWN_IMMEDIATELY);
+
+        return;
     }
 
-    // if destroy or damage event, search the wall/tower and update worldstate/send warning message
     for (BfWGGameObjectBuilding* building : BuildingsInZone)
     {
-        if (go->GetGUID() == building->GetGUID())
+        if (!building)
+            continue;
+
+        if (go->GetGUID() != building->GetGUID())
+            continue;
+
+        GameObject* buildingGo = GetGameObject(building->GetGUID());
+        if (!buildingGo)
+            return;
+
+        uint32 damagedEvent = buildingGo->GetGOInfo()->building.damagedEvent;
+        uint32 destroyedEvent = buildingGo->GetGOInfo()->building.destroyedEvent;
+
+        if (damagedEvent && damagedEvent == eventId)
         {
-            if (GameObject* buildingGo = GetGameObject(building->GetGUID()))
-            {
-                if (buildingGo->GetGOInfo()->building.damagedEvent == eventId)
-                    building->Damaged();
-                else if (buildingGo->GetGOInfo()->building.destroyedEvent == eventId)
-                    building->Destroyed();
-                break;
-            }
+            building->Damaged();
+            return;
         }
+
+        if (destroyedEvent && destroyedEvent == eventId)
+        {
+            building->Destroyed();
+            return;
+        }
+        return;
     }
 }
 
@@ -2425,21 +3248,15 @@ void BfWGGameObjectBuilding::Rebuild()
             // Update worldstate
             _state = WintergraspGameObjectState(BATTLEFIELD_WG_OBJECTSTATE_ALLIANCE_INTACT - (_teamControl * 3));
             _wg->SendUpdateWorldState(_worldState, _state);
+			UpdateWintergraspStructureDamageSnapshot(
+				_worldState,
+				_buildGUID.GetEntry(),
+				_wg->GetDefenderTeam(),
+				0
+			);
         }
         UpdateCreatureAndGo();
         build->SetFaction(WintergraspFaction[_teamControl]);
-    }
-}
-
-void BfWGGameObjectBuilding::RebuildGate()
-{
-    if (GameObject* build = _wg->GetGameObject(_buildGUID))
-    {
-        if (build->IsDestructibleBuilding() && build->GetEntry() == GO_WINTERGRASP_VAULT_GATE)
-        {
-            if (GameObject* go = build->FindNearestGameObject(GO_WINTERGRASP_KEEP_COLLISION_WALL, 50.0f))
-                go->SetGoState(GO_STATE_READY); //not GO_STATE_ACTIVE
-        }
     }
 }
 
@@ -2448,6 +3265,13 @@ void BfWGGameObjectBuilding::Damaged()
     // Update worldstate
     _state = WintergraspGameObjectState(BATTLEFIELD_WG_OBJECTSTATE_ALLIANCE_DAMAGE - (_teamControl * 3));
     _wg->SendUpdateWorldState(_worldState, _state);
+
+	UpdateWintergraspStructureDamageSnapshot(
+		_worldState,
+		_buildGUID.GetEntry(),
+		_wg->GetDefenderTeam(),
+		1
+	);
 
 	uint32 realmId = sConfigMgr->GetIntDefault("RealmID", 0);
 	if (realmId == 1)
@@ -2460,8 +3284,8 @@ void BfWGGameObjectBuilding::Damaged()
 		);
 
     // Send warning message
-    if (_staticTowerInfo)
-        _wg->SendWarning(_staticTowerInfo->TextIds.Damaged);
+	if (_staticTowerInfo && _staticTowerInfo->TextIds.Damaged)
+    _wg->SendWarning(_staticTowerInfo->TextIds.Damaged);
 
     for (ObjectGuid guid : m_CreatureTopList[_wg->GetAttackerTeam()])
         if (Creature* creature = _wg->GetCreature(guid))
@@ -2483,6 +3307,13 @@ void BfWGGameObjectBuilding::Destroyed()
     _state = WintergraspGameObjectState(BATTLEFIELD_WG_OBJECTSTATE_ALLIANCE_DESTROY - (_teamControl * 3));
     _wg->SendUpdateWorldState(_worldState, _state);
 
+	UpdateWintergraspStructureDamageSnapshot(
+		_worldState,
+		_buildGUID.GetEntry(),
+		_wg->GetDefenderTeam(),
+		2
+	);
+
 	uint32 realmId = sConfigMgr->GetIntDefault("RealmID", 0);
 	if (realmId == 1)
 		SendWGDiscordEvent(
@@ -2494,8 +3325,8 @@ void BfWGGameObjectBuilding::Destroyed()
 		);
 
     // Warn players
-    if (_staticTowerInfo)
-        _wg->SendWarning(_staticTowerInfo->TextIds.Destroyed);
+    if (_staticTowerInfo && _staticTowerInfo->TextIds.Destroyed)
+    _wg->SendWarning(_staticTowerInfo->TextIds.Destroyed);
 
 	for (uint8 team = 0; team < PVP_TEAMS_COUNT; ++team)
 	{
@@ -2559,6 +3390,7 @@ void BfWGGameObjectBuilding::Init(GameObject* go)
 
     // GameObject associated to object
     _buildGUID = go->GetGUID();
+	_staticTowerInfo = GetWintergraspBuildingWarningInfo(go->GetEntry());
 
     switch (_type)
     {
@@ -2650,7 +3482,6 @@ void BfWGGameObjectBuilding::Init(GameObject* go)
     if (towerId >= 0)
     {
         ASSERT(towerId < WG_MAX_TOWER);
-        _staticTowerInfo = &TowerData[towerId];
 
         // Spawn Turret bottom
         for (Position const& turretPos : TowerCannon[towerId].TowerCannonBottom)
@@ -2864,6 +3695,12 @@ void WintergraspWorkshop::GiveControlTo(TeamId teamId, bool init /*= false*/)
 
             _teamControl = teamId;
 
+			SaveWintergraspWorkshopOwnerSnapshot(
+				_wg,
+				_staticInfo->WorkshopId,
+				teamId
+			);
+
 			if (!init && !IsWintergraspKeepWorkshop(_staticInfo->WorkshopId))
 			{
 				uint32 realmId = sConfigMgr->GetIntDefault("RealmID", 0);
@@ -2892,6 +3729,12 @@ void WintergraspWorkshop::GiveControlTo(TeamId teamId, bool init /*= false*/)
             GiveWintergraspWorkshopGraveyardControl(_wg, _staticInfo->WorkshopId, TEAM_HORDE);
 
             _teamControl = teamId;
+
+			SaveWintergraspWorkshopOwnerSnapshot(
+				_wg,
+				_staticInfo->WorkshopId,
+				teamId
+			);
 
 			if (!init && !IsWintergraspKeepWorkshop(_staticInfo->WorkshopId))
 			{
@@ -3042,9 +3885,12 @@ public:
             me->SetFacingTo(GetAngleToTarget(target));
         }
 
+        // 포탑 AI용 대상 초기화
+        // 공성전차 AI 변수는 여기 넣으면 안 된다.
         void ClearCurrentTarget()
         {
             CurrentTargetGuid = ObjectGuid::Empty;
+
             me->AttackStop();
             me->SetTarget(ObjectGuid::Empty);
         }
@@ -3168,7 +4014,6 @@ public:
             if (FireTimer <= diff)
             {
                 FireTimer = WG_TOWER_CANNON_FIRE_TIMER;
-
                 DoCast(target, SPELL_WG_TOWER_CANNON_FIRE, true);
             }
             else
@@ -3288,25 +4133,37 @@ void BattlefieldWG::SpawnSingleEliteDemolisher()
         if (!targetWorkshop)
             continue;
 
-        // 공격팀이 가진 외부 작업장에서만 생산한다.
-        // 방어팀에게 넘어간 작업장은 기존 전차는 유지하되, 새 생산만 중지한다.
-        if (targetWorkshop->GetTeamControl() != GetAttackerTeam())
-            continue;
+        std::vector<ObjectGuid>& siegeList = WGWorkshopSiegeGuids[workshopId];
+
+       // 방어팀에게 뺏긴 작업장은 새 생산만 중지한다.
+	// 이미 생산된 공성차는 그대로 둔다.
+	// 따라서 공격팀 보유 작업장이 4곳이면 최대 20대,
+	// 3곳이면 새 생산 한도는 15대,
+	// 2곳이면 새 생산 한도는 10대,
+	// 1곳이면 새 생산 한도는 5대가 된다.
+	if (targetWorkshop->GetTeamControl() != GetAttackerTeam())
+		continue;
 
         WGEliteDemolisherPathData const* path = GetEliteDemolisherPathByWorkshopId(workshopId);
         if (!path || !path->Points || path->PointCount < 2)
             continue;
 
-        std::vector<ObjectGuid>& siegeList = WGWorkshopSiegeGuids[workshopId];
-
         for (auto itr = siegeList.begin(); itr != siegeList.end();)
         {
             Creature* creature = GetCreature(*itr);
 
-            if (!creature || !creature->IsAlive())
+            // 중요:
+            // creature == nullptr 은 여기서 지우지 않는다.
+            // 지우면 실제 필드에 남아 있는데 카운트만 줄어들어 무한 생산된다.
+            if (creature && !creature->IsAlive())
             {
-                if (creature)
-                    creature->DespawnOrUnsummon();
+                creature->CombatStop(true);
+                creature->AttackStop();
+                creature->SetTarget(ObjectGuid::Empty);
+                creature->GetMotionMaster()->Clear();
+                creature->RemoveAllAuras();
+                creature->SetRespawnTime(0);
+                creature->RemoveFromWorld();
 
                 itr = siegeList.erase(itr);
                 continue;
@@ -3315,6 +4172,7 @@ void BattlefieldWG::SpawnSingleEliteDemolisher()
             ++itr;
         }
 
+        // 작업장별 최대 5대 제한
         if (siegeList.size() >= WG_WORKSHOP_SIEGE_MAX_ALIVE)
             continue;
 
@@ -3340,18 +4198,19 @@ void BattlefieldWG::SpawnSingleEliteDemolisher()
 
         TC_LOG_INFO(
             "bg.battlefield",
-            "WG workshop siege demolisher spawned. workshopId={}, attackerTeam={}, faction={}, guid={}",
+            "WG workshop siege demolisher spawned. workshopId={}, attackerTeam={}, guid={}, aliveInWorkshop={}, maxInWorkshop={}",
             uint32(workshopId),
             uint32(GetAttackerTeam()),
-            elite->GetFaction(),
-            elite->GetGUID().ToString()
+            elite->GetGUID().ToString(),
+            uint32(siegeList.size()),
+            uint32(WG_WORKSHOP_SIEGE_MAX_ALIVE)
         );
     }
 
     if (spawnedCount > 0 && !WGWorkshopSiegeFirstWaveAnnounced)
     {
         WGWorkshopSiegeFirstWaveAnnounced = true;
-		SendWarning(BATTLEFIELD_WG_TEXT_SIEGE_WAVE_START);
+        SendWarning(BATTLEFIELD_WG_TEXT_SIEGE_WAVE_START);
     }
 }
 
@@ -3361,17 +4220,123 @@ void BattlefieldWG::RemoveSingleEliteDemolisher()
     WGWorkshopSiegeWaveTimer = 0;
     WGWorkshopSiegeFirstWaveAnnounced = false;
 
+    // 1) 추적 중인 공성차 제거
     for (uint8 i = 0; i < WG_MAX_WORKSHOP; ++i)
     {
-        for (ObjectGuid const& guid : WGWorkshopSiegeGuids[i])
+        std::vector<ObjectGuid>& siegeList = WGWorkshopSiegeGuids[i];
+
+        for (ObjectGuid const& guid : siegeList)
         {
             if (Creature* creature = GetCreature(guid))
-                creature->DespawnOrUnsummon();
+            {
+                creature->CombatStop(true);
+                creature->AttackStop();
+                creature->SetTarget(ObjectGuid::Empty);
+                creature->GetMotionMaster()->Clear();
+                creature->RemoveAllAuras();
+                creature->SetRespawnTime(0);
+                creature->RemoveFromWorld();
+            }
         }
 
-        WGWorkshopSiegeGuids[i].clear();
+        siegeList.clear();
     }
+
+    // 2) GUID 추적에서 빠진 필드 공성차도 제거
+    GameObject* searchAnchor = nullptr;
+
+    for (BfWGGameObjectBuilding* building : BuildingsInZone)
+    {
+        if (!building)
+            continue;
+
+        if (GameObject* go = GetGameObject(building->GetGUID()))
+        {
+            searchAnchor = go;
+            break;
+        }
+    }
+
+    if (searchAnchor)
+    {
+        std::list<Creature*> creatures;
+
+        searchAnchor->GetCreatureListWithEntryInGrid(
+            creatures,
+            NPC_WG_CUSTOM_SIEGE_ELITE_DEMOLISHER,
+            3000.0f
+        );
+
+        for (Creature* creature : creatures)
+        {
+            if (!creature)
+                continue;
+
+            creature->CombatStop(true);
+            creature->AttackStop();
+            creature->SetTarget(ObjectGuid::Empty);
+            creature->GetMotionMaster()->Clear();
+            creature->RemoveAllAuras();
+            creature->SetRespawnTime(0);
+            creature->RemoveFromWorld();
+        }
+    }
+
+    for (uint8 i = 0; i < WG_MAX_WORKSHOP; ++i)
+        WGWorkshopSiegeGuids[i].clear();
 }
+
+// ------------------------------------------------------------
+// NE 정비창 기준 벽 공격 웨이포인트
+// 배열은 0부터 시작한다.
+// 5번째 좌표에서 공격하려면 4를 넣는다.
+// 9번째 좌표에서 공격하려면 8을 넣는다.
+// ------------------------------------------------------------
+
+static constexpr float WG_ELITE_DEMOLISHER_FIXED_OBJECT_FIND_RANGE = 120.0f;
+
+// 가라앉은 경기장
+static constexpr uint32 WG_ELITE_DEMOLISHER_NE_STRUCTURE_PATH_POINT_1 = 4;
+static constexpr uint32 WG_ELITE_DEMOLISHER_NE_STRUCTURE_PATH_POINT_2 = 8;
+
+// 파괴된 신전
+static constexpr uint32 WG_ELITE_DEMOLISHER_BROKEN_TEMPLE_STRUCTURE_PATH_POINT_1 = 5;
+static constexpr uint32 WG_ELITE_DEMOLISHER_BROKEN_TEMPLE_STRUCTURE_PATH_POINT_2 = 9;
+
+// 서부불꽃
+static constexpr uint32 WG_ELITE_DEMOLISHER_WESTSPARK_STRUCTURE_PATH_POINT_1 = 14;
+static constexpr uint32 WG_ELITE_DEMOLISHER_WESTSPARK_STRUCTURE_PATH_POINT_2 = 15;
+
+// 동부불꽃
+static constexpr uint32 WG_ELITE_DEMOLISHER_EASTSPARK_STRUCTURE_PATH_POINT_1 = 9;
+static constexpr uint32 WG_ELITE_DEMOLISHER_EASTSPARK_STRUCTURE_PATH_POINT_2 = 10;
+
+struct WGEliteDemolisherFixedStructureStageData
+{
+    uint8 WorkshopId;
+    uint32 PathPoint;
+    uint32 Entries[8];
+};
+
+static WGEliteDemolisherFixedStructureStageData const WGEliteDemolisherFixedStructureStages[] =
+{
+    // 가라앉은 경기장
+    { BATTLEFIELD_WG_WORKSHOP_NE, WG_ELITE_DEMOLISHER_NE_STRUCTURE_PATH_POINT_1, { 191799, 0, 0, 0, 0, 0, 0, 0 } },
+    { BATTLEFIELD_WG_WORKSHOP_NE, WG_ELITE_DEMOLISHER_NE_STRUCTURE_PATH_POINT_2, { 191798, 0, 0, 0, 0, 0, 0, 0 } },
+
+    // 파괴된 신전
+    { BATTLEFIELD_WG_WORKSHOP_NW, WG_ELITE_DEMOLISHER_BROKEN_TEMPLE_STRUCTURE_PATH_POINT_1, { 190219, 0, 0, 0, 0, 0, 0, 0 } },
+    { BATTLEFIELD_WG_WORKSHOP_NW, WG_ELITE_DEMOLISHER_BROKEN_TEMPLE_STRUCTURE_PATH_POINT_2, { 191797, 0, 0, 0, 0, 0, 0, 0 } },
+
+    // 서부불꽃
+    { BATTLEFIELD_WG_WORKSHOP_SW, WG_ELITE_DEMOLISHER_WESTSPARK_STRUCTURE_PATH_POINT_1, { 190375, 0, 0, 0, 0, 0, 0, 0 } },
+    { BATTLEFIELD_WG_WORKSHOP_SW, WG_ELITE_DEMOLISHER_WESTSPARK_STRUCTURE_PATH_POINT_2, { 191805, 0, 0, 0, 0, 0, 0, 0 } },
+
+    // 동부불꽃
+    { BATTLEFIELD_WG_WORKSHOP_SE, WG_ELITE_DEMOLISHER_EASTSPARK_STRUCTURE_PATH_POINT_1, { 190375, 0, 0, 0, 0, 0, 0, 0 } },
+    { BATTLEFIELD_WG_WORKSHOP_SE, WG_ELITE_DEMOLISHER_EASTSPARK_STRUCTURE_PATH_POINT_2, { 191805, 0, 0, 0, 0, 0, 0, 0 } },
+};
+
 
 class npc_wg_elite_demolisher_ai : public CreatureScript
 {
@@ -3382,20 +4347,65 @@ public:
     {
         npc_wg_elite_demolisher_aiAI(Creature* creature) : ScriptedAI(creature) { }
 
+        // ------------------------------------------------------------
+        // 기본 타이머
+        // ------------------------------------------------------------
         uint32 SearchTimer = WG_ELITE_DEMOLISHER_SEARCH_TIMER;
         uint32 RangedSpellTimer = 1000;
         uint32 MeleeSpellTimer = 1000;
 
+        // ------------------------------------------------------------
+        // 현재 공격 대상
+        // CurrentTargetGuid: 유닛 대상
+        // CurrentGameObjectTargetGuid: 성벽 오브젝트 대상
+        // CurrentTargetType: 현재 대상 종류
+        // ------------------------------------------------------------
         ObjectGuid CurrentTargetGuid = ObjectGuid::Empty;
         ObjectGuid CurrentGameObjectTargetGuid = ObjectGuid::Empty;
         uint8 CurrentTargetType = WG_ELITE_TARGET_NONE;
 
+        // ------------------------------------------------------------
+        // 웨이포인트 이동 정보
+        // ------------------------------------------------------------
         WGEliteDemolisherPathData const* CurrentPath = nullptr;
         uint32 CurrentPathPoint = 0;
         bool IsMovingPath = false;
         bool PathFinished = false;
+
+        // ------------------------------------------------------------
+        // 어느 정비창에서 나온 공성전차인지 저장
+        // ------------------------------------------------------------
         uint8 WorkshopId = BATTLEFIELD_WG_WORKSHOP_NE;
 
+        // ------------------------------------------------------------
+        // 고정 성벽 공격 스테이지 정보
+        // ------------------------------------------------------------
+        bool FixedStructureStageActive = false;
+        uint8 FixedStructureEntryIndex = 0;
+        uint32 ActiveFixedStructureStagePathPoint = 0;
+
+        uint32 FinishedFixedStructureStagePathPoints[8] = {};
+        uint8 FinishedFixedStructureStageCount = 0;
+
+        // ------------------------------------------------------------
+        // 유닛 시전 실패 임시 제외 처리
+        // 같은 유닛에게 원거리 시전 조건이 3번 실패하면 10초 동안 제외한다.
+        // ------------------------------------------------------------
+        static constexpr uint8 WG_ELITE_DEMOLISHER_CAST_FAIL_LIMIT = 3;
+        static constexpr uint32 WG_ELITE_DEMOLISHER_IGNORE_TARGET_TIME = 10 * IN_MILLISECONDS;
+
+        struct WGEliteIgnoredUnitTarget
+        {
+            ObjectGuid Guid;
+            uint32 Timer;
+        };
+
+        std::vector<WGEliteIgnoredUnitTarget> IgnoredUnitTargets;
+        uint8 CurrentUnitCastFailCount = 0;
+
+        // ------------------------------------------------------------
+        // 외부에서 정비창 ID를 넣어주는 부분
+        // ------------------------------------------------------------
         void SetData(uint32 type, uint32 data) override
         {
             if (type != WG_ELITE_DEMOLISHER_DATA_WORKSHOP_ID)
@@ -3404,6 +4414,9 @@ public:
             WorkshopId = uint8(data);
         }
 
+        // ------------------------------------------------------------
+        // 겨울손아귀 전투 중인지 확인
+        // ------------------------------------------------------------
         bool IsWintergraspWarTime() const
         {
             Battlefield* wintergrasp = sBattlefieldMgr->GetBattlefieldByBattleId(BATTLEFIELD_BATTLEID_WG);
@@ -3413,6 +4426,9 @@ public:
             return wintergrasp->IsWarTime();
         }
 
+        // ------------------------------------------------------------
+        // 겨울손아귀 차량 entry 확인
+        // ------------------------------------------------------------
         static bool IsWintergraspVehicleEntry(uint32 entry)
         {
             switch (entry)
@@ -3430,6 +4446,9 @@ public:
             return false;
         }
 
+        // ------------------------------------------------------------
+        // 유닛의 겨울손아귀 팀 확인
+        // ------------------------------------------------------------
         TeamId GetWintergraspUnitTeam(Unit* unit) const
         {
             if (!unit)
@@ -3471,24 +4490,96 @@ public:
             return TEAM_NEUTRAL;
         }
 
-        bool IsEnemyWintergraspUnit(Unit* target)
+        // ------------------------------------------------------------
+        // 유닛 시야 검사
+        // ------------------------------------------------------------
+        bool CanSeeUnitForSpell(Unit* target) const
         {
             if (!target)
                 return false;
 
-            if (target == me)
+            if (!me->IsWithinLOSInMap(target))
                 return false;
 
-            TeamId myTeam = GetWintergraspUnitTeam(me);
-            TeamId targetTeam = GetWintergraspUnitTeam(target);
+            float targetX = target->GetPositionX();
+            float targetY = target->GetPositionY();
+            float targetMiddleZ = target->GetPositionZ() + (target->GetCollisionHeight() * 0.5f);
+            float targetTopZ = target->GetPositionZ() + target->GetCollisionHeight();
 
-            if ((myTeam == TEAM_ALLIANCE || myTeam == TEAM_HORDE) &&
-                (targetTeam == TEAM_ALLIANCE || targetTeam == TEAM_HORDE))
-                return myTeam != targetTeam;
+            if (!me->IsWithinLOS(targetX, targetY, targetMiddleZ))
+                return false;
 
-            return me->IsValidAttackTarget(target);
+            if (!me->IsWithinLOS(targetX, targetY, targetTopZ))
+                return false;
+
+            return true;
         }
 
+        // ------------------------------------------------------------
+		// 공성전차가 감지하면 안 되는 유저 상태
+		// - 은신
+		// - 죽은척하기
+		// ------------------------------------------------------------
+		bool IsHiddenOrFeignDeathUnit(Unit* target) const
+		{
+			if (!target)
+				return true;
+
+			if (target->HasAuraType(SPELL_AURA_MOD_STEALTH))
+				return true;
+
+			if (target->HasAuraType(SPELL_AURA_FEIGN_DEATH))
+				return true;
+
+			return false;
+}
+
+        // ------------------------------------------------------------
+		// 적 유닛인지 확인
+		// - 겨울손아귀 팀이 확실하면 팀 기준으로 판단
+		// - 팀 판정이 안 되는 필드 NPC는 실제 hostile/reaction 기준으로 판단
+		// ------------------------------------------------------------
+		bool IsEnemyWintergraspUnit(Unit* target)
+		{
+			if (!target)
+				return false;
+
+			if (target == me)
+				return false;
+
+			TeamId myTeam = GetWintergraspUnitTeam(me);
+			TeamId targetTeam = GetWintergraspUnitTeam(target);
+
+			if ((myTeam == TEAM_ALLIANCE || myTeam == TEAM_HORDE) &&
+				(targetTeam == TEAM_ALLIANCE || targetTeam == TEAM_HORDE))
+				return myTeam != targetTeam;
+
+			if (me->IsValidAttackTarget(target))
+				return true;
+
+			if (Creature* creature = target->ToCreature())
+			{
+				if (creature->GetEntry() == NPC_WINTERGRASP_TOWER_CANNON)
+					return false;
+
+				if (creature->GetEntry() == 7527)
+					return false;
+
+				if (me->IsHostileTo(creature) || creature->IsHostileTo(me))
+					return true;
+
+				if (me->GetReactionTo(creature) <= REP_HOSTILE || creature->GetReactionTo(me) <= REP_HOSTILE)
+					return true;
+			}
+
+			return false;
+		}
+
+        // ------------------------------------------------------------
+        // NPC 공격 가능 상태로 정리
+        // 차량/NPC가 NPC 공격을 못 받는 플래그가 있으면 제거한다.
+        // 포탑은 CanAttackTarget()에서 이미 제외된다.
+        // ------------------------------------------------------------
         void PrepareTargetCreatureForNpcAttack(Unit* target)
         {
             if (!target)
@@ -3501,18 +4592,15 @@ public:
             creature->RemoveUnitFlag(UNIT_FLAG_NON_ATTACKABLE);
             creature->RemoveUnitFlag(UNIT_FLAG_PACIFIED);
             creature->RemoveUnitFlag(UNIT_FLAG_IMMUNE_TO_NPC);
-
-            if (creature->GetEntry() == NPC_WINTERGRASP_TOWER_CANNON)
-            {
-                TeamId myTeam = GetWintergraspUnitTeam(me);
-
-                if (myTeam == TEAM_ALLIANCE)
-                    creature->SetFaction(WintergraspFaction[TEAM_HORDE]);
-                else if (myTeam == TEAM_HORDE)
-                    creature->SetFaction(WintergraspFaction[TEAM_ALLIANCE]);
-            }
         }
 
+        // ------------------------------------------------------------
+        // 유닛 공격 우선순위
+        // 1순위: 차량
+        // 2순위: 유저
+        // 3순위: 일반 NPC
+        // 포탑은 대상에서 제외하므로 여기서 처리하지 않는다.
+        // ------------------------------------------------------------
         uint32 GetTargetPriority(Unit* target) const
         {
             if (!target)
@@ -3520,21 +4608,21 @@ public:
 
             if (Creature* creature = target->ToCreature())
             {
-                if (creature->GetEntry() == NPC_WINTERGRASP_TOWER_CANNON)
-                    return 1;
-
                 if (IsWintergraspVehicleEntry(creature->GetEntry()))
-                    return 2;
+                    return 1;
 
                 return 3;
             }
 
             if (target->ToPlayer())
-                return 4;
+                return 2;
 
             return 5;
         }
 
+        // ------------------------------------------------------------
+        // 바라볼 각도 계산
+        // ------------------------------------------------------------
         float GetAngleToTarget(Unit* target) const
         {
             return std::atan2(
@@ -3551,6 +4639,9 @@ public:
             );
         }
 
+        // ------------------------------------------------------------
+        // 대상을 바라보게 처리
+        // ------------------------------------------------------------
         void FaceTarget(Unit* target)
         {
             if (!target)
@@ -3569,9 +4660,135 @@ public:
             me->SetTarget(target->GetGUID());
         }
 
+        // ------------------------------------------------------------
+        // 시전 실패 대상 제외 타이머 갱신
+        // ------------------------------------------------------------
+        void UpdateIgnoredUnitTargets(uint32 diff)
+        {
+            for (auto itr = IgnoredUnitTargets.begin(); itr != IgnoredUnitTargets.end();)
+            {
+                if (itr->Timer <= diff)
+                {
+                    itr = IgnoredUnitTargets.erase(itr);
+                    continue;
+                }
+
+                itr->Timer -= diff;
+                ++itr;
+            }
+        }
+
+        // ------------------------------------------------------------
+        // 현재 유닛이 임시 제외 대상인지 확인
+        // ------------------------------------------------------------
+        bool IsUnitTargetIgnored(Unit* target) const
+        {
+            if (!target)
+                return true;
+
+            ObjectGuid guid = target->GetGUID();
+
+            for (WGEliteIgnoredUnitTarget const& ignored : IgnoredUnitTargets)
+            {
+                if (ignored.Guid == guid)
+                    return true;
+            }
+
+            return false;
+        }
+
+        // ------------------------------------------------------------
+        // 유닛 대상을 10초 동안 제외 목록에 등록
+        // ------------------------------------------------------------
+        void IgnoreUnitTarget(Unit* target)
+        {
+            if (!target)
+                return;
+
+            ObjectGuid guid = target->GetGUID();
+
+            for (WGEliteIgnoredUnitTarget& ignored : IgnoredUnitTargets)
+            {
+                if (ignored.Guid == guid)
+                {
+                    ignored.Timer = WG_ELITE_DEMOLISHER_IGNORE_TARGET_TIME;
+                    return;
+                }
+            }
+
+            IgnoredUnitTargets.push_back({ guid, WG_ELITE_DEMOLISHER_IGNORE_TARGET_TIME });
+        }
+
+        // ------------------------------------------------------------
+        // 원거리 시전 가능 여부 사전 검사
+        // ------------------------------------------------------------
+        bool CanTryCastRangedSpell(Unit* target)
+        {
+            if (!target)
+                return false;
+
+            if (!target->IsAlive())
+                return false;
+
+			if (IsHiddenOrFeignDeathUnit(target))
+                return false;
+
+            if (!me->IsWithinDistInMap(target, float(WG_ELITE_DEMOLISHER_TARGET_RANGE)))
+                return false;
+
+            if (!CanSeeUnitForSpell(target))
+                return false;
+
+            return true;
+        }
+
+        // ------------------------------------------------------------
+        // 원거리 시전 실패 처리
+        // 3번 실패하면 10초 제외 후 현재 대상 해제
+        // ------------------------------------------------------------
+        bool RegisterUnitCastFail(Unit* target)
+        {
+            ++CurrentUnitCastFailCount;
+
+            if (CurrentUnitCastFailCount < WG_ELITE_DEMOLISHER_CAST_FAIL_LIMIT)
+                return false;
+
+            IgnoreUnitTarget(target);
+
+            CurrentUnitCastFailCount = 0;
+            CurrentTargetGuid = ObjectGuid::Empty;
+            CurrentGameObjectTargetGuid = ObjectGuid::Empty;
+            CurrentTargetType = WG_ELITE_TARGET_NONE;
+
+            me->AttackStop();
+            me->SetTarget(ObjectGuid::Empty);
+            me->GetMotionMaster()->Clear();
+
+            IsMovingPath = false;
+            return true;
+        }
+
+        void ResetUnitCastFailCount()
+        {
+            CurrentUnitCastFailCount = 0;
+        }
+
+        // ------------------------------------------------------------
+        // 유닛 공격 가능 여부
+        // 이동 중 자동 공격 대상:
+        // - 차량
+        // - 일반 NPC
+        // - 유저
+        //
+        // 제외 대상:
+        // - 겨울손아귀 포탑
+        // ------------------------------------------------------------
         bool CanAttackTarget(Unit* target)
         {
             if (!target)
+                return false;
+
+            if (IsUnitTargetIgnored(target))
                 return false;
 
             if (target == me)
@@ -3580,61 +4797,74 @@ public:
             if (!target->IsAlive())
                 return false;
 
-            if (!IsEnemyWintergraspUnit(target))
+			if (IsHiddenOrFeignDeathUnit(target))
                 return false;
 
+            // 포탑은 공성차 공격대상에서 완전히 제외
+            if (Creature* creature = target->ToCreature())
+            {
+                if (creature->GetEntry() == NPC_WINTERGRASP_TOWER_CANNON)
+                    return false;
+
+				if (creature->GetEntry() == 7527)
+					return false;
+            }
+
             PrepareTargetCreatureForNpcAttack(target);
+
+            if (!IsEnemyWintergraspUnit(target))
+                return false;
 
             if (!me->IsWithinDistInMap(target, float(WG_ELITE_DEMOLISHER_TARGET_RANGE)))
                 return false;
 
-            if (!me->IsWithinLOSInMap(target))
+            if (!CanSeeUnitForSpell(target))
                 return false;
 
             return true;
         }
 
-        bool IsEliteDemolisherStructureType(WintergraspGameObjectBuildingType type) const
+        // ------------------------------------------------------------
+        // 이 공성전차가 공격해야 하는 성벽 entry인지 확인
+        // ------------------------------------------------------------
+        bool IsAssignedStructureTarget(uint32 entry) const
         {
-            switch (type)
+            for (WGEliteDemolisherFixedStructureStageData const& data : WGEliteDemolisherFixedStructureStages)
             {
-                case BATTLEFIELD_WG_OBJECTTYPE_KEEP_TOWER:
-                case BATTLEFIELD_WG_OBJECTTYPE_DOOR_LAST:
-                case BATTLEFIELD_WG_OBJECTTYPE_DOOR:
-                case BATTLEFIELD_WG_OBJECTTYPE_WALL:
-                    return true;
-                default:
-                    break;
+                if (data.WorkshopId != WorkshopId)
+                    continue;
+
+                for (uint8 i = 0; i < 8; ++i)
+                {
+                    if (data.Entries[i] == 0)
+                        continue;
+
+                    if (data.Entries[i] == entry)
+                        return true;
+                }
             }
 
             return false;
         }
 
-        bool CanSeeGameObjectForSpell(GameObject* go) const
+        // ------------------------------------------------------------
+        // 오브젝트와의 거리 계산
+        // ------------------------------------------------------------
+        float GetGameObjectCenterDistance(GameObject* go) const
         {
             if (!go)
-                return false;
+                return 9999.0f;
 
-            return me->IsWithinLOSInMap(go);
+            float dx = me->GetPositionX() - go->GetPositionX();
+            float dy = me->GetPositionY() - go->GetPositionY();
+            float dz = me->GetPositionZ() - go->GetPositionZ();
+
+            return std::sqrt((dx * dx) + (dy * dy) + (dz * dz));
         }
 
-        bool IsGameObjectInCastRange(GameObject* go) const
-        {
-            if (!go)
-                return false;
-
-            float distance = me->GetDistance(go);
-
-            if (distance >= float(WG_ELITE_DEMOLISHER_RANGED_MIN_RANGE) &&
-                distance <= float(WG_ELITE_DEMOLISHER_TARGET_RANGE))
-                return true;
-
-            if (distance <= float(WG_ELITE_DEMOLISHER_MELEE_RANGE))
-                return true;
-
-            return false;
-        }
-
+        // ------------------------------------------------------------
+        // 성벽 오브젝트 공격 가능 여부
+        // ------------------------------------------------------------
         bool CanAttackGameObject(GameObject* go)
         {
             if (!go)
@@ -3646,21 +4876,99 @@ public:
             if (!go->IsDestructibleBuilding())
                 return false;
 
+            if (!IsAssignedStructureTarget(go->GetEntry()))
+                return false;
+
             if (go->GetDestructibleState() == GO_DESTRUCTIBLE_DESTROYED)
                 return false;
 
-            if (!me->IsWithinDistInMap(go, float(WG_ELITE_DEMOLISHER_TARGET_RANGE)))
-                return false;
-
-            if (!IsGameObjectInCastRange(go))
-                return false;
-
-            if (!CanSeeGameObjectForSpell(go))
-                return false;
+            if (GetGameObjectCenterDistance(go) > WG_ELITE_DEMOLISHER_FIXED_OBJECT_FIND_RANGE)
+                return false; 
 
             return true;
         }
 
+        // ------------------------------------------------------------
+        // 현재 웨이포인트가 성벽 공격 스테이지인지 확인
+        // ------------------------------------------------------------
+        WGEliteDemolisherFixedStructureStageData const* GetFixedStructureStageByPathPoint(uint32 pathPoint) const
+        {
+            for (WGEliteDemolisherFixedStructureStageData const& data : WGEliteDemolisherFixedStructureStages)
+            {
+                if (data.WorkshopId != WorkshopId)
+                    continue;
+
+                if (data.PathPoint != pathPoint)
+                    continue;
+
+                return &data;
+            }
+
+            return nullptr;
+        }
+
+        // ------------------------------------------------------------
+        // 이미 처리한 성벽 공격 스테이지인지 확인
+        // ------------------------------------------------------------
+        bool IsFixedStructureStageDone(uint32 pathPoint) const
+        {
+            for (uint8 i = 0; i < FinishedFixedStructureStageCount; ++i)
+            {
+                if (FinishedFixedStructureStagePathPoints[i] == pathPoint)
+                    return true;
+            }
+
+            return false;
+        }
+
+        // ------------------------------------------------------------
+        // 성벽 공격 스테이지 완료 기록
+        // ------------------------------------------------------------
+        void MarkFixedStructureStageDone(uint32 pathPoint)
+        {
+            if (!pathPoint)
+                return;
+
+            if (IsFixedStructureStageDone(pathPoint))
+                return;
+
+            if (FinishedFixedStructureStageCount >= 8)
+                return;
+
+            FinishedFixedStructureStagePathPoints[FinishedFixedStructureStageCount] = pathPoint;
+            ++FinishedFixedStructureStageCount;
+        }
+
+        // ------------------------------------------------------------
+        // 현재 진행 중인 성벽 공격 스테이지 가져오기
+        // ------------------------------------------------------------
+        WGEliteDemolisherFixedStructureStageData const* GetCurrentFixedStructureStage() const
+        {
+            if (!FixedStructureStageActive)
+                return nullptr;
+
+            return GetFixedStructureStageByPathPoint(ActiveFixedStructureStagePathPoint);
+        }
+
+        // ------------------------------------------------------------
+        // 지정 entry의 성벽 오브젝트 찾기
+        // ------------------------------------------------------------
+        GameObject* FindFixedStructureObject(uint32 entry)
+        {
+            if (!entry)
+                return nullptr;
+
+            GameObject* go = me->FindNearestGameObject(entry, WG_ELITE_DEMOLISHER_FIXED_OBJECT_FIND_RANGE);
+
+            if (!CanAttackGameObject(go))
+                return nullptr;
+
+            return go;
+        }
+
+        // ------------------------------------------------------------
+        // 현재 유닛 대상 가져오기
+        // ------------------------------------------------------------
         Unit* GetCurrentTarget()
         {
             if (CurrentTargetGuid.IsEmpty())
@@ -3669,6 +4977,9 @@ public:
             return ObjectAccessor::GetUnit(*me, CurrentTargetGuid);
         }
 
+        // ------------------------------------------------------------
+        // 현재 성벽 오브젝트 대상 가져오기
+        // ------------------------------------------------------------
         GameObject* GetCurrentGameObjectTarget()
         {
             if (CurrentGameObjectTargetGuid.IsEmpty())
@@ -3677,6 +4988,11 @@ public:
             return ObjectAccessor::GetGameObject(*me, CurrentGameObjectTargetGuid);
         }
 
+        // ------------------------------------------------------------
+        // 공격 가능한 유닛 대상 선택
+        // 성벽 오브젝트는 여기서 찾지 않는다.
+        // 성벽은 지정 웨이포인트 도착 시에만 찾는다.
+        // ------------------------------------------------------------
         Unit* SelectEliteTarget()
         {
             std::list<Unit*> targets;
@@ -3707,40 +5023,16 @@ public:
             return targets.front();
         }
 
-        GameObject* SelectStructureTarget()
-        {
-            GameObject* bestTarget = nullptr;
-            float bestDistance = float(WG_ELITE_DEMOLISHER_TARGET_RANGE) + 1.0f;
-
-            for (uint8 i = 0; i < WG_MAX_OBJ; ++i)
-            {
-                if (!IsEliteDemolisherStructureType(WGGameObjectBuilding[i].type))
-                    continue;
-
-                GameObject* go = me->FindNearestGameObject(
-                    WGGameObjectBuilding[i].entry,
-                    float(WG_ELITE_DEMOLISHER_TARGET_RANGE)
-                );
-
-                if (!CanAttackGameObject(go))
-                    continue;
-
-                float distance = me->GetDistance(go);
-                if (distance >= bestDistance)
-                    continue;
-
-                bestTarget = go;
-                bestDistance = distance;
-            }
-
-            return bestTarget;
-        }
-
+        // ------------------------------------------------------------
+        // 현재 공격 대상 초기화
+        // ------------------------------------------------------------
         void ClearCurrentTarget()
         {
             CurrentTargetGuid = ObjectGuid::Empty;
             CurrentGameObjectTargetGuid = ObjectGuid::Empty;
             CurrentTargetType = WG_ELITE_TARGET_NONE;
+
+            ResetUnitCastFailCount();
 
             me->AttackStop();
             me->SetTarget(ObjectGuid::Empty);
@@ -3749,40 +5041,75 @@ public:
             IsMovingPath = false;
         }
 
-        void MoveToCurrentPathPoint()
+        // ------------------------------------------------------------
+        // 성벽 공격 스테이지 초기화
+        // ------------------------------------------------------------
+        void ClearFixedStructureStage()
         {
-            if (PathFinished)
-                return;
+            FixedStructureStageActive = false;
+            FixedStructureEntryIndex = 0;
+            ActiveFixedStructureStagePathPoint = 0;
+            CurrentGameObjectTargetGuid = ObjectGuid::Empty;
 
-            if (!CurrentPath || !CurrentPath->Points || !CurrentPath->PointCount)
-            {
-                PathFinished = true;
-                IsMovingPath = false;
-                return;
-            }
-
-            if (CurrentPathPoint >= CurrentPath->PointCount)
-            {
-                PathFinished = true;
-                IsMovingPath = false;
-                return;
-            }
-
-            Position const& pos = CurrentPath->Points[CurrentPathPoint];
-
-            IsMovingPath = true;
+            if (CurrentTargetType == WG_ELITE_TARGET_GAMEOBJECT)
+                CurrentTargetType = WG_ELITE_TARGET_NONE;
 
             me->AttackStop();
             me->SetTarget(ObjectGuid::Empty);
             me->GetMotionMaster()->Clear();
-            me->GetMotionMaster()->MovePoint(
-                CurrentPathPoint,
-                pos.GetPositionX(),
-                pos.GetPositionY(),
-                pos.GetPositionZ()
-            );
+
+            IsMovingPath = false;
         }
 
+        // ------------------------------------------------------------
+        // 현재 CurrentPathPoint 좌표로 이동
+        // ------------------------------------------------------------
+        void MoveToCurrentPathPoint()
+		{
+			if (PathFinished)
+				return;
+
+			if (!CurrentPath || !CurrentPath->Points || !CurrentPath->PointCount)
+			{
+				PathFinished = true;
+				IsMovingPath = false;
+				return;
+			}
+
+			if (CurrentPathPoint >= CurrentPath->PointCount)
+			{
+				PathFinished = true;
+				IsMovingPath = false;
+				return;
+			}
+
+			Position const& pos = CurrentPath->Points[CurrentPathPoint];
+
+			float moveX = pos.GetPositionX();
+			float moveY = pos.GetPositionY();
+			float moveZ = pos.GetPositionZ();
+
+			// 웨이포인트 Z를 그대로 쓰지 않고 현재 지형 높이로 보정한다.
+			// 공성차가 공중을 직선 이동하는 문제 방지.
+			me->UpdateGroundPositionZ(moveX, moveY, moveZ);
+
+			IsMovingPath = true;
+
+			me->AttackStop();
+			me->SetTarget(ObjectGuid::Empty);
+			me->GetMotionMaster()->Clear();
+
+			me->GetMotionMaster()->MovePoint(
+				CurrentPathPoint,
+				moveX,
+				moveY,
+				moveZ
+			);
+		}
+
+        // ------------------------------------------------------------
+        // 이동 재개
+        // ------------------------------------------------------------
         void ResumePath()
         {
             if (PathFinished)
@@ -3794,6 +5121,142 @@ public:
             MoveToCurrentPathPoint();
         }
 
+        // ------------------------------------------------------------
+        // 성벽 오브젝트를 현재 대상으로 설정
+        // ------------------------------------------------------------
+        void SetGameObjectTarget(GameObject* target)
+        {
+            if (!target)
+                return;
+
+            CurrentTargetGuid = ObjectGuid::Empty;
+            CurrentGameObjectTargetGuid = target->GetGUID();
+            CurrentTargetType = WG_ELITE_TARGET_GAMEOBJECT;
+
+            me->AttackStop();
+            me->GetMotionMaster()->Clear();
+            FaceObject(target);
+
+            IsMovingPath = false;
+        }
+
+        // ------------------------------------------------------------
+        // 유닛을 현재 대상으로 설정
+        // ------------------------------------------------------------
+        void SetUnitTarget(Unit* target)
+        {
+            if (!target)
+                return;
+
+            CurrentTargetGuid = target->GetGUID();
+            CurrentGameObjectTargetGuid = ObjectGuid::Empty;
+            CurrentTargetType = WG_ELITE_TARGET_UNIT;
+
+            ResetUnitCastFailCount();
+
+            AttackStart(target);
+        }
+
+        // ------------------------------------------------------------
+        // 현재 성벽 공격 스테이지에서 다음 오브젝트 선택
+        // ------------------------------------------------------------
+        bool SelectNextFixedStructureObject()
+        {
+            WGEliteDemolisherFixedStructureStageData const* stage = GetCurrentFixedStructureStage();
+            if (!stage)
+                return false;
+
+            while (FixedStructureEntryIndex < 8)
+            {
+                uint32 entry = stage->Entries[FixedStructureEntryIndex];
+
+                if (entry == 0)
+                    return false;
+
+                if (GameObject* go = FindFixedStructureObject(entry))
+                {
+                    SetGameObjectTarget(go);
+                    FixedStructureStageActive = true;
+                    return true;
+                }
+
+                ++FixedStructureEntryIndex;
+            }
+
+            return false;
+        }
+
+        // ------------------------------------------------------------
+        // 성벽 공격 스테이지 완료 후 다음 웨이포인트로 이동
+        // ------------------------------------------------------------
+        void FinishFixedStructureStage()
+        {
+            uint32 finishedPathPoint = ActiveFixedStructureStagePathPoint;
+
+            ClearFixedStructureStage();
+            MarkFixedStructureStageDone(finishedPathPoint);
+
+            ++CurrentPathPoint;
+
+            if (!CurrentPath || !CurrentPath->Points || CurrentPathPoint >= CurrentPath->PointCount)
+            {
+                PathFinished = true;
+                return;
+            }
+
+            MoveToCurrentPathPoint();
+        }
+
+        // ------------------------------------------------------------
+        // 지정 웨이포인트 도착 시 성벽 공격 스테이지 시작
+        // ------------------------------------------------------------
+        bool TryStartFixedStructureStage(uint32 pathPoint)
+        {
+            if (IsFixedStructureStageDone(pathPoint))
+                return false;
+
+            WGEliteDemolisherFixedStructureStageData const* stage = GetFixedStructureStageByPathPoint(pathPoint);
+            if (!stage)
+                return false;
+
+            FixedStructureStageActive = true;
+            FixedStructureEntryIndex = 0;
+            ActiveFixedStructureStagePathPoint = pathPoint;
+
+            if (SelectNextFixedStructureObject())
+                return true;
+
+            FixedStructureStageActive = false;
+            FixedStructureEntryIndex = 0;
+            ActiveFixedStructureStagePathPoint = 0;
+
+            MarkFixedStructureStageDone(pathPoint);
+
+            return false;
+        }
+
+        // ------------------------------------------------------------
+        // 새 유닛 대상 선택
+        // ------------------------------------------------------------
+        bool SelectNewTarget()
+        {
+            Unit* unitTarget = SelectEliteTarget();
+
+            if (unitTarget)
+            {
+                SetUnitTarget(unitTarget);
+                return true;
+            }
+
+            CurrentTargetType = WG_ELITE_TARGET_NONE;
+            return false;
+        }
+
+        // ------------------------------------------------------------
+        // 웨이포인트 도착 처리
+        // 여기서 성벽 공격 포인트인지 확인한다.
+        // 성벽 공격 포인트면 유저/NPC보다 성벽을 먼저 처리한다.
+        // ------------------------------------------------------------
         void MovementInform(uint32 type, uint32 id) override
         {
             if (type != POINT_MOTION_TYPE)
@@ -3811,8 +5274,12 @@ public:
                 me->SetFacingTo(pos.GetOrientation());
             }
 
-            ++CurrentPathPoint;
             IsMovingPath = false;
+
+            if (TryStartFixedStructureStage(CurrentPathPoint))
+                return;
+
+            ++CurrentPathPoint;
 
             if (CurrentPathPoint >= CurrentPath->PointCount)
             {
@@ -3823,6 +5290,10 @@ public:
             MoveToCurrentPathPoint();
         }
 
+        // ------------------------------------------------------------
+        // AI 초기화
+        // 실제 이동은 Points[1]부터 시작한다.
+        // ------------------------------------------------------------
         void Reset() override
         {
             SearchTimer = WG_ELITE_DEMOLISHER_SEARCH_TIMER;
@@ -3832,6 +5303,17 @@ public:
             CurrentTargetGuid = ObjectGuid::Empty;
             CurrentGameObjectTargetGuid = ObjectGuid::Empty;
             CurrentTargetType = WG_ELITE_TARGET_NONE;
+
+            FixedStructureStageActive = false;
+            FixedStructureEntryIndex = 0;
+            ActiveFixedStructureStagePathPoint = 0;
+
+            FinishedFixedStructureStageCount = 0;
+            for (uint8 i = 0; i < 8; ++i)
+                FinishedFixedStructureStagePathPoints[i] = 0;
+
+            IgnoredUnitTargets.clear();
+            CurrentUnitCastFailCount = 0;
 
             CurrentPathPoint = 0;
             IsMovingPath = false;
@@ -3857,11 +5339,30 @@ public:
             MoveToCurrentPathPoint();
         }
 
+        // ------------------------------------------------------------
+        // 사망 처리
+        // ------------------------------------------------------------
         void JustDied(Unit* /*killer*/) override
         {
+			RemoveWintergraspWorkshopSiegeGuid(me->GetGUID());
+
             ClearCurrentTarget();
+
+            FixedStructureStageActive = false;
+            FixedStructureEntryIndex = 0;
+            ActiveFixedStructureStagePathPoint = 0;
+
+            FinishedFixedStructureStageCount = 0;
+            for (uint8 i = 0; i < 8; ++i)
+                FinishedFixedStructureStagePathPoints[i] = 0;
+
+            IgnoredUnitTargets.clear();
+            CurrentUnitCastFailCount = 0;
         }
 
+        // ------------------------------------------------------------
+        // 유닛 공격 시작
+        // ------------------------------------------------------------
         void AttackStart(Unit* target) override
         {
             if (!CanAttackTarget(target))
@@ -3880,7 +5381,6 @@ public:
             FaceTarget(target);
 
             me->AttackStop();
-
             IsMovingPath = false;
 
             float distance = me->GetDistance(target);
@@ -3889,7 +5389,7 @@ public:
                 distance > float(WG_ELITE_DEMOLISHER_MELEE_RANGE))
             {
                 me->GetMotionMaster()->Clear();
-                me->GetMotionMaster()->MoveChase(target, float(WG_ELITE_DEMOLISHER_CHASE_DISTANCE));
+                me->GetMotionMaster()->MoveChase(target);
             }
             else
             {
@@ -3897,56 +5397,9 @@ public:
             }
         }
 
-        void SetGameObjectTarget(GameObject* target)
-        {
-            if (!target)
-                return;
-
-            CurrentTargetGuid = ObjectGuid::Empty;
-            CurrentGameObjectTargetGuid = target->GetGUID();
-            CurrentTargetType = WG_ELITE_TARGET_GAMEOBJECT;
-
-            me->AttackStop();
-            me->GetMotionMaster()->Clear();
-            FaceObject(target);
-
-            IsMovingPath = false;
-        }
-
-        void SetUnitTarget(Unit* target)
-        {
-            if (!target)
-                return;
-
-            CurrentTargetGuid = target->GetGUID();
-            CurrentGameObjectTargetGuid = ObjectGuid::Empty;
-            CurrentTargetType = WG_ELITE_TARGET_UNIT;
-
-            AttackStart(target);
-        }
-
-        bool SelectNewTarget()
-        {
-            GameObject* structureTarget = SelectStructureTarget();
-
-            if (structureTarget)
-            {
-                SetGameObjectTarget(structureTarget);
-                return true;
-            }
-
-            Unit* unitTarget = SelectEliteTarget();
-
-            if (unitTarget)
-            {
-                SetUnitTarget(unitTarget);
-                return true;
-            }
-
-            CurrentTargetType = WG_ELITE_TARGET_NONE;
-            return false;
-        }
-
+        // ------------------------------------------------------------
+        // 유닛 원거리 공격
+        // ------------------------------------------------------------
         void CastRangedSpell(Unit* target)
         {
             if (!target)
@@ -3962,6 +5415,9 @@ public:
             me->CastSpell(target, SPELL_WG_ELITE_DEMOLISHER_RANGED, true);
         }
 
+        // ------------------------------------------------------------
+        // 유닛 근거리 공격
+        // ------------------------------------------------------------
         void CastMeleeSpell(Unit* target)
         {
             if (!target)
@@ -3977,6 +5433,9 @@ public:
             me->CastSpell(target, SPELL_WG_ELITE_DEMOLISHER_MELEE, true);
         }
 
+        // ------------------------------------------------------------
+        // 성벽 오브젝트 원거리 공격
+        // ------------------------------------------------------------
         void CastRangedSpell(GameObject* target)
         {
             if (!target)
@@ -4003,13 +5462,41 @@ public:
             spell->prepare(targets);
         }
 
-        void CastMeleeSpell(GameObject* target)
+        // ------------------------------------------------------------
+        // 오브젝트 근거리 공격은 사용하지 않음
+        // ------------------------------------------------------------
+        void CastMeleeSpell(GameObject* /*target*/)
         {
-            if (!target)
-                return;
+        }
+
+        // ------------------------------------------------------------
+        // 성벽 오브젝트 공격 업데이트
+        // 성벽 공격 중에는 유닛/유저를 보더라도 성벽을 먼저 처리한다.
+        // ------------------------------------------------------------
+        bool UpdateGameObjectTarget(uint32 diff)
+        {
+            GameObject* target = GetCurrentGameObjectTarget();
 
             if (!CanAttackGameObject(target))
-                return;
+            {
+                CurrentGameObjectTargetGuid = ObjectGuid::Empty;
+                CurrentTargetType = WG_ELITE_TARGET_NONE;
+
+                if (FixedStructureStageActive)
+                {
+                    ++FixedStructureEntryIndex;
+
+                    if (SelectNextFixedStructureObject())
+                        return true;
+
+                    FinishFixedStructureStage();
+                    return true;
+                }
+
+                ClearCurrentTarget();
+                ResumePath();
+                return false;
+            }
 
             FaceObject(target);
 
@@ -4017,30 +5504,37 @@ public:
             me->GetMotionMaster()->Clear();
             IsMovingPath = false;
 
-            SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(SPELL_WG_ELITE_DEMOLISHER_MELEE);
-            if (!spellInfo)
-                return;
+            if (RangedSpellTimer <= diff)
+            {
+                RangedSpellTimer = WG_ELITE_DEMOLISHER_RANGED_SPELL_TIMER;
+                CastRangedSpell(target);
+            }
+            else
+            {
+                RangedSpellTimer -= diff;
+            }
 
-            SpellCastTargets targets;
-            targets.SetGOTarget(target);
-            targets.SetDst(*target);
-
-            Spell* spell = new Spell(me, spellInfo, TRIGGERED_FULL_MASK);
-            spell->prepare(targets);
+            return true;
         }
 
-        bool UpdateGameObjectTarget(uint32 diff)
+        // ------------------------------------------------------------
+        // 유닛 공격 업데이트
+        // 대상: 차량 / NPC / 유저
+        // 포탑은 CanAttackTarget()에서 제외된다.
+        // ------------------------------------------------------------
+        bool UpdateUnitTarget(uint32 diff)
         {
-            GameObject* target = GetCurrentGameObjectTarget();
+            Unit* target = GetCurrentTarget();
 
-            if (!CanAttackGameObject(target))
+            if (!CanAttackTarget(target))
             {
                 ClearCurrentTarget();
                 ResumePath();
                 return false;
             }
 
-            FaceObject(target);
+            PrepareTargetCreatureForNpcAttack(target);
+            FaceTarget(target);
 
             float distance = me->GetDistance(target);
 
@@ -4053,7 +5547,17 @@ public:
                 if (RangedSpellTimer <= diff)
                 {
                     RangedSpellTimer = WG_ELITE_DEMOLISHER_RANGED_SPELL_TIMER;
-                    CastRangedSpell(target);
+
+                    if (CanTryCastRangedSpell(target))
+                    {
+                        ResetUnitCastFailCount();
+                        CastRangedSpell(target);
+                    }
+                    else
+                    {
+                        if (RegisterUnitCastFail(target))
+                            ResumePath();
+                    }
                 }
                 else
                 {
@@ -4082,76 +5586,39 @@ public:
                 return true;
             }
 
-            ClearCurrentTarget();
-            ResumePath();
-            return false;
-        }
-
-        bool UpdateUnitTarget(uint32 diff)
-        {
-            Unit* target = GetCurrentTarget();
-
-            if (!CanAttackTarget(target))
-            {
-                ClearCurrentTarget();
-                ResumePath();
-                return false;
-            }
-
-            PrepareTargetCreatureForNpcAttack(target);
-            FaceTarget(target);
-
-            float distance = me->GetDistance(target);
-
-            if (distance >= float(WG_ELITE_DEMOLISHER_RANGED_MIN_RANGE))
-            {
-                me->AttackStop();
-                me->GetMotionMaster()->Clear();
-                IsMovingPath = false;
-
-                if (RangedSpellTimer <= diff)
-                {
-                    RangedSpellTimer = WG_ELITE_DEMOLISHER_RANGED_SPELL_TIMER;
-                    CastRangedSpell(target);
-                }
-                else
-                {
-                    RangedSpellTimer -= diff;
-                }
-
-                return true;
-            }
-
-            if (distance > float(WG_ELITE_DEMOLISHER_MELEE_RANGE))
-            {
-                me->AttackStop();
-                IsMovingPath = false;
-                me->GetMotionMaster()->MoveChase(target, float(WG_ELITE_DEMOLISHER_CHASE_DISTANCE));
-                return true;
-            }
-
             me->AttackStop();
-            me->GetMotionMaster()->Clear();
             IsMovingPath = false;
 
-            if (MeleeSpellTimer <= diff)
-            {
-                MeleeSpellTimer = WG_ELITE_DEMOLISHER_MELEE_SPELL_TIMER;
-                CastMeleeSpell(target);
-            }
-            else
-            {
-                MeleeSpellTimer -= diff;
-            }
+            me->GetMotionMaster()->Clear();
+            me->GetMotionMaster()->MoveChase(target);
 
             return true;
         }
 
+        // ------------------------------------------------------------
+        // 메인 AI 업데이트
+        // 처리 순서:
+        // 1. 성벽 공격 중이면 성벽만 처리
+        // 2. 유닛 공격 중이면 유닛 처리
+        // 3. 성벽 스테이지가 켜져 있으면 성벽부터 찾기
+        // 4. 평소에는 차량 / NPC / 유저만 탐색
+        // 5. 대상 없으면 웨이포인트 이동
+        // ------------------------------------------------------------
         void UpdateAI(uint32 diff) override
         {
+            UpdateIgnoredUnitTargets(diff);
+
             if (!IsWintergraspWarTime())
             {
                 ClearCurrentTarget();
+
+				me->CombatStop(true);
+				me->AttackStop();
+				me->SetTarget(ObjectGuid::Empty);
+				me->GetMotionMaster()->Clear();
+				me->SetRespawnTime(0);
+				me->DespawnOrUnsummon();
+
                 return;
             }
 
@@ -4167,6 +5634,15 @@ public:
             if (CurrentTargetType == WG_ELITE_TARGET_UNIT)
             {
                 UpdateUnitTarget(diff);
+                return;
+            }
+
+            if (FixedStructureStageActive)
+            {
+                if (SelectNextFixedStructureObject())
+                    return;
+
+                FinishFixedStructureStage();
                 return;
             }
 

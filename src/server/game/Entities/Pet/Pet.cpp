@@ -810,7 +810,20 @@ bool Pet::CreateBaseAtCreature(Creature* creature)
         return false;
     }
 
-    SetDisplayId(creature->GetDisplayId());
+    // Custom Update - 2026-06-24
+	// Garwal special tame display preserve.
+	// Garwal is tamed while transformed, but only SetDisplayId was applied.
+	// SavePetToDB stores GetNativeDisplayId(), so NativeDisplayId must also be fixed.
+	enum CustomGarwalPet
+	{
+		NPC_GARWAL                  = 24277,
+		NPC_GARWAL_WORGEN_TRANSFORM = 24278
+	};
+
+	SetDisplayId(creature->GetDisplayId());
+
+	if (creature->GetEntry() == NPC_GARWAL || creature->GetEntry() == NPC_GARWAL_WORGEN_TRANSFORM)
+		SetNativeDisplayId(creature->GetDisplayId());
 
     if (CreatureFamilyEntry const* cFamily = sCreatureFamilyStore.LookupEntry(cinfo->family))
         SetName(cFamily->Name[sWorld->GetDefaultDbcLocale()]);

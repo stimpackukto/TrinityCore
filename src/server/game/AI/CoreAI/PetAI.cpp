@@ -31,6 +31,107 @@
 #include "SpellMgr.h"
 #include "Util.h"
 
+namespace
+{
+    static bool IsManaPet(Unit* pet)
+    {
+        if (!pet)
+            return false;
+
+        if (pet->GetPowerType() != POWER_MANA)
+            return false;
+
+        return pet->GetMaxPower(POWER_MANA) > 0;
+    }
+
+    static bool ShouldManaPetUseMeleeFallback(Creature* pet)
+	{
+		if (!pet)
+			return false;
+
+		if (!IsManaPet(pet))
+			return false;
+
+		Unit* victim = pet->GetVictim();
+		if (!victim || !victim->IsAlive())
+			return false;
+
+		bool hasOffensiveAutoSpell = false;
+		bool blockedByMana = false;
+
+		for (uint8 i = 0; i < pet->GetPetAutoSpellSize(); ++i)
+		{
+			uint32 spellId = pet->GetPetAutoSpellOnPos(i);
+			if (!spellId)
+				continue;
+
+			SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(spellId);
+			if (!spellInfo)
+				continue;
+
+			if (spellInfo->IsPositive())
+				continue;
+
+			if (!spellInfo->CanBeUsedInCombat())
+				continue;
+
+			hasOffensiveAutoSpell = true;
+
+			// 쿨타임/GCD 중이면 "시전 불가"가 아니라 "기다리는 중"으로 본다.
+			// 이 경우 근접 돌진하면 안 된다.
+			if (pet->GetSpellHistory()->HasGlobalCooldown(spellInfo))
+				return false;
+
+			if (!pet->GetSpellHistory()->IsReady(spellInfo))
+				return false;
+
+			int32 powerCost = spellInfo->CalcPowerCost(pet, spellInfo->GetSchoolMask());
+
+			// 마나가 필요 없거나, 마나 외 자원 주문이면 근접 fallback 판단 대상이 아니다.
+			if (powerCost <= 0)
+				return false;
+
+			if (spellInfo->PowerType != POWER_MANA)
+				return false;
+
+			// 마나가 충분하면 자동시전 로직이 처리하게 둔다.
+			if (pet->GetPower(POWER_MANA) >= powerCost)
+				return false;
+
+			// 여기까지 오면 이 주문은 "마나 부족" 때문에 못 쓰는 상태.
+			blockedByMana = true;
+		}
+
+		// 공격 자동시전 주문 자체가 없는 마나펫은 기존처럼 근접 허용
+		if (!hasOffensiveAutoSpell)
+			return true;
+
+		// 공격 주문은 있는데 전부 마나 부족으로 막힌 경우에만 근접 허용
+		return blockedByMana;
+	}
+
+    static void ForceManaPetMeleeAttack(Creature* pet)
+    {
+        if (!pet)
+            return;
+
+        Unit* victim = pet->GetVictim();
+        if (!victim || !victim->IsAlive())
+            return;
+
+        pet->Attack(victim, true);
+
+        if (!pet->IsWithinMeleeRange(victim))
+        {
+            pet->GetMotionMaster()->Clear();
+            pet->GetMotionMaster()->MoveChase(victim);
+            return;
+        }
+
+        pet->AI()->DoMeleeAttackIfReady();
+    }
+}
+
 int32 PetAI::Permissible(Creature const* creature)
 {
     if (creature->HasUnitTypeMask(UNIT_MASK_CONTROLABLE_GUARDIAN))
@@ -80,6 +181,12 @@ void PetAI::UpdateAI(uint32 diff)
             StopAttack();
             return;
         }
+
+		if (ShouldManaPetUseMeleeFallback(me))
+		{
+			ForceManaPetMeleeAttack(me);
+			return;
+		}
 
         // Check before attacking to prevent pets from leaving stay position
         if (me->GetCharmInfo()->HasCommandState(COMMAND_STAY))

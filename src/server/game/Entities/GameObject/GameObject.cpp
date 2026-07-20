@@ -1616,6 +1616,7 @@ void GameObject::Use(Unit* user)
     Unit* spellCaster = user;
     uint32 spellId = 0;
     bool triggered = false;
+    bool addUse = false;
 
     if (Player* playerUser = user->ToPlayer())
     {
@@ -2032,6 +2033,44 @@ void GameObject::Use(Unit* user)
             if (!info)
                 return;
 
+            Player* playerUser = user->GetCharmerOrOwnerPlayerOrPlayerItself();
+
+            uint32 goSpellId = info->spellcaster.spellId;
+            if (!goSpellId)
+                return;
+
+            if (SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(goSpellId))
+            {
+                bool isTeleportPortalSpell = false;
+
+                for (SpellEffectInfo const& spellEffectInfo : spellInfo->GetEffects())
+                {
+                    if (!spellEffectInfo.IsEffect())
+                        continue;
+
+                    if (spellEffectInfo.Effect == SPELL_EFFECT_TELEPORT_UNITS)
+                    {
+                        isTeleportPortalSpell = true;
+                        break;
+                    }
+                }
+
+                if (isTeleportPortalSpell)
+                {
+                    if (!playerUser)
+                        return;
+
+                    static constexpr float TELEPORT_PORTAL_USE_RADIUS_2D = 2.00f;
+                    static constexpr float TELEPORT_PORTAL_USE_RADIUS_Z  = 3.00f;
+
+                    if (GetDistance2d(playerUser) > TELEPORT_PORTAL_USE_RADIUS_2D)
+                        return;
+
+                    if (std::fabs(GetPositionZ() - playerUser->GetPositionZ()) > TELEPORT_PORTAL_USE_RADIUS_Z)
+                        return;
+                }
+            }
+
             if (info->spellcaster.partyOnly)
             {
                 ObjectGuid ownerGuid = GetOwnerGUID();
@@ -2043,7 +2082,6 @@ void GameObject::Use(Unit* user)
                     if (Unit* owner = ObjectAccessor::GetUnit(*this, ownerGuid))
                         ownerGuid = owner->GetCharmerOrOwnerOrOwnGUID();
 
-                    Player const* playerUser = user->GetCharmerOrOwnerPlayerOrPlayerItself();
                     if (!playerUser)
                         return;
 
@@ -2054,9 +2092,9 @@ void GameObject::Use(Unit* user)
             }
 
             user->RemoveAurasByType(SPELL_AURA_MOUNTED);
-            spellId = info->spellcaster.spellId;
+            spellId = goSpellId;
 
-            AddUse();
+            addUse = true;
             break;
         }
         case GAMEOBJECT_TYPE_MEETINGSTONE:                  //23
@@ -2223,10 +2261,14 @@ void GameObject::Use(Unit* user)
     if (Player* player = user->ToPlayer())
         sOutdoorPvPMgr->HandleCustomSpell(player, spellId, this);
 
+    SpellCastResult castResult;
     if (spellCaster)
-        spellCaster->CastSpell(user, spellId, triggered);
+        castResult = spellCaster->CastSpell(user, spellId, triggered);
     else
-        CastSpell(user, spellId);
+        castResult = CastSpell(user, spellId);
+
+    if (addUse && castResult == SPELL_CAST_OK)
+        AddUse();
 }
 
 void GameObject::SendCustomAnim(uint32 anim)

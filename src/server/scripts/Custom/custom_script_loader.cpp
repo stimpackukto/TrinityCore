@@ -39,7 +39,22 @@ void AddSC_weekly_delivery_vendor();
 void AddSC_discord_daily_event();
 void AddSC_npc_custom_auctioneer();
 void AddSC_neukgu_event();
-void AddSC_custom_spell_script();
+void AddSC_custom_spell_script(); 
+void AddSC_npc_1v1arena();
+void AddSC_custom_battle_kill_logger();
+void AddSC_custom_fringe_science_benefits();
+void AddSC_custom_dalaran_mentor_manager();
+void AddSC_death_race_event();
+void AddSC_npc_retro_collection_exchange();
+void AddSC_npc_personal_shop_manager();
+void AddSC_npc_craft_request();
+void AddSC_custom_blackmarket();
+void AddSC_custom_item_upgrade_altar();
+void AddSC_custom_outdoor_pvp_war_controller();
+void AddSC_custom_execution_meta_gem();
+void AddSC_custom_friend_login_fcm();
+void AddSC_custom_wsg_hide_and_seek();
+void AddSC_custom_scourge_invasion();
 
 void AddCustomScripts()
 {
@@ -64,4 +79,19 @@ void AddCustomScripts()
 	AddSC_npc_custom_auctioneer();
 	AddSC_neukgu_event();
 	AddSC_custom_spell_script();
+	AddSC_npc_1v1arena();
+	AddSC_custom_battle_kill_logger();
+	AddSC_custom_fringe_science_benefits();
+	AddSC_custom_dalaran_mentor_manager();
+	AddSC_death_race_event();
+	AddSC_npc_retro_collection_exchange();
+	AddSC_npc_personal_shop_manager();
+	AddSC_npc_craft_request();
+	AddSC_custom_blackmarket();
+	AddSC_custom_item_upgrade_altar();
+	AddSC_custom_outdoor_pvp_war_controller();
+	AddSC_custom_execution_meta_gem();
+	AddSC_custom_friend_login_fcm();
+	AddSC_custom_wsg_hide_and_seek();
+	AddSC_custom_scourge_invasion();
 }

@@ -3,6 +3,7 @@
 #include "GameTime.h"
 #include "Config.h"
 
+#include <cstdlib>
 #include <sstream>
 
 /* =====================================================
@@ -277,4 +278,57 @@ uint32 ApplyGuildTechDiscount(uint32 accountId, uint32 guid, std::string const& 
     discount = static_cast<uint32>(discount64);
 
     return price - discount;
+}
+
+
+//fcm 발송
+namespace
+{
+    std::string ShellEscape(std::string const& value)
+    {
+        std::string out = "'";
+
+        for (char ch : value)
+        {
+            if (ch == '\'')
+                out += "'\\''";
+            else
+                out += ch;
+        }
+
+        out += "'";
+        return out;
+    }
+}
+
+void SendFcmCategory(uint32 categoryId, std::string const& /*categoryCode*/, std::string const& title, std::string const& body, uint32 targetAccountId)
+{
+    std::string url = "https://stimpack.pe.kr/api/community/fcm/send_category.php";
+
+    std::string command = Trinity::StringFormat(
+        "( nohup curl -sS --connect-timeout 2 --max-time 8 "
+        "-G {} "
+        "--data-urlencode {} "
+        "--data-urlencode {} "
+        "--data-urlencode {} "
+        "--data-urlencode {} "
+        "--data-urlencode {} "
+        "{} > /dev/null 2>&1 & )",
+        ShellEscape(url),
+        ShellEscape("secret=test1234"),
+        ShellEscape("account_id=" + std::to_string(targetAccountId)),
+        ShellEscape("category=" + std::to_string(categoryId)),
+        ShellEscape("title=" + title),
+        ShellEscape("body=" + body),
+        ShellEscape("type=category_notice")
+    );
+
+    std::system(command.c_str());
+
+    TC_LOG_INFO(
+        "custom",
+        "[CustomRP] FCM 백그라운드 요청: category={}, account_id={}",
+        categoryId,
+        targetAccountId
+    );
 }

@@ -297,6 +297,84 @@ class instance_halls_of_reflection : public InstanceMapScript
                 packet.Worldstates.emplace_back(WORLD_STATE_HOR_WAVE_COUNT, _waveCount);
             }
 
+
+			            static uint32 GetWaveSpawnCount(uint8 waveIndex)
+            {
+                if (!waveIndex)
+                    return 3;
+
+                if (waveIndex < 6 && waveIndex != 3)
+                    return 4;
+
+                return 5;
+            }
+
+            bool HasWaveCreatures(uint8 waveIndex)
+            {
+                for (ObjectGuid guid : waveGuidList[waveIndex])
+                    if (instance->GetCreature(guid))
+                        return true;
+
+                return false;
+            }
+
+            void SpawnWaveCreatures(uint8 startWave, uint8 endWave)
+            {
+                std::list<uint32> possibilityList, tempList;
+                uint32 posIndex = 0;
+
+                possibilityList.push_back(NPC_WAVE_MERCENARY);
+                possibilityList.push_back(NPC_WAVE_FOOTMAN);
+                possibilityList.push_back(NPC_WAVE_RIFLEMAN);
+                possibilityList.push_back(NPC_WAVE_PRIEST);
+                possibilityList.push_back(NPC_WAVE_MAGE);
+
+                for (uint8 i = 0; i < startWave; ++i)
+                    posIndex += GetWaveSpawnCount(i);
+
+                for (uint8 i = startWave; i < endWave; ++i)
+                {
+                    uint32 spawnCount = GetWaveSpawnCount(i);
+
+                    if (HasWaveCreatures(i))
+                    {
+                        posIndex += spawnCount;
+                        continue;
+                    }
+
+                    waveGuidList[i].clear();
+
+                    tempList = possibilityList;
+
+                    ObjectGuid bossGuid = i <= 3 ? FalricGUID : MarwynGUID;
+
+                    if (!i)
+                        Trinity::Containers::RandomResize(tempList, 3);
+                    else if (i < 6 && i != 3)
+                        Trinity::Containers::RandomResize(tempList, 4);
+
+                    for (uint32 entry : tempList)
+                    {
+                        Creature* temp = nullptr;
+
+                        if (Creature* boss = instance->GetCreature(bossGuid))
+                            temp = boss->SummonCreature(entry, SpawnPos[posIndex], TEMPSUMMON_DEAD_DESPAWN);
+                        else
+                            temp = instance->SummonCreature(entry, SpawnPos[posIndex]);
+
+                        if (temp)
+                        {
+                            temp->AI()->SetData(0, i);
+                            waveGuidList[i].insert(temp->GetGUID());
+                        }
+
+                        ++posIndex;
+                    }
+                }
+            }
+
+
+
             bool SetBossState(uint32 type, EncounterState state) override
             {
                 if (!InstanceScript::SetBossState(type, state))
@@ -304,10 +382,13 @@ class instance_halls_of_reflection : public InstanceMapScript
 
                 switch (type)
                 {
-                    case DATA_FALRIC:
-                        if (state == DONE)
+                   case DATA_FALRIC:
+                        if (state == DONE && GetBossState(DATA_MARWYN) != DONE)
                         {
-                            ++_waveCount;
+                            _waveCount = 6;
+
+                            SpawnWaveCreatures(4, 8);
+
                             events.ScheduleEvent(EVENT_NEXT_WAVE, 1min);
                         }
                         break;
@@ -539,43 +620,9 @@ class instance_halls_of_reflection : public InstanceMapScript
                         _waveCount = GetBossState(DATA_FALRIC) == DONE ? 6 : 1;
                         DoUpdateWorldState(WORLD_STATE_HOR_WAVES_ENABLED, 1);
                         DoUpdateWorldState(WORLD_STATE_HOR_WAVE_COUNT, _waveCount);
-                        {
-                            std::list<uint32> possibilityList, tempList;
-                            uint32 posIndex = 0;
 
-                            possibilityList.push_back(NPC_WAVE_MERCENARY);
-                            possibilityList.push_back(NPC_WAVE_FOOTMAN);
-                            possibilityList.push_back(NPC_WAVE_RIFLEMAN);
-                            possibilityList.push_back(NPC_WAVE_PRIEST);
-                            possibilityList.push_back(NPC_WAVE_MAGE);
+                        SpawnWaveCreatures(GetBossState(DATA_FALRIC) == DONE ? 4 : 0, 8);
 
-                            // iterate each wave
-                            for (uint8 i = GetBossState(DATA_FALRIC) == DONE ? 4 : 0; i < 8; ++i)
-                            {
-                                tempList = possibilityList;
-
-                                ObjectGuid bossGuid = i <= 3 ? FalricGUID : MarwynGUID;
-
-                                if (!i)
-                                    Trinity::Containers::RandomResize(tempList, 3);
-                                else if (i < 6 && i != 3)
-                                    Trinity::Containers::RandomResize(tempList, 4);
-
-                                for (uint32 entry : tempList)
-                                {
-                                    if (Creature* boss = instance->GetCreature(bossGuid))
-                                    {
-                                        if (Creature* temp = boss->SummonCreature(entry, SpawnPos[posIndex], TEMPSUMMON_DEAD_DESPAWN))
-                                        {
-                                            temp->AI()->SetData(0, i);
-                                            waveGuidList[i].insert(temp->GetGUID());
-                                        }
-                                    }
-
-                                    ++posIndex;
-                                }
-                            }
-                        }
                         events.ScheduleEvent(EVENT_NEXT_WAVE, 5s);
                         break;
                     case EVENT_ADD_WAVE:

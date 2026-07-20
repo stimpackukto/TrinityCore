@@ -15,6 +15,9 @@
  * with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
+// Custom Update - 2026-06-23
+// - Blackwing Lair Razorgore 1~2 player mode support.
+
 #include "ScriptMgr.h"
 #include "blackwing_lair.h"
 #include "GameObject.h"
@@ -72,6 +75,29 @@ Position const SummonPosition[8] =
 
 uint32 const Entry[5] = {12422, 12458, 12416, 12420, 12459};
 
+namespace
+{
+    constexpr uint8 RAZORGORE_REQUIRED_EGG_COUNT = 15;
+    constexpr uint8 RAZORGORE_MAX_LIVING_ADDS = 5;
+    constexpr uint8 RAZORGORE_SPAWN_COUNT = 1;
+
+    bool IsRazorgoreAddEntry(uint32 entry)
+    {
+        switch (entry)
+        {
+            case NPC_BLACKWING_DRAGON:
+            case NPC_BLACKWING_TASKMASTER:
+            case NPC_BLACKWING_LEGIONAIRE:
+            case NPC_BLACKWING_WARLOCK:
+                return true;
+            default:
+                break;
+        }
+
+        return false;
+    }
+}
+
 class instance_blackwing_lair : public InstanceMapScript
 {
 public:
@@ -89,6 +115,36 @@ public:
             // Razorgore
             _eggCount = 0;
             _eggEvent = 0;
+        }
+
+        uint8 GetLivingRazorgoreAddCount()
+        {
+            uint8 count = 0;
+
+            for (GuidList::iterator itr = _razorgoreAddList.begin(); itr != _razorgoreAddList.end();)
+            {
+                Creature* add = instance->GetCreature(*itr);
+
+                if (!add || !add->IsAlive())
+                {
+                    itr = _razorgoreAddList.erase(itr);
+                    continue;
+                }
+
+                ++count;
+                ++itr;
+            }
+
+            return count;
+        }
+
+        void DespawnRazorgoreAdds()
+        {
+            for (ObjectGuid const& guid : _razorgoreAddList)
+                if (Creature* add = instance->GetCreature(guid))
+                    add->DespawnOrUnsummon();
+
+            _razorgoreAddList.clear();
         }
 
         void OnCreatureCreate(Creature* creature) override
@@ -213,14 +269,21 @@ public:
                         _events.ScheduleEvent(EVENT_RAZOR_SPAWN, 45s);
                         _eggEvent = data;
                         _eggCount = 0;
+                        DespawnRazorgoreAdds();
                         break;
                     case NOT_STARTED:
                         _events.CancelEvent(EVENT_RAZOR_SPAWN);
                         _eggEvent = data;
                         _eggCount = 0;
+                        DespawnRazorgoreAdds();
+                        break;
+                    case DONE:
+                        _events.CancelEvent(EVENT_RAZOR_SPAWN);
+                        _eggEvent = data;
+                        DespawnRazorgoreAdds();
                         break;
                     case SPECIAL:
-                        if (++_eggCount == 15)
+                        if (++_eggCount == RAZORGORE_REQUIRED_EGG_COUNT)
                         {
                             if (Creature* razor = GetCreature(DATA_RAZORGORE_THE_UNTAMED))
                             {
@@ -228,9 +291,13 @@ public:
                                 razor->RemoveAurasDueToSpell(42013); // MindControl
                                 DoRemoveAurasDueToSpellOnPlayers(42013, true, true);
                             }
+
+                            DespawnRazorgoreAdds();
+
                             _events.ScheduleEvent(EVENT_RAZOR_PHASE_TWO, 1s);
                             _events.CancelEvent(EVENT_RAZOR_SPAWN);
                         }
+
                         if (_eggEvent == NOT_STARTED)
                             SetData(DATA_EGG_EVENT, IN_PROGRESS);
                         break;
@@ -247,6 +314,9 @@ public:
 
         void OnUnitDeath(Unit* unit) override
         {
+            if (IsRazorgoreAddEntry(unit->GetEntry()))
+                _razorgoreAddList.remove(unit->GetGUID());
+
             //! HACK, needed because of buggy CreatureAI after charm
             if (unit->GetEntry() == NPC_RAZORGORE && GetBossState(DATA_RAZORGORE_THE_UNTAMED) != DONE)
                 SetBossState(DATA_RAZORGORE_THE_UNTAMED, DONE);
@@ -264,13 +334,34 @@ public:
                 switch (eventId)
                 {
                     case EVENT_RAZOR_SPAWN:
-                        for (uint8 i = urand(2, 5); i > 0; --i)
-                            if (Creature* summon = instance->SummonCreature(Entry[urand(0, 4)], SummonPosition[urand(0, 7)]))
-                                summon->AI()->DoZoneInCombat();
-                        _events.ScheduleEvent(EVENT_RAZOR_SPAWN, 12s, 17s);
+                    {
+                        uint8 livingAdds = GetLivingRazorgoreAddCount();
+
+                        if (livingAdds < RAZORGORE_MAX_LIVING_ADDS)
+                        {
+                            uint8 freeSlots = RAZORGORE_MAX_LIVING_ADDS - livingAdds;
+                            uint8 spawnCount = RAZORGORE_SPAWN_COUNT;
+
+                            if (spawnCount > freeSlots)
+                                spawnCount = freeSlots;
+
+                            for (uint8 i = 0; i < spawnCount; ++i)
+                            {
+                                if (Creature* summon = instance->SummonCreature(Entry[urand(0, 4)], SummonPosition[urand(0, 7)]))
+                                {
+                                    _razorgoreAddList.push_back(summon->GetGUID());
+                                    summon->AI()->DoZoneInCombat();
+                                }
+                            }
+                        }
+
+                        _events.ScheduleEvent(EVENT_RAZOR_SPAWN, 20s, 25s);
                         break;
+                    }
                     case EVENT_RAZOR_PHASE_TWO:
                         _events.CancelEvent(EVENT_RAZOR_SPAWN);
+                        DespawnRazorgoreAdds();
+
                         if (Creature* razor = GetCreature(DATA_RAZORGORE_THE_UNTAMED))
                             razor->AI()->DoAction(ACTION_PHASE_TWO);
                         break;
@@ -296,6 +387,7 @@ public:
         uint8 _eggCount;
         uint32 _eggEvent;
         GuidList _eggList;
+        GuidList _razorgoreAddList;
 
         // Nefarian
         GuidList _drakonicBonesList;

@@ -32,6 +32,206 @@
 #include "SpellMgr.h"
 #include "TemporarySummon.h"
 
+#include "DatabaseEnv.h"
+#include "Map.h"
+#include "Player.h"
+#include <algorithm>
+#include <ctime>
+#include <fmt/format.h>
+#include <sstream>
+#include <vector>
+
+//보스 트라이타임
+namespace
+{
+    static std::string BossKillJsonEscape(std::string const& value)
+    {
+        std::ostringstream ss;
+
+        for (char ch : value)
+        {
+            switch (ch)
+            {
+                case '\\':
+                    ss << "\\\\";
+                    break;
+                case '"':
+                    ss << "\\\"";
+                    break;
+                case '\n':
+                    ss << "\\n";
+                    break;
+                case '\r':
+                    ss << "\\r";
+                    break;
+                case '\t':
+                    ss << "\\t";
+                    break;
+                default:
+                    ss << ch;
+                    break;
+            }
+        }
+
+        return ss.str();
+    }
+
+    static std::string GetBossKillDifficultyName(Map* map)
+    {
+        if (!map)
+            return "UNK";
+
+        uint8 difficulty = uint8(map->GetDifficulty());
+
+        if (map->IsRaid())
+        {
+            switch (difficulty)
+            {
+                case 0:
+                    return "10N";
+                case 1:
+                    return "25N";
+                case 2:
+                    return "10H";
+                case 3:
+                    return "25H";
+                default:
+                    return "UNK";
+            }
+        }
+
+        switch (difficulty)
+        {
+            case 0:
+                return "N";
+            case 1:
+                return "H";
+            default:
+                return "UNK";
+        }
+    }
+
+    static std::string BuildBossKillRosterJson(Creature* boss, uint32 durationSec)
+    {
+        if (!boss || !boss->GetMap())
+            return "{}";
+
+        Map* map = boss->GetMap();
+
+        std::ostringstream ss;
+
+        ss << "{";
+        ss << "\"instance_id\":" << map->GetInstanceId() << ",";
+        ss << "\"instance_name\":\"" << BossKillJsonEscape(map->GetMapName()) << "\",";
+        ss << "\"boss_name\":\"" << BossKillJsonEscape(boss->GetName()) << "\",";
+        ss << "\"duration_sec\":" << durationSec << ",";
+        ss << "\"players\":[";
+
+        bool first = true;
+
+        Map::PlayerList const& players = map->GetPlayers();
+
+        for (Map::PlayerList::const_iterator itr = players.begin(); itr != players.end(); ++itr)
+        {
+            Player* player = itr->GetSource();
+
+            if (!player)
+                continue;
+
+            if (!player->IsInWorld())
+                continue;
+
+            if (!first)
+                ss << ",";
+
+            first = false;
+
+            ss << "{";
+            ss << "\"guid\":" << player->GetGUID().GetCounter() << ",";
+            ss << "\"name\":\"" << BossKillJsonEscape(player->GetName()) << "\"";
+            ss << "}";
+        }
+
+        ss << "]";
+        ss << "}";
+
+        return ss.str();
+    }
+
+    static uint32 GetBossKillPlayerCount(Creature* boss)
+    {
+        if (!boss || !boss->GetMap())
+            return 0;
+
+        uint32 count = 0;
+
+        Map::PlayerList const& players = boss->GetMap()->GetPlayers();
+
+        for (Map::PlayerList::const_iterator itr = players.begin(); itr != players.end(); ++itr)
+        {
+            Player* player = itr->GetSource();
+
+            if (!player)
+                continue;
+
+            if (!player->IsInWorld())
+                continue;
+
+            ++count;
+        }
+
+        return count;
+    }
+
+    static void LogBossKillToDB(Creature* boss, uint32 engageTime)
+    {
+        if (!boss)
+            return;
+
+        Map* map = boss->GetMap();
+
+        if (!map)
+            return;
+
+        uint32 killTime = uint32(std::time(nullptr));
+        uint32 durationSec = 0;
+
+        if (engageTime > 0 && killTime >= engageTime)
+            durationSec = killTime - engageTime;
+
+        uint32 mapId = map->GetId();
+        uint32 bossEntry = boss->GetEntry();
+
+        std::string difficultyName = GetBossKillDifficultyName(map);
+        std::string bossUid = fmt::format("{}:{}:{}", mapId, bossEntry, difficultyName);
+        std::string rosterJson = BuildBossKillRosterJson(boss, durationSec);
+        uint32 playersCnt = GetBossKillPlayerCount(boss);
+
+        CharacterDatabase.EscapeString(bossUid);
+        CharacterDatabase.EscapeString(difficultyName);
+        CharacterDatabase.EscapeString(rosterJson);
+
+        std::string sql = fmt::format(
+            "INSERT INTO appdata.boss_kill_log "
+            "(boss_uid, difficulty, killed_at, duration_sec, players_cnt, roster_json, map_id, boss_entry) "
+            "VALUES "
+            "('{}', '{}', FROM_UNIXTIME({}), {}, {}, '{}', {}, {})",
+            bossUid,
+            difficultyName,
+            killTime,
+            durationSec,
+            playersCnt,
+            rosterJson,
+            mapId,
+            bossEntry
+        );
+
+        CharacterDatabase.Execute(sql.c_str());
+    }
+}
+//끝
+
+
 // Spell summary for ScriptedAI::SelectSpell
 struct TSpellSummary
 {
@@ -520,6 +720,8 @@ void BossAI::_Reset()
     if (!me->IsAlive())
         return;
 
+	_bossEngageUnixTime = 0;
+
     me->SetCombatPulseDelay(0);
     me->ResetLootMode();
     events.Reset();
@@ -536,10 +738,15 @@ void BossAI::_JustDied()
     scheduler.CancelAll();
     if (instance)
         instance->SetBossState(_bossId, DONE);
+
+	LogBossKillToDB(me, _bossEngageUnixTime);
+
+    _bossEngageUnixTime = 0;
 }
 
 void BossAI::_JustReachedHome()
 {
+	_bossEngageUnixTime = 0;
     me->setActive(false);
 }
 
@@ -550,9 +757,11 @@ void BossAI::_JustEngagedWith(Unit* who)
         // bosses do not respawn, check only on enter combat
         if (!instance->CheckRequiredBosses(_bossId, who->ToPlayer()))
         {
+			_bossEngageUnixTime = uint32(std::time(nullptr));
             EnterEvadeMode(EVADE_REASON_SEQUENCE_BREAK);
             return;
         }
+
         instance->SetBossState(_bossId, IN_PROGRESS);
     }
 

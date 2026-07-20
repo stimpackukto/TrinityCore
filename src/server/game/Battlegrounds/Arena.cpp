@@ -25,6 +25,7 @@
 #include "World.h"
 #include "WorldSession.h"
 #include "WorldStatePackets.h"
+#include "CustomArenaReward.h"
 
 void ArenaScore::AppendToPacket(WorldPackets::Battleground::PVPLogData_Player& playerData)
 {
@@ -282,6 +283,9 @@ void Arena::EndBattleground(uint32 winner)
             loserArenaTeam->NotifyStatsChanged();
         }
     }
+
+	// custom arena reward
+    CustomArenaReward::RewardArenaEnd(this, winner);
 
     // end battleground
     Battleground::EndBattleground(winner);

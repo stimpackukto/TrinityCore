@@ -7,12 +7,21 @@
  * option) any later version.
  *
  * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
- * more details.
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License along
  * with this program. If not, see <http://www.gnu.org/licenses/>.
+ */
+
+/*
+ * Custom Update - 2026-06-30
+ *
+ * Trial of the Champion Black Knight phase transition stabilization
+ *
+ * - Stops movement, combat, victim tracking and threat during phase transition death state.
+ * - Prevents The Black Knight from following players while visually dead.
+ * - Restores combat state after resurrection spell.
+ * - Keeps original intro, phase, spell and registration flow unchanged.
  */
 
 #include "Player.h"
@@ -136,7 +145,7 @@ public:
             Initialize();
         }
 
-		void SpellHitTarget(WorldObject* target, SpellInfo const* spellInfo) override
+        void SpellHitTarget(WorldObject* target, SpellInfo const* spellInfo) override
         {
             if (spellInfo->Id == SPELL_EXPLODE || spellInfo->Id == SPELL_EXPLODE_H)
             {
@@ -157,13 +166,15 @@ public:
             // the spell script of Ghoul Explode functions normally from here on
             if (me->HasAura(SPELL_GHOUL_EXPLODE))
                 return;
+
             DoCast(me, SPELL_GHOUL_EXPLODE, true);
+
             // wtf?
             if (me->GetEntry() == NPC_RISEN_ARELAS || me->GetEntry() == NPC_RISEN_JAEREN)
                 Talk(urand(0, 2));
         }
 
-		void DamageTaken(Unit* /*attacker*/, uint32& /*damage*/, DamageEffectType /*damageType*/, SpellInfo const* /*spellInfo = nullptr*/) override
+        void DamageTaken(Unit* /*attacker*/, uint32& /*damage*/, DamageEffectType /*damageType*/, SpellInfo const* /*spellInfo = nullptr*/) override
         {
             if (HealthBelowPct(31) && !doExplode)
             {
@@ -190,6 +201,7 @@ public:
         {
             if (who == me)
                 return;
+
             if (Creature* knight = instance->GetCreature(DATA_BLACK_KNIGHT))
             {
                 if (!knight->HasAura(SPELL_BLACK_KNIGHT_DIE))
@@ -233,6 +245,7 @@ public:
                         break;
                 }
             }
+
             DoMeleeAttackIfReady();
         }
     };
@@ -261,15 +274,19 @@ public:
         {
             uiPhase = PHASE_UNDEAD;
             achievementCredit = true;
+            phaseTransitionDeath = false;
         }
 
         uint8 uiPhase;
         bool achievementCredit;
+        bool phaseTransitionDeath;
 
         void Reset() override
         {
             me->SetDisplayId(me->GetNativeDisplayId());
             SetEquipmentSlots(false, EQUIP_SWORD, EQUIP_NO_CHANGE, EQUIP_NO_CHANGE);
+            me->SetControlled(false, UNIT_STATE_ROOT);
+            me->RemoveFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_IMMUNE_TO_PC);
             _Reset();
             Initialize();
         }
@@ -277,7 +294,81 @@ public:
         void EnterEvadeMode(EvadeReason why = EVADE_REASON_OTHER) override
         {
             BossAI::EnterEvadeMode(why);
+            me->SetControlled(false, UNIT_STATE_ROOT);
             me->RemoveFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_NON_ATTACKABLE | UNIT_FLAG_IMMUNE_TO_PC);
+            phaseTransitionDeath = false;
+        }
+
+        bool AttackNearestPlayer()
+        {
+            Map::PlayerList const& players = me->GetMap()->GetPlayers();
+
+            for (Map::PlayerList::const_iterator itr = players.begin(); itr != players.end(); ++itr)
+            {
+                Player* player = itr->GetSource();
+
+                if (!player || player->IsGameMaster() || !player->IsAlive())
+                    continue;
+
+                AddThreat(player, 1.0f);
+                AttackStart(player);
+                DoZoneInCombat();
+                return true;
+            }
+
+            return false;
+        }
+
+        void EnterPhaseTransitionDeathState()
+        {
+            phaseTransitionDeath = true;
+
+            events.Reset();
+
+            me->InterruptNonMeleeSpells(true);
+            me->RemoveAllAuras();
+            me->SetControlled(false, UNIT_STATE_ROOT);
+
+            me->AttackStop();
+            me->CombatStop(true);
+            me->GetThreatManager().ClearAllThreat();
+
+            me->GetMotionMaster()->Clear();
+            me->GetMotionMaster()->MoveIdle();
+
+            me->SetReactState(REACT_PASSIVE);
+            me->SetFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_NON_ATTACKABLE | UNIT_FLAG_IMMUNE_TO_PC);
+
+            me->SetHealth(0);
+            me->SetStandState(UNIT_STAND_STATE_DEAD);
+
+            DoCast(me, SPELL_BLACK_KNIGHT_DIE);
+
+            for (SummonList::const_iterator itr = summons.begin(); itr != summons.end(); ++itr)
+            {
+                Creature* ghoul = ObjectAccessor::GetCreature(*me, *itr);
+
+                if (ghoul && ghoul->IsAlive() && !ghoul->HasAura(SPELL_GHOUL_EXPLODE))
+                    ENSURE_AI(npc_risen_ghoul::npc_risen_ghoulAI, ghoul->AI())->DoExplode();
+            }
+        }
+
+        void RestoreAfterPhaseTransition()
+        {
+            phaseTransitionDeath = false;
+
+            me->SetControlled(false, UNIT_STATE_ROOT);
+            me->SetFullHealth();
+            me->SetStandState(UNIT_STAND_STATE_STAND);
+
+            me->RemoveFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_NON_ATTACKABLE | UNIT_FLAG_IMMUNE_TO_PC);
+            me->SetReactState(REACT_AGGRESSIVE);
+
+            me->GetThreatManager().ClearAllThreat();
+            me->CombatStop(true);
+            me->AttackStop();
+
+            AttackNearestPlayer();
         }
 
         // Events are not resetted in this function
@@ -327,7 +418,7 @@ public:
                 achievementCredit = false;
         }
 
-		void SpellHit(WorldObject* /*caster*/, SpellInfo const* spellInfo) override
+        void SpellHit(WorldObject* /*caster*/, SpellInfo const* spellInfo) override
         {
             if (spellInfo->Id == SPELL_BLACK_KNIGHT_RES)
             {
@@ -336,6 +427,7 @@ public:
                 // But the other templates are missing correct damage modifiers
                 me->SetFullHealth();
                 me->SetStandState(UNIT_STAND_STATE_STAND);
+
                 if (uiPhase == PHASE_UNDEAD)
                 {
                     me->SetDisplayId(MODEL_SKELETON);
@@ -347,7 +439,10 @@ public:
                     SetEquipmentSlots(false, EQUIP_UNEQUIP, EQUIP_NO_CHANGE, EQUIP_NO_CHANGE);
                     Talk(SAY_PHASE_3);
                 }
+
                 ++uiPhase;
+
+                RestoreAfterPhaseTransition();
                 LoadEvents();
             }
         }
@@ -372,26 +467,25 @@ public:
                 summon->CastSpell(summon, SPELL_DESECRATION_ARM, true);
                 return;
             }
+
             summons.Summon(summon);
-            summon->AI()->AttackStart(me->GetVictim());
+
+            if (Unit* victim = me->GetVictim())
+                summon->AI()->AttackStart(victim);
         }
 
-		void DamageTaken(Unit* /*attacker*/, uint32& damage, DamageEffectType /*damageType*/, SpellInfo const* /*spellInfo = nullptr*/) override
+        void DamageTaken(Unit* /*attacker*/, uint32& damage, DamageEffectType /*damageType*/, SpellInfo const* /*spellInfo = nullptr*/) override
         {
+            if (phaseTransitionDeath || me->HasAura(SPELL_BLACK_KNIGHT_DIE))
+            {
+                damage = 0;
+                return;
+            }
+
             if (damage >= me->GetHealth() && uiPhase < PHASE_GHOST)
             {
                 damage = 0;
-                events.Reset();
-                me->RemoveAllAuras();
-                me->SetHealth(0);
-                me->SetStandState(UNIT_STAND_STATE_DEAD);
-                DoCast(me, SPELL_BLACK_KNIGHT_DIE);
-                for (SummonList::const_iterator itr = summons.begin(); itr != summons.end(); ++itr)
-                {
-                    Creature* ghoul = ObjectAccessor::GetCreature(*me, *itr);
-                    if (ghoul && ghoul->IsAlive() && !ghoul->HasAura(SPELL_GHOUL_EXPLODE))
-                        ENSURE_AI(npc_risen_ghoul::npc_risen_ghoulAI, ghoul->AI())->DoExplode();
-                }
+                EnterPhaseTransitionDeathState();
             }
         }
 
@@ -417,6 +511,9 @@ public:
         void UpdateAI(uint32 uiDiff) override
         {
             events.Update(uiDiff);
+
+            if (phaseTransitionDeath || me->HasAura(SPELL_BLACK_KNIGHT_DIE))
+                return;
 
             if (me->HasUnitState(UNIT_STATE_CASTING))
                 return;
@@ -467,6 +564,7 @@ public:
                         break;
                 }
             }
+
             DoMeleeAttackIfReady();
         }
     };
@@ -567,7 +665,7 @@ public:
             // when the dummy aura is removed, announcer 'dies'
             GetTarget()->RemoveAura(SPELL_DEATH_RESPITE_DND);
             GetTarget()->CastSpell(GetTarget(), SPELL_FEIGN_DEATH, true);
-			GetTarget()->SetUnitFlag(UNIT_FLAG_UNINTERACTIBLE);
+            GetTarget()->SetUnitFlag(UNIT_FLAG_UNINTERACTIBLE);
         }
 
         void Register() override
@@ -605,21 +703,25 @@ public:
         {
             if (!GetHitUnit())
                 return;
+
             uint32 bloodPlague = GetCaster()->GetMap()->IsHeroic() ? SPELL_BLOOD_PLAGUE_H : SPELL_BLOOD_PLAGUE;
             uint32 frostFever = GetCaster()->GetMap()->IsHeroic() ? SPELL_FROST_FEVER_H : SPELL_FROST_FEVER;
 
             int32 damage = GetHitDamage();
             int32 bonus = 0;
+
             if (GetHitUnit()->HasAura(frostFever))
             {
                 bonus += int32(damage * 0.3f);
                 GetHitUnit()->RemoveAurasDueToSpell(frostFever);
             }
+
             if (GetHitUnit()->HasAura(bloodPlague))
             {
                 bonus += int32(damage * 0.3f);
                 GetHitUnit()->RemoveAurasDueToSpell(bloodPlague);
             }
+
             SetHitDamage(damage + bonus);
         }
 
@@ -708,8 +810,10 @@ public:
     {
         if (target->GetEntry() != NPC_BLACK_KNIGHT)
             return false;
+
         if (!ENSURE_AI(boss_black_knight::boss_black_knightAI, target->GetAI())->achievementCredit)
             return false;
+
         return true;
     }
 };
