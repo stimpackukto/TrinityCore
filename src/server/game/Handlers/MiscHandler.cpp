@@ -79,6 +79,17 @@ void WorldSession::HandleRepopRequest(WorldPackets::Misc::RepopRequest& /*packet
     GetPlayer()->RemoveGhoul();
     GetPlayer()->RemovePet(nullptr, PET_SAVE_NOT_IN_SLOT, true);
     GetPlayer()->BuildPlayerRepop();
+
+	// Custom Update - 2026-08-01
+    // Active Scourge Sabotage players become spectators at the
+    // death position and remain inside the current instance.
+    if (GetPlayer()->IsScourgeSabotageParticipant())
+    {
+        GetPlayer()->m_InstanceValid = true;
+        GetPlayer()->UpdateHomebindTime(0);
+        return;
+    }
+
     GetPlayer()->RepopAtGraveyard();
 }
 
@@ -549,6 +560,16 @@ void WorldSession::HandleReclaimCorpse(WorldPackets::Misc::ReclaimCorpse& /*pack
 {
     TC_LOG_DEBUG("network", "WORLD: Received CMSG_RECLAIM_CORPSE");
 
+	// Custom Update - 2026-08-01
+    // Spectators cannot return to their corpse during the match.
+    if (_player->IsScourgeSabotageParticipant())
+    {
+        ChatHandler(this).SendSysMessage(
+            "폭파전 관전 중에는 부활할 수 없습니다."
+        );
+        return;
+    }
+
     if (_player->IsAlive())
         return;
 
@@ -581,6 +602,17 @@ void WorldSession::HandleReclaimCorpse(WorldPackets::Misc::ReclaimCorpse& /*pack
 void WorldSession::HandleResurrectResponse(WorldPackets::Misc::ResurrectResponse& packet)
 {
     TC_LOG_DEBUG("network", "WORLD: Received CMSG_RESURRECT_RESPONSE");
+
+	// Custom Update - 2026-08-01
+    // Ignore resurrection offers while spectating the match.
+    if (GetPlayer()->IsScourgeSabotageParticipant())
+    {
+        GetPlayer()->ClearResurrectRequestData();
+        ChatHandler(this).SendSysMessage(
+            "폭파전 관전 중에는 부활할 수 없습니다."
+        );
+        return;
+    }
 
     if (GetPlayer()->IsAlive())
         return;

@@ -792,8 +792,49 @@ bool Unit::HasBreakableByDamageCrowdControlAura(Unit* excludeCasterChannel) cons
     if (UnitAI* attackerAI = attacker ? attacker->GetAI() : nullptr)
         attackerAI->DamageDealt(victim, damage, damagetype);
 
+	// ---------------------------------------------------------
+    // Custom Damage Guard
+    //
+    // 이 시점의 damage는 서버 코어 + 서버 AI가 계산한 피해량이다.
+    // 이후 OnDamage 훅에서 피해량이 비정상적으로 증가하더라도
+    // 플레이어가 발생시킨 공격은 이 값을 초과하지 못하게 한다.
+    // ---------------------------------------------------------
+    uint32 const serverCalculatedDamage = damage;
+
     // Hook for OnDamage Event
     sScriptMgr->OnDamage(attacker, victim, damage);
+
+	// ---------------------------------------------------------
+    // Custom Damage Guard
+    // 서버 계산값보다 증가한 피해 차단
+    // ---------------------------------------------------------
+    if (attacker && victim && attacker != victim && damage > serverCalculatedDamage)
+    {
+        Player* sourcePlayer = attacker->GetCharmerOrOwnerPlayerOrPlayerItself();
+
+        if (sourcePlayer && sourcePlayer->GetSession())
+        {
+            uint32 const modifiedDamage = damage;
+            uint32 const spellId = spellProto ? spellProto->Id : 0;
+
+            damage = serverCalculatedDamage;
+
+            TC_LOG_WARN(
+                "entities.unit",
+                "DamageGuard: blocked abnormal damage increase. "
+                "player={} guid={} victim={} spell={} "
+                "serverDamage={} modifiedDamage={} damageType={} schoolMask={}",
+                sourcePlayer->GetName(),
+                sourcePlayer->GetGUID().ToString(),
+                victim->GetGUID().ToString(),
+                spellId,
+                serverCalculatedDamage,
+                modifiedDamage,
+                static_cast<uint32>(damagetype),
+                static_cast<uint32>(damageSchoolMask)
+            );
+        }
+    }
 
     // Signal to pets that their owner was attacked - except when DOT.
     if (attacker != victim && damagetype != DOT)
@@ -2168,6 +2209,39 @@ void Unit::AttackerStateUpdate(Unit* victim, WeaponAttackType attType, bool extr
 
     if ((attType == BASE_ATTACK || attType == OFF_ATTACK) && !IsWithinLOSInMap(victim))
         return;
+
+	// ---------------------------------------------------------
+    // Custom Attack Speed Guard
+    //
+    // 일반 플레이어 평타는 서버 공격 타이머가 0일 때만 허용한다.
+    // 정상적인 추가 공격은 extra == true로 들어오므로 검사에서 제외한다.
+    //
+    // BASE_ATTACK / OFF_ATTACK을 각각 서버 타이머로 검사하기 때문에
+    // 쌍수 공격도 정상적으로 처리된다.
+    // ---------------------------------------------------------
+    if (!extra && (attType == BASE_ATTACK || attType == OFF_ATTACK))
+    {
+        if (Player* sourcePlayer = ToPlayer())
+        {
+            uint32 const remainingAttackTime = getAttackTimer(attType);
+
+            if (remainingAttackTime > 0)
+            {
+                TC_LOG_WARN(
+                    "entities.unit",
+                    "AttackSpeedGuard: blocked early melee attack. "
+                    "player={} guid={} victim={} attackType={} remainingAttackTime={}",
+                    sourcePlayer->GetName(),
+                    sourcePlayer->GetGUID().ToString(),
+                    victim->GetGUID().ToString(),
+                    static_cast<uint32>(attType),
+                    remainingAttackTime
+                );
+
+                return;
+            }
+        }
+    }
 
     AtTargetAttacked(victim, true);
     RemoveAurasWithInterruptFlags(AURA_INTERRUPT_FLAG_MELEE_ATTACK);

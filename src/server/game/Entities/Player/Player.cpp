@@ -305,7 +305,7 @@ namespace
         return range;
     }
 
-    static void ResetPlayerCombatRangeNoticeState(Player* player)
+    [[maybe_unused]] static void ResetPlayerCombatRangeNoticeState(Player* player)
     {
         if (!player)
             return;
@@ -1241,7 +1241,26 @@ void Player::Update(uint32 p_time)
     if (!IsInWorld())
         return;
 
-	UpdatePlayerCombatRangeNotice(this, p_time);
+    /*
+     * Custom Update - 2026-08-16
+     * 광폭화 인챈트가 없으면 Proc Aura 제거
+     */
+    if (HasAura(900217))
+    {
+        Item* mainHand = GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_MAINHAND);
+        Item* offHand  = GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_OFFHAND);
+        Item* ranged   = GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_RANGED);
+
+        bool hasBerserkEnchant =
+            (mainHand && mainHand->GetEnchantmentId(TEMP_ENCHANTMENT_SLOT) == 3923) ||
+            (offHand  && offHand->GetEnchantmentId(TEMP_ENCHANTMENT_SLOT) == 3923) ||
+            (ranged   && ranged->GetEnchantmentId(TEMP_ENCHANTMENT_SLOT) == 3923);
+
+        if (!hasBerserkEnchant)
+            RemoveAurasDueToSpell(900217);
+    }
+
+    UpdatePlayerCombatRangeNotice(this, p_time);
 
     // undelivered mail
     if (m_nextMailDelivereTime && m_nextMailDelivereTime <= GameTime::GetGameTime())
@@ -4255,17 +4274,17 @@ void Player::DeleteFromDB(ObjectGuid playerguid, uint32 accountId, bool updateRe
     if (characterInfo)
         name = characterInfo->Name;
 
-	if (!name.empty())
-	{
-		CharacterDatabase.PExecute(
-			"INSERT INTO appdata.activity_log "
-			"(account_id, character_guid, type, message, created_at) "
-			"VALUES ({}, {}, 'character_delete', '🗑 캐릭터 삭제 : {}', NOW())",
-			accountId,
-			guid,
-			name
-		);
-	}
+    if (!name.empty())
+    {
+        CharacterDatabase.PExecute(
+            "INSERT INTO appdata.activity_log "
+            "(account_id, character_guid, type, message, created_at) "
+            "VALUES ({}, {}, 'character_delete', '🗑 캐릭터 삭제 : {}', NOW())",
+            accountId,
+            guid,
+            name
+        );
+    }
 
     if (deleteFinally)
         charDeleteMethod = CHAR_DELETE_REMOVE;
@@ -4720,6 +4739,17 @@ void Player::BuildPlayerRepop()
 
 void Player::ResurrectPlayer(float restore_percent, bool applySickness)
 {
+	// Custom Update - 2026-08-01
+    // Active sabotage spectators remain ghosts until the match ends.
+    if (IsScourgeSabotageParticipant() &&
+        HasFlag(
+            PLAYER_FLAGS,
+            PLAYER_FLAGS_GHOST
+        ))
+    {
+        return;
+    }
+
     WorldPackets::Misc::DeathReleaseLoc packet;
     packet.MapID = -1;
     GetSession()->SendPacket(packet.Write());
@@ -7149,7 +7179,14 @@ void Player::UpdateArea(uint32 newArea)
 
     AreaTableEntry const* area = sAreaTableStore.LookupEntry(newArea);
     bool oldFFAPvPArea = pvpInfo.IsInFFAPvPArea;
-    pvpInfo.IsInFFAPvPArea = area && (area->Flags & AREA_FLAG_ARENA);
+    // Custom Update - 2026-07-31
+    // Treat all of Stratholme (map 329) as a Free-For-All PvP area.
+    bool const customStratholmeFFA =
+        GetMapId() == 329;
+
+    pvpInfo.IsInFFAPvPArea =
+        customStratholmeFFA ||
+        (area && (area->Flags & AREA_FLAG_ARENA));
     UpdatePvPState(true);
 
     // check if we were in ffa arena and we left
@@ -19468,7 +19505,7 @@ bool Player::CheckInstanceValidity(bool /*isLogin*/)
     if (!map || !map->IsDungeon())
         return true;
 
-	if (Map::IsSoloRaidMap(map->GetId()))
+    if (Map::IsSoloRaidMap(map->GetId()))
         return true;
 
     // raid instances require the player to be in a raid group to be valid
@@ -22310,14 +22347,14 @@ void Player::UpdatePvPState(bool onlyFFA)
     if (onlyFFA)
         return;
 
-	if (ClearAlwaysPvPInNoPvPArea(this))
-		return;
+    if (ClearAlwaysPvPInNoPvPArea(this))
+        return;
 
-	if (ShouldForceAlwaysPvP(this))
-	{
-		ForceAlwaysPvP(this);
-		return;
-	}
+    if (ShouldForceAlwaysPvP(this))
+    {
+        ForceAlwaysPvP(this);
+        return;
+    }
 
     if (pvpInfo.IsHostile)                                  // in hostile area
     {

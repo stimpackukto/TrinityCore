@@ -583,7 +583,7 @@ static bool HandleDeliveryGiftCommand(ChatHandler* handler)
         if (!plr) continue;
         if (!plr->IsInWorld()) continue;
 
-        plr->AddAura(selectedSpell, plr);
+   //     plr->AddAura(selectedSpell, plr);
         ++hit;
     }
 

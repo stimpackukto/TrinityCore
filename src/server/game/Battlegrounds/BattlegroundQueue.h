@@ -49,6 +49,7 @@ struct GroupQueueInfo                                       // stores informatio
     uint32  OpponentsTeamRating;                            // for rated arena matches
     uint32  OpponentsMatchmakerRating;                      // for rated arena matches
     uint32  PreviousOpponentsTeamId;                        // excluded from the current queue until the timer is met
+    bool    IsCustomWarsong = false;
 };
 
 enum BattlegroundQueueGroupTypes
@@ -56,9 +57,11 @@ enum BattlegroundQueueGroupTypes
     BG_QUEUE_PREMADE_ALLIANCE   = 0,
     BG_QUEUE_PREMADE_HORDE      = 1,
     BG_QUEUE_NORMAL_ALLIANCE    = 2,
-    BG_QUEUE_NORMAL_HORDE       = 3
+    BG_QUEUE_NORMAL_HORDE       = 3,
+    BG_QUEUE_CUSTOM_WARSONG_ALLIANCE = 4,
+    BG_QUEUE_CUSTOM_WARSONG_HORDE    = 5
 };
-#define BG_QUEUE_GROUP_TYPES_COUNT 4
+#define BG_QUEUE_GROUP_TYPES_COUNT 6
 
 enum BattlegroundQueueInvitationType
 {
@@ -80,8 +83,9 @@ class TC_GAME_API BattlegroundQueue
         void FillPlayersToBG(Battleground* bg);
         bool CheckPremadeMatch(uint32 MinPlayersPerTeam, uint32 MaxPlayersPerTeam);
         bool CheckNormalMatch(Battleground* bg_template, uint32 minPlayers, uint32 maxPlayers);
+        bool CheckCustomWarsongMatch(uint32 maxPlayers);
         bool CheckSkirmishForSameFaction(uint32 minPlayersPerTeam);
-        GroupQueueInfo* AddGroup(Player* leader, Group const* group, PvPDifficultyEntry const* bracketEntry, bool isRated, bool isPremade, uint32 ArenaRating, uint32 MatchmakerRating, uint32 ArenaTeamId = 0, uint32 OpponentsArenaTeamId = 0);
+        GroupQueueInfo* AddGroup(Player* leader, Group const* group, PvPDifficultyEntry const* bracketEntry, bool isRated, bool isPremade, uint32 ArenaRating, uint32 MatchmakerRating, uint32 ArenaTeamId = 0, uint32 OpponentsArenaTeamId = 0, bool isCustomWarsong = false);
         void RemovePlayer(ObjectGuid guid, bool decreaseInvitedCount);
         bool IsPlayerInvited(ObjectGuid pl_guid, const uint32 bgInstanceGuid, const uint32 removeTime);
         bool GetPlayerGroupInfoData(ObjectGuid guid, GroupQueueInfo* ginfo);

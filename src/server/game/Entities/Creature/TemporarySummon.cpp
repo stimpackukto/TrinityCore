@@ -16,8 +16,8 @@
  */
 
 /*
- * Custom Update - 2026-07-17
- * - Keep Priestess Delrissa encounter summons from being removed by owner-idle cleanup.
+ * Custom Update - 2026-07-29
+ * - Keep Priestess Delrissa encounter lackeys active in Magisters' Terrace.
  */
 
 #include "TemporarySummon.h"
@@ -31,96 +31,15 @@
 #include "Pet.h"
 #include "Player.h"
 
-#include <fstream>
-#include <mutex>
-#include <unordered_map>
-#include <vector>
-#include <algorithm>
-#include <ctime>
-
 namespace
 {
-    uint32 constexpr CUSTOM_TEMP_SUMMON_OWNER_IDLE_CLEANUP_DELAY = 180000;
-    uint32 constexpr CUSTOM_TEMP_SUMMON_OWNER_IDLE_CHECK_INTERVAL = 5000;
-    float constexpr CUSTOM_TEMP_SUMMON_OWNER_IDLE_PLAYER_CHECK_DISTANCE = 200.0f;
-    uint32 constexpr CUSTOM_TEMP_SUMMON_OWNER_IDLE_PRESERVE_SUMMONER_ENTRY = 24560;
-
-    bool CustomTempSummonIsUnitActive(Unit* unit)
-    {
-        if (!unit || !unit->IsAlive())
-            return false;
-
-        return unit->IsInCombat() ||
-            unit->GetVictim() ||
-            unit->IsNonMeleeSpellCast(false) ||
-            unit->HasUnitState(UNIT_STATE_CASTING | UNIT_STATE_CHASE | UNIT_STATE_FOLLOW | UNIT_STATE_FLEEING | UNIT_STATE_CONFUSED | UNIT_STATE_DISTRACTED);
-    }
-
-	bool CustomTempSummonUnsummonFarPlayerPet(TempSummon* summon)
-    {
-        if (!summon)
-            return false;
-
-        if (!summon->IsPet())
-            return false;
-
-        Pet* pet = summon->ToPet();
-        if (!pet)
-            return false;
-
-        Unit* owner = pet->GetOwner();
-        if (!owner || !owner->IsInWorld())
-            return false;
-
-        Player* player = owner->ToPlayer();
-        if (!player || !player->IsInWorld())
-            return false;
-
-        if (pet->GetMapId() == player->GetMapId() &&
-            pet->IsWithinDistInMap(player, CUSTOM_TEMP_SUMMON_OWNER_IDLE_PLAYER_CHECK_DISTANCE))
-            return false;
-
-        TC_LOG_INFO("entities.unit",
-            "Custom pet owner distance unsummon. entry={} map={} zone={} owner={} distanceLimit={}",
-            pet->GetEntry(),
-            pet->GetMapId(),
-            pet->GetZoneId(),
-            player->GetGUID().ToString(),
-            CUSTOM_TEMP_SUMMON_OWNER_IDLE_PLAYER_CHECK_DISTANCE);
-
-        player->RemovePet(pet, PET_SAVE_AS_CURRENT, false);
-        return true;
-    }
-
-    bool CustomTempSummonHasPlayerNear(WorldObject* object, float distance)
-    {
-        if (!object || !object->IsInWorld())
-            return false;
-
-        Map* map = object->GetMap();
-        if (!map)
-            return false;
-
-        Map::PlayerList const& players = map->GetPlayers();
-
-        for (Map::PlayerList::const_iterator itr = players.begin(); itr != players.end(); ++itr)
-        {
-            Player* player = itr->GetSource();
-            if (!player || !player->IsInWorld())
-                continue;
-
-            if (object->IsWithinDistInMap(player, distance))
-                return true;
-        }
-
-        return false;
-    }
+    uint32 constexpr MAP_MAGISTERS_TERRACE = 585;
+    uint32 constexpr NPC_PRIESTESS_DELRISSA = 24560;
 }
 
 TempSummon::TempSummon(SummonPropertiesEntry const* properties, WorldObject* owner, bool isWorldObject) :
 Creature(isWorldObject), m_Properties(properties), m_type(TEMPSUMMON_MANUAL_DESPAWN),
-m_timer(0), m_lifetime(0), m_canFollowOwner(true),
-m_ownerIdleCleanupTimer(0), m_ownerIdleCheckTimer(0)
+m_timer(0), m_lifetime(0), m_canFollowOwner(true)
 {
     if (owner)
         m_summonerGUID = owner->GetGUID();
@@ -154,167 +73,6 @@ GameObject* TempSummon::GetSummonerGameObject() const
 
 void TempSummon::Update(uint32 diff)
 {
-	if (CustomTempSummonUnsummonFarPlayerPet(this))
-        return;
-
-    if (m_ownerIdleCheckTimer <= diff)
-    {
-        m_ownerIdleCheckTimer = CUSTOM_TEMP_SUMMON_OWNER_IDLE_CHECK_INTERVAL;
-
-        bool resetIdleTimer = false;
-
-        if (CustomTempSummonIsUnitActive(this))
-            resetIdleTimer = true;
-
-        WorldObject* owner = GetSummoner();
-
-        if (!owner)
-        {
-            // Owner disappeared. Treat this TempSummon as orphaned and clean it after the idle delay.
-        }
-        else if (Unit* ownerUnit = owner->ToUnit())
-        {
-            if (ownerUnit->GetTypeId() == TYPEID_PLAYER)
-            {
-                if (owner->IsInWorld() &&
-                    owner->GetMapId() == GetMapId() &&
-                    IsWithinDistInMap(owner, CUSTOM_TEMP_SUMMON_OWNER_IDLE_PLAYER_CHECK_DISTANCE))
-                    resetIdleTimer = true;
-            }
-            else
-            {
-                if (Creature const* ownerCreature = ownerUnit->ToCreature())
-                    if (ownerCreature->GetEntry() == CUSTOM_TEMP_SUMMON_OWNER_IDLE_PRESERVE_SUMMONER_ENTRY)
-                        resetIdleTimer = true;
-
-                if (CustomTempSummonIsUnitActive(ownerUnit))
-                    resetIdleTimer = true;
-            }
-        }
-        else if (GameObject* ownerGameObject = owner->ToGameObject())
-        {
-            if (CustomTempSummonHasPlayerNear(this, CUSTOM_TEMP_SUMMON_OWNER_IDLE_PLAYER_CHECK_DISTANCE) ||
-                CustomTempSummonHasPlayerNear(ownerGameObject, CUSTOM_TEMP_SUMMON_OWNER_IDLE_PLAYER_CHECK_DISTANCE))
-                resetIdleTimer = true;
-        }
-        else
-            resetIdleTimer = true;
-
-        if (resetIdleTimer)
-            m_ownerIdleCleanupTimer = 0;
-        else
-        {
-            if (m_ownerIdleCleanupTimer < CUSTOM_TEMP_SUMMON_OWNER_IDLE_CLEANUP_DELAY)
-                m_ownerIdleCleanupTimer += CUSTOM_TEMP_SUMMON_OWNER_IDLE_CHECK_INTERVAL;
-
-            if (m_ownerIdleCleanupTimer >= CUSTOM_TEMP_SUMMON_OWNER_IDLE_CLEANUP_DELAY)
-            {
-                TC_LOG_INFO("entities.unit",
-                    "TempSummon owner idle cleanup. entry={} map={} zone={} summonType={} timer={} lifetime={} summonerGUID={}",
-                    GetEntry(),
-                    GetMapId(),
-                    GetZoneId(),
-                    uint32(m_type),
-                    m_timer,
-                    m_lifetime,
-                    m_summonerGUID.ToString());
-
-                UnSummon();
-                return;
-            }
-        }
-    }
-    else
-        m_ownerIdleCheckTimer -= diff;
-
-	{
-    uint32 mapId = GetMapId();
-
-    if (mapId == 571 || mapId == 530)
-    {
-        struct CustomTempSummonStat
-        {
-            uint64 count = 0;
-            uint32 mapId = 0;
-            uint32 entry = 0;
-            uint32 summonType = 0;
-            uint32 timer = 0;
-            uint32 lifetime = 0;
-        };
-
-        static std::mutex customTempSummonLogMutex;
-        static std::unordered_map<uint64, CustomTempSummonStat> customTempSummonStats;
-        static time_t customTempSummonLastLog = 0;
-
-        uint32 entry = GetEntry();
-        uint32 summonType = uint32(m_type);
-
-        uint64 key =
-            (uint64(mapId) << 40) |
-            (uint64(entry) << 8) |
-            uint64(summonType);
-
-        time_t now = time(nullptr);
-
-        {
-            std::lock_guard<std::mutex> lock(customTempSummonLogMutex);
-
-            CustomTempSummonStat& stat = customTempSummonStats[key];
-            stat.count++;
-            stat.mapId = mapId;
-            stat.entry = entry;
-            stat.summonType = summonType;
-            stat.timer = m_timer;
-            stat.lifetime = m_lifetime;
-
-            if (now - customTempSummonLastLog >= 10)
-            {
-                customTempSummonLastLog = now;
-
-                std::vector<CustomTempSummonStat> rows;
-                rows.reserve(customTempSummonStats.size());
-
-                for (std::unordered_map<uint64, CustomTempSummonStat>::const_iterator itr = customTempSummonStats.begin(); itr != customTempSummonStats.end(); ++itr)
-                    rows.push_back(itr->second);
-
-                std::sort(rows.begin(), rows.end(), [](CustomTempSummonStat const& a, CustomTempSummonStat const& b)
-                {
-                    return a.count > b.count;
-                });
-
-                std::ofstream log("/home/esotar/log/world_tempsummon_update_top.log", std::ios::app);
-
-                if (log.is_open())
-                {
-                    log << "[" << now << "] TempSummon update top\n";
-
-                    uint32 printed = 0;
-
-                    for (CustomTempSummonStat const& row : rows)
-                    {
-                        log << "mapId=" << row.mapId
-                            << " entry=" << row.entry
-                            << " summonType=" << row.summonType
-                            << " timer=" << row.timer
-                            << " lifetime=" << row.lifetime
-                            << " updates=" << row.count
-                            << "\n";
-
-                        ++printed;
-
-                        if (printed >= 30)
-                            break;
-                    }
-
-                    log << "\n";
-                }
-
-                customTempSummonStats.clear();
-            }
-        }
-    }
-}
-
     Creature::Update(diff);
 
     if (m_deathState == DEAD)
@@ -475,6 +233,11 @@ void TempSummon::InitSummon()
     WorldObject* owner = GetSummoner();
     if (owner)
     {
+        if (GetMapId() == MAP_MAGISTERS_TERRACE)
+            if (Creature* ownerCreature = GetSummonerCreatureBase())
+                if (ownerCreature->GetEntry() == NPC_PRIESTESS_DELRISSA)
+                    setActive(true);
+
         if (owner->GetTypeId() == TYPEID_UNIT)
         {
             if (owner->ToCreature()->IsAIEnabled())

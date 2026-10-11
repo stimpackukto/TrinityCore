@@ -18,6 +18,8 @@
 #include "ObjectMgr.h"
 #include "WorldPacket.h"
 #include "Opcodes.h"
+#include "SpellMgr.h"
+#include "World.h"
 
 #include <sstream>
 
@@ -1465,6 +1467,7 @@ class spell_guardian_purify : public SpellScript
 #include "ScriptMgr.h"
 #include "Chat.h"
 #include "DatabaseEnv.h"
+#include "DBCStores.h"
 #include "GameObject.h"
 #include "GameObjectAI.h"
 #include "Item.h"
@@ -1490,10 +1493,11 @@ namespace
      * Custom Update - 2026-07-18
      * 전승 룬 애드온 설치 및 버전 확인
      */
-    static constexpr uint32 LEGACY_RUNE_ADDON_REQUIRED_VERSION = 1;
+    static constexpr uint32 LEGACY_RUNE_ADDON_REQUIRED_VERSION = 7;
     static constexpr uint32 LEGACY_RUNE_ADDON_LOGIN_CHECK_DELAY_SECONDS = 8;
-    static std::string const LEGACY_RUNE_ADDON_REQUIRED_VERSION_TEXT = "1";
+    static std::string const LEGACY_RUNE_ADDON_REQUIRED_VERSION_TEXT = "7";
     static std::string const LEGACY_RUNE_ADDON_VERSION_PREFIX = "VERSION:";
+	static std::string const LEGACY_RUNE_MPQ_RUNTIME_HELLO_COMMAND = "MPQRUNTIME:HELLO";
 
     /*
      * Custom Update - 2026-07-18
@@ -1501,6 +1505,13 @@ namespace
      */
     static std::string const LEGACY_RUNE_PATCH4_OK_COMMAND = "PATCH4:OK";
     static std::string const LEGACY_RUNE_PATCH4_MISSING_COMMAND = "PATCH4:MISSING";
+
+	/*
+     * Custom Update - 2026-07-27
+     * 패치4 미설치 안내를 3초 간격으로 총 3회 출력
+     */
+    static constexpr uint32 LEGACY_RUNE_PATCH4_NOTICE_INTERVAL_SECONDS = 3;
+    static constexpr uint8 LEGACY_RUNE_PATCH4_NOTICE_TOTAL_COUNT = 3;
 
     /*
      * Custom Update - 2026-07-18
@@ -1511,6 +1522,32 @@ namespace
     static std::string const LEGACY_RUNE_COMBINE_PREFIX = "COMBINE:";
     static std::string const LEGACY_RUNE_COMBINE_GET_PREFIX = "GETCOMBINE:";
     static std::string const LEGACY_RUNE_GET_COMMAND = "GET";
+
+    /*
+     * Custom Update - 2026-07-28
+     * 전승룬 컬렉션 조회
+     */
+    static std::string const LEGACY_RUNE_COLLECTION_GET_COMMAND = "COLLECTION:GET";
+
+    /*
+     * Custom Update - 2026-08-16
+     * 기간제 커스텀 스펠 조회
+     */
+    static std::string const LEGACY_RUNE_CUSTOM_SPELL_GET_COMMAND = "CUSTOMSPELL:GET";
+
+    /*
+     * Custom Update - 2026-07-28
+     * 전승룬 컬렉션 완성 보상: 하루 1회 전승 재각인
+     */
+    static std::string const LEGACY_RUNE_REENGRAVE_GET_COMMAND = "REENGRAVE:GET";
+    static std::string const LEGACY_RUNE_REENGRAVE_APPLY_PREFIX = "REENGRAVE:APPLY:";
+
+    /*
+     * Custom Update - 2026-07-28
+     * 전승룬 컬렉션 10종 완성 칭호
+     */
+    static constexpr uint32 LEGACY_RUNE_MASTER_TITLE_ID = 178;
+    static constexpr uint32 LEGACY_RUNE_MASTER_TITLE_MASK_ID = 143;
     static std::string const LEGACY_RUNE_ARMORY_OPEN_COMMAND = "ARMORY:OPEN";
     static std::string const LEGACY_RUNE_ARMORY_SEARCH_PREFIX = "ARMORY:SEARCH:";
     static std::string const LEGACY_RUNE_ARMORY_BUY_PREFIX = "ARMORY:BUY:";
@@ -1537,13 +1574,17 @@ namespace
     static constexpr uint32 LEGACY_RUNE_ARMORY_GUILD_TECH_DISCOUNT_PERCENT = 15;
 
     struct LegacyRuneSpellMap
-    {
-        uint32 applyItemEntry;
-        uint32 removeItemEntry;
-        uint32 spellId;
-        uint32 skillId;
-        uint8 blockedClass;
-    };
+	{
+		uint32 applyItemEntry;
+		uint32 removeItemEntry;
+		uint32 spellId;
+		uint32 skillId;
+		uint8 blockedClass;
+
+		uint32 secondSpellId;
+		uint32 allianceSpellId;
+		uint32 hordeSpellId;
+	};
 
     struct LegacyRuneItemRef
     {
@@ -1584,15 +1625,29 @@ namespace
         bool addonDetected;
     };
 
+	struct LegacyRunePatch4Notice
+    {
+        std::chrono::steady_clock::time_point nextNoticeAt;
+        uint8 remainingCount;
+    };
+
     static std::unordered_map<uint32, LegacyRuneAddonLoginCheck> LegacyRuneAddonLoginChecks;
     static std::unordered_map<uint32, std::chrono::steady_clock::time_point> LegacyRuneMagicAltarAccess;
+	static std::unordered_map<uint32, LegacyRunePatch4Notice> LegacyRunePatch4Notices;
 
     static constexpr LegacyRuneSpellMap LegacyRuneSpellMaps[] =
-    {
-        { 56930, 0, 1804, 633, 4 }, // 전승 룬 : 자물쇠 따기, 도적 착용 불가
-        { 56931, 0, 1953, 0, 8 },   // 전승 룬 : 점멸, 마법사 착용 불가
-        { 56932, 0, 5384, 0, 3 }    // 전승 룬 : 죽은척 하기, 사냥꾼 착용 불가
-    };
+	{
+		{ 56930, 0, 1804,  633, 4,  0,     0,     0 }, // 전승 룬 : 자물쇠 따기, 도적 착용 불가
+		{ 56931, 0, 1953,  0,   8,  0,     0,     0 }, // 전승 룬 : 점멸, 마법사 착용 불가
+		{ 56932, 0, 5384,  0,   3,  0,     0,     0 }, // 전승 룬 : 죽은척 하기, 사냥꾼 착용 불가
+		{ 56933, 0, 900205, 0,   1,  0,     0,     0 }, // 전승 룬 : 지휘의 외침, 전사 착용 불가
+		{ 56934, 0, 19752, 0,   2,  0,     0,     0 }, // 전승 룬 : 성스러운 중재, 성기사 착용 불가
+		{ 56935, 0, 29166, 0,  11,  0,     0,     0 }, // 전승 룬 : 정신 자극, 드루이드 착용 불가
+		{ 56936, 0, 49576, 0,   6,  0,     0,     0 }, // 전승 룬 : 죽음의 손아귀, 죽음의 기사 착용 불가
+		{ 56937, 0, 48066, 0,   5,  0,     0,     0 }, // 전승 룬 : 신의 권능 보호막, 사제 착용 불가
+		{ 56938, 0, 0,     0,   7,  0, 32182,  2825 }, // 전승 룬 : 피의 욕망·영웅심, 주술사 착용 불가
+		{ 56939, 0, 48018, 0,   9, 48020,  0,     0 }  // 전승 룬 : 악마의 마법진, 흑마법사 착용 불가
+	};
 
     static constexpr uint32 LegacyRuneCombineReagents[] =
     {
@@ -1619,16 +1674,16 @@ namespace
 
     static constexpr LegacyRuneGuildTechNode LegacyRuneGuildTechNodes[] =
     {
-        { "r1a", "황금의 흐름", 200000, 1 },
-        { "r1b", "상인의 교섭", 200000, 1 },
-        { "r1c", "기여의 확장", 200000, 1 },
-        { "r2a", "결속의 전달", 400000, 2 },
-        { "r2b", "귀환의 숙련", 400000, 2 },
-        { "r2c", "장비의 관리", 400000, 2 },
-        { "r3a", "파괴의 교리", 600000, 3 },
-        { "r3b", "불굴의 수호", 600000, 3 },
-        { "r3c", "생명의 회복", 600000, 3 },
-        { "core", "최후의 결의", 800000, 4 }
+        { "r1a", "황금의 흐름", 500000, 1 },
+        { "r1b", "상인의 교섭", 500000, 1 },
+        { "r1c", "기여의 확장", 500000, 1 },
+        { "r2a", "결속의 전달", 1500000, 2 },
+        { "r2b", "귀환의 숙련", 1500000, 2 },
+        { "r2c", "장비의 관리", 1500000, 2 },
+        { "r3a", "파괴의 교리", 3000000, 3 },
+        { "r3b", "불굴의 수호", 3000000, 3 },
+        { "r3c", "생명의 회복", 3000000, 3 },
+        { "core", "최후의 결의", 10000000, 4 }
     };
 
     static LegacyRuneSpellMap const* FindLegacyRuneApplyMap(uint32 itemEntry)
@@ -1871,32 +1926,69 @@ namespace
         return true;
     }
 
+	static void TeachLegacyRuneSingleSpell(Player* player, uint32 spellId)
+	{
+		if (!player || !spellId)
+			return;
+
+		if (player->HasSpell(spellId))
+			return;
+
+		player->LearnSpell(spellId, false);
+	}
+
+	/*
+	 * Custom Update - 2026-07-27
+	 * 등급이 있는 전승 룬 주문 제거 시 1레벨부터 최고 레벨까지 전체 제거
+	 */
+	static void RemoveLegacyRuneSingleSpell(Player* player, uint32 spellId)
+	{
+		if (!player || !spellId)
+			return;
+
+		uint32 firstSpellId = sSpellMgr->GetFirstSpellInChain(spellId);
+		if (!firstSpellId)
+			firstSpellId = spellId;
+
+		if (!player->HasSpell(firstSpellId) && !player->HasSpell(spellId))
+			return;
+
+		player->RemoveSpell(firstSpellId, false, false);
+	}
+
     static void TeachLegacyRuneSpell(Player* player, LegacyRuneSpellMap const* runeMap)
-    {
-        if (!player || !runeMap)
-            return;
+	{
+		if (!player || !runeMap)
+			return;
 
-        if (!player->HasSpell(runeMap->spellId))
-            player->LearnSpell(runeMap->spellId, false);
+		TeachLegacyRuneSingleSpell(player, runeMap->spellId);
+		TeachLegacyRuneSingleSpell(player, runeMap->secondSpellId);
 
-        if (runeMap->skillId)
-        {
-            uint16 maxSkill = uint16(std::min<uint32>(player->GetLevel() * 5, 400));
-            player->SetSkill(runeMap->skillId, 1, maxSkill, maxSkill);
-        }
-    }
+		if (player->GetTeamId() == TEAM_ALLIANCE)
+			TeachLegacyRuneSingleSpell(player, runeMap->allianceSpellId);
+		else
+			TeachLegacyRuneSingleSpell(player, runeMap->hordeSpellId);
+
+		if (runeMap->skillId)
+		{
+			uint16 maxSkill = uint16(std::min<uint32>(player->GetLevel() * 5, 400));
+			player->SetSkill(runeMap->skillId, 1, maxSkill, maxSkill);
+		}
+	}
 
     static void RemoveLegacyRuneSpell(Player* player, LegacyRuneSpellMap const* runeMap)
-    {
-        if (!player || !runeMap)
-            return;
+	{
+		if (!player || !runeMap)
+			return;
 
-        if (player->HasSpell(runeMap->spellId))
-            player->RemoveSpell(runeMap->spellId, false, false);
+		RemoveLegacyRuneSingleSpell(player, runeMap->spellId);
+		RemoveLegacyRuneSingleSpell(player, runeMap->secondSpellId);
+		RemoveLegacyRuneSingleSpell(player, runeMap->allianceSpellId);
+		RemoveLegacyRuneSingleSpell(player, runeMap->hordeSpellId);
 
-        if (runeMap->skillId && player->GetSkillValue(runeMap->skillId))
-            player->SetSkill(runeMap->skillId, 0, 0, 0);
-    }
+		if (runeMap->skillId && player->GetSkillValue(runeMap->skillId))
+			player->SetSkill(runeMap->skillId, 0, 0, 0);
+	}
 
     static bool DeleteLegacyRuneCharacterState(Player* player)
     {
@@ -1918,6 +2010,223 @@ namespace
             return;
 
         player->WhisperAddon(LEGACY_RUNE_ADDON_PREFIX + "\t" + payload, player);
+    }
+
+    /*
+     * Custom Update - 2026-07-28
+     * 전승룬 캐릭터별 컬렉션 영구 기록 및 애드온 동기화
+     */
+    static bool IsLegacyRuneCollectionItem(uint32 itemEntry)
+    {
+        for (LegacyRuneSpellMap const& runeMap : LegacyRuneSpellMaps)
+            if (runeMap.applyItemEntry == itemEntry)
+                return true;
+
+        return false;
+    }
+
+    static void MarkLegacyRuneCollection(Player* player, uint32 itemEntry)
+    {
+        if (!player || !player->GetSession() || !IsLegacyRuneCollectionItem(itemEntry))
+            return;
+
+        CharacterDatabase.PExecute(
+            "INSERT IGNORE INTO legacy_rune_collection "
+            "(guid, account_id, rune_item_id) "
+            "VALUES ({}, {}, {})",
+            player->GetGUID().GetCounter(),
+            player->GetSession()->GetAccountId(),
+            itemEntry);
+    }
+
+    static uint32 GetLegacyRuneCollectionCount(Player* player)
+    {
+        if (!player)
+            return 0;
+
+        static constexpr uint32 collectionSize =
+            sizeof(LegacyRuneSpellMaps) / sizeof(LegacyRuneSpellMaps[0]);
+
+        bool collected[collectionSize] = {};
+
+        for (uint32 index = 0; index < collectionSize; ++index)
+        {
+            if (LegacyRuneSpellMaps[index].blockedClass == player->GetClass())
+                collected[index] = true;
+        }
+
+        QueryResult result = CharacterDatabase.PQuery(
+            "SELECT rune_item_id "
+            "FROM legacy_rune_collection "
+            "WHERE guid = {}",
+            player->GetGUID().GetCounter());
+
+        if (result)
+        {
+            do
+            {
+                uint32 const itemEntry = result->Fetch()[0].GetUInt32();
+
+                for (uint32 index = 0; index < collectionSize; ++index)
+                {
+                    if (LegacyRuneSpellMaps[index].applyItemEntry == itemEntry)
+                    {
+                        collected[index] = true;
+                        break;
+                    }
+                }
+            }
+            while (result->NextRow());
+        }
+
+        uint32 collectedCount = 0;
+
+        for (bool isCollected : collected)
+            if (isCollected)
+                ++collectedCount;
+
+        return collectedCount;
+    }
+
+    static bool TryGrantLegacyRuneMasterTitle(Player* player)
+    {
+        if (!player || !player->GetSession())
+            return false;
+
+        static constexpr uint32 collectionSize =
+            sizeof(LegacyRuneSpellMaps) / sizeof(LegacyRuneSpellMaps[0]);
+
+        if (GetLegacyRuneCollectionCount(player) < collectionSize)
+            return false;
+
+        CharTitlesEntry const* titleEntry =
+            sCharTitlesStore.LookupEntry(LEGACY_RUNE_MASTER_TITLE_ID);
+
+        if (!titleEntry
+            || titleEntry->MaskID != LEGACY_RUNE_MASTER_TITLE_MASK_ID)
+        {
+            player->GetSession()->SendNotification(
+                "전승룬 컬렉션: 전승의 대가 칭호 DBC 정보를 찾을 수 없습니다.");
+            return false;
+        }
+
+        if (player->HasTitle(titleEntry))
+            return true;
+
+        player->SetTitle(titleEntry);
+        player->GetSession()->SendNotification(
+            "전승룬 컬렉션 10종을 완성하여 '전승의 대가' 칭호를 획득했습니다.");
+
+        SendLegacyRuneAddonMessage(
+            player,
+            "COLLECTION:TITLE:AWARDED");
+
+        return true;
+    }
+
+    static void SendLegacyRuneCollectionState(Player* player)
+    {
+        if (!player)
+            return;
+
+        /*
+         * 컬렉션 기능 적용 전에 현재 장착 중이던 전승룬도
+         * 컬렉션을 처음 조회할 때 자동 등록한다.
+         */
+        uint32 const currentItemEntry = GetSavedLegacyRuneItemEntry(player);
+        if (currentItemEntry)
+            MarkLegacyRuneCollection(player, currentItemEntry);
+
+        TryGrantLegacyRuneMasterTitle(player);
+
+        std::string payload = "COLLECTION:STATE:";
+
+        QueryResult result = CharacterDatabase.PQuery(
+            "SELECT rune_item_id "
+            "FROM legacy_rune_collection "
+            "WHERE guid = {} "
+            "ORDER BY rune_item_id",
+            player->GetGUID().GetCounter());
+
+        if (result)
+        {
+            bool first = true;
+
+            do
+            {
+                uint32 const itemEntry = result->Fetch()[0].GetUInt32();
+                if (!IsLegacyRuneCollectionItem(itemEntry))
+                    continue;
+
+                if (!first)
+                    payload += ",";
+
+                payload += std::to_string(itemEntry);
+                first = false;
+            }
+            while (result->NextRow());
+        }
+
+        SendLegacyRuneAddonMessage(player, payload);
+    }
+
+    /*
+     * Custom Update - 2026-08-16
+     * 기간제 커스텀 스펠 조회
+     *
+     * DB: character_temporary_spell
+     * 전송 형식:
+     * CUSTOMSPELL:STATE:900212:남은초,900213:남은초
+     */
+    static void SendLegacyRuneCustomSpellState(Player* player)
+    {
+        if (!player)
+            return;
+
+        uint32 const guid = player->GetGUID().GetCounter();
+        uint32 const now = uint32(::time(nullptr));
+
+        std::string payload = "CUSTOMSPELL:STATE:";
+
+        QueryResult result = CharacterDatabase.PQuery(
+            "SELECT `spell`, `expire_time` "
+            "FROM `character_temporary_spell` "
+            "WHERE `guid` = {} "
+            "ORDER BY `spell`",
+            guid);
+
+        bool first = true;
+
+        if (result)
+        {
+            do
+            {
+                Field* fields = result->Fetch();
+
+                uint32 const spellId = fields[0].GetUInt32();
+                uint32 const expireTime = fields[1].GetUInt32();
+
+                if (expireTime <= now)
+                    continue;
+
+                if (spellId != 900212 && spellId != 900213)
+                    continue;
+
+                uint32 const remaining = expireTime - now;
+
+                if (!first)
+                    payload += ",";
+
+                payload += std::to_string(spellId);
+                payload += ":";
+                payload += std::to_string(remaining);
+
+                first = false;
+            }
+            while (result->NextRow());
+        }
+
+        SendLegacyRuneAddonMessage(player, payload);
     }
 
     static std::string EscapeLegacyRuneSqlLike(std::string text)
@@ -2370,11 +2679,34 @@ namespace
             return true;
         }
 
-        SendLegacyRuneAddonMessage(
-            player,
-            "GUILDTECH:DONATE:OK:" + CleanLegacyRuneAddonText(std::string(node->name) + "에 " + std::to_string(amount) + " RP를 기부했습니다."));
-        SendLegacyRuneGuildTechState(player);
-        return true;
+		/*
+		 * Custom Update - 2026-08-01
+		 *
+		 * 애드온 길드 테크 기부 로그
+		 * - 주간 기부 보상 정산용
+		 * - created_at은 UNIX timestamp로 저장
+		 */
+		LoginDatabase.DirectPExecute(
+			"INSERT INTO appdata.guild_tech_donation_log "
+			"(guild_id, account_id, character_guid, node_id, amount, created_at) "
+			"VALUES ({}, {}, {}, '{}', {}, UNIX_TIMESTAMP())",
+			guildId,
+			accountId,
+			player->GetGUID().GetCounter(),
+			node->nodeId,
+			amount);
+
+		SendLegacyRuneAddonMessage(
+			player,
+			"GUILDTECH:DONATE:OK:" +
+			CleanLegacyRuneAddonText(
+				std::string(node->name) +
+				"에 " +
+				std::to_string(amount) +
+				" RP를 기부했습니다."));
+
+		SendLegacyRuneGuildTechState(player);
+		return true;
     }
 
     static bool HandleLegacyRuneArmoryOpen(Player* player)
@@ -3081,6 +3413,258 @@ namespace
         SendLegacyRuneItemState(player, itemEntry, itemClass, itemSubClass);
     }
 
+    /*
+     * Custom Update - 2026-07-28
+     * 전승룬 컬렉션 10종 완성 보상: 하루 1회 전승 재각인
+     */
+    static bool HasCollectedLegacyRune(Player* player, uint32 itemEntry)
+    {
+        if (!player || !IsLegacyRuneCollectionItem(itemEntry))
+            return false;
+
+        LegacyRuneSpellMap const* runeMap =
+            FindLegacyRuneApplyMap(itemEntry);
+
+        if (!runeMap)
+            return false;
+
+        if (runeMap->blockedClass == player->GetClass())
+            return true;
+
+        QueryResult result = CharacterDatabase.PQuery(
+            "SELECT 1 "
+            "FROM legacy_rune_collection "
+            "WHERE guid = {} AND rune_item_id = {} "
+            "LIMIT 1",
+            player->GetGUID().GetCounter(),
+            itemEntry);
+
+        return bool(result);
+    }
+
+    static bool IsLegacyRuneCollectionComplete(Player* player)
+    {
+        if (!player)
+            return false;
+
+        static constexpr uint32 collectionSize =
+            sizeof(LegacyRuneSpellMaps) / sizeof(LegacyRuneSpellMaps[0]);
+
+        return GetLegacyRuneCollectionCount(player) >= collectionSize;
+    }
+
+    static bool HasUsedLegacyRuneReengraveToday(Player* player)
+	{
+		if (!player)
+			return false;
+
+		QueryResult result = CharacterDatabase.PQuery(
+			"SELECT 1 "
+			"FROM legacy_rune_reengrave_daily "
+			"WHERE guid = {} "
+			"AND updated_at > DATE_SUB(CURRENT_TIMESTAMP, INTERVAL 1 HOUR) "
+			"LIMIT 1",
+			player->GetGUID().GetCounter());
+
+		return bool(result);
+	}
+
+    static void SendLegacyRuneReengraveFail(
+        Player* player,
+        char const* reason)
+    {
+        SendLegacyRuneAddonMessage(
+            player,
+            std::string("REENGRAVE:FAIL:") +
+                CleanLegacyRuneAddonText(
+                    reason ? reason : "전승 재각인에 실패했습니다."));
+    }
+
+    static void SendLegacyRuneReengraveState(Player* player)
+    {
+        if (!player)
+            return;
+
+        bool const unlocked = IsLegacyRuneCollectionComplete(player);
+        bool const available =
+            unlocked && !HasUsedLegacyRuneReengraveToday(player);
+        uint32 const currentItemEntry =
+            GetSavedLegacyRuneItemEntry(player);
+
+        SendLegacyRuneAddonMessage(
+            player,
+            "REENGRAVE:STATE:" +
+                std::to_string(unlocked ? 1 : 0) + ":" +
+                std::to_string(available ? 1 : 0) + ":" +
+                std::to_string(currentItemEntry));
+    }
+
+    static void SaveLegacyRuneReengraveState(
+        Player* player,
+        ItemTemplate const* proto)
+    {
+        if (!player || !player->GetSession() || !proto)
+            return;
+
+        CharacterDatabase.PExecute(
+            "INSERT INTO legacy_rune_character "
+            "(guid, account_id, player_class, player_race, player_level, "
+            "rune_slot, item_guid, item_entry, item_class, item_subclass) "
+            "VALUES ({}, {}, {}, {}, {}, {}, 0, {}, {}, {}) "
+            "ON DUPLICATE KEY UPDATE "
+            "account_id = VALUES(account_id), "
+            "player_class = VALUES(player_class), "
+            "player_race = VALUES(player_race), "
+            "player_level = VALUES(player_level), "
+            "item_guid = 0, "
+            "item_entry = VALUES(item_entry), "
+            "item_class = VALUES(item_class), "
+            "item_subclass = VALUES(item_subclass), "
+            "updated_at = CURRENT_TIMESTAMP",
+            player->GetGUID().GetCounter(),
+            player->GetSession()->GetAccountId(),
+            player->GetClass(),
+            player->GetRace(),
+            player->GetLevel(),
+            LEGACY_RUNE_SLOT_MAIN,
+            proto->ItemId,
+            proto->Class,
+            proto->SubClass);
+    }
+
+    static void MarkLegacyRuneReengraveUsed(
+        Player* player,
+        uint32 itemEntry)
+    {
+        if (!player || !player->GetSession())
+            return;
+
+        CharacterDatabase.PExecute(
+            "INSERT INTO legacy_rune_reengrave_daily "
+            "(guid, account_id, last_reengrave_date, last_item_entry) "
+            "VALUES ({}, {}, CURDATE(), {}) "
+            "ON DUPLICATE KEY UPDATE "
+            "account_id = VALUES(account_id), "
+            "last_reengrave_date = VALUES(last_reengrave_date), "
+            "last_item_entry = VALUES(last_item_entry), "
+            "updated_at = CURRENT_TIMESTAMP",
+            player->GetGUID().GetCounter(),
+            player->GetSession()->GetAccountId(),
+            itemEntry);
+    }
+
+    static bool HandleLegacyRuneReengrave(
+        Player* player,
+        uint32 itemEntry)
+    {
+        if (!player || !player->GetSession())
+            return false;
+
+        if (!IsLegacyRuneCollectionComplete(player))
+        {
+            SendLegacyRuneReengraveFail(
+                player,
+                "전승룬 컬렉션 10종을 모두 수집해야 재각인이 열립니다.");
+            SendLegacyRuneReengraveState(player);
+            return true;
+        }
+
+        LegacyRuneSpellMap const* runeMap =
+            FindLegacyRuneApplyMap(itemEntry);
+
+        if (!runeMap)
+        {
+            SendLegacyRuneReengraveFail(
+                player,
+                "등록되지 않은 전승룬 기술입니다.");
+            return true;
+        }
+
+        if (runeMap->blockedClass == player->GetClass())
+        {
+            SendLegacyRuneReengraveFail(
+                player,
+                "자기 직업의 기본 기술은 재각인할 수 없습니다.");
+            return true;
+        }
+
+        if (!HasCollectedLegacyRune(player, itemEntry))
+        {
+            SendLegacyRuneReengraveFail(
+                player,
+                "수집하지 않은 전승룬 기술입니다.");
+            return true;
+        }
+
+        if (HasUsedLegacyRuneReengraveToday(player))
+        {
+            SendLegacyRuneReengraveFail(
+                player,
+                "전승 재각인 후 1시간이 지나야 다시 재각인할 수 있습니다.");
+            SendLegacyRuneReengraveState(player);
+            return true;
+        }
+
+        uint32 const previousItemEntry =
+            GetSavedLegacyRuneItemEntry(player);
+
+        if (previousItemEntry == itemEntry)
+        {
+            SendLegacyRuneReengraveFail(
+                player,
+                "현재 사용 중인 전승 기술입니다.");
+            return true;
+        }
+
+        ItemTemplate const* proto =
+            sObjectMgr->GetItemTemplate(itemEntry);
+
+        if (!proto)
+        {
+            SendLegacyRuneReengraveFail(
+                player,
+                "전승룬 아이템 정보를 찾을 수 없습니다.");
+            return true;
+        }
+
+        uint64 const previousItemGuid =
+            GetSavedLegacyRuneItemGuid(player);
+
+        if (previousItemEntry)
+            RemoveLegacyRuneSpell(
+                player,
+                FindLegacyRuneApplyMap(previousItemEntry));
+
+        if (previousItemGuid)
+            DeleteLegacyRuneStoredItemByGuid(
+                player,
+                previousItemGuid);
+
+        SaveLegacyRuneReengraveState(player, proto);
+        TeachLegacyRuneSpell(player, runeMap);
+        MarkLegacyRuneReengraveUsed(player, itemEntry);
+
+        player->GetSession()->SendNotification(
+            "전승 재각인: %s 기술로 변경했습니다. 1시간 후 다시 재각인할 수 있습니다.",
+            GetLegacyRuneItemName(itemEntry).c_str());
+
+        SendLegacyRuneAddonMessage(
+            player,
+            "REENGRAVE:OK:" +
+                std::to_string(itemEntry) + ":" +
+                CleanLegacyRuneAddonText(
+                    GetLegacyRuneItemName(itemEntry)));
+
+        SendLegacyRuneItemState(
+            player,
+            itemEntry,
+            proto->Class,
+            proto->SubClass);
+
+        SendLegacyRuneReengraveState(player);
+        return true;
+    }
+
     static bool HandleLegacyRuneApply(Player* player, LegacyRuneItemRef const& itemRef)
     {
         if (!player)
@@ -3161,6 +3745,14 @@ namespace
 
         TeachLegacyRuneSpell(player, currentRuneMap);
 
+        MarkLegacyRuneCollection(player, savedItemEntry);
+        TryGrantLegacyRuneMasterTitle(player);
+
+        SendLegacyRuneAddonMessage(
+            player,
+            "COLLECTION:UNLOCK:" + std::to_string(savedItemEntry));
+
+        SendLegacyRuneReengraveState(player);
         SendLegacyRuneItemState(player, savedItemEntry, savedItemClass, savedItemSubClass);
         return true;
     }
@@ -3497,6 +4089,94 @@ namespace
             itr->second.addonDetected = true;
     }
 
+	    /*
+     * Custom Update - 2026-07-27
+     * 패치4 미설치 안내 반복 처리
+     */
+    static void SendLegacyRunePatch4MissingNotice(Player* player)
+    {
+        if (!player || !player->GetSession())
+            return;
+
+        std::string const message = Trinity::StringFormat(
+            "|cffff2020[패치관리]|r 신규패치4가 감지되지 않았습니다. 일부 콘텐츠를 이용할 수 없습니다. 홈페이지에서 신규패치4를 설치하세요.|r");
+
+        ChatHandler(player->GetSession()).SendSysMessage(message.c_str());
+    }
+
+    static void CancelLegacyRunePatch4MissingNotice(Player* player)
+    {
+        if (!player || !player->GetSession())
+            return;
+
+        LegacyRunePatch4Notices.erase(player->GetSession()->GetAccountId());
+    }
+
+    static void QueueLegacyRunePatch4MissingNotice(Player* player)
+    {
+        if (!player || !player->GetSession())
+            return;
+
+        uint32 const accountId = player->GetSession()->GetAccountId();
+
+        LegacyRunePatch4Notices.erase(accountId);
+
+        // 첫 번째 안내는 즉시 출력
+        SendLegacyRunePatch4MissingNotice(player);
+
+        if (LEGACY_RUNE_PATCH4_NOTICE_TOTAL_COUNT <= 1)
+            return;
+
+        LegacyRunePatch4Notices[accountId] =
+        {
+            std::chrono::steady_clock::now() +
+                std::chrono::seconds(LEGACY_RUNE_PATCH4_NOTICE_INTERVAL_SECONDS),
+
+            uint8(LEGACY_RUNE_PATCH4_NOTICE_TOTAL_COUNT - 1)
+        };
+    }
+
+    static void UpdateLegacyRunePatch4MissingNotices()
+    {
+        if (LegacyRunePatch4Notices.empty())
+            return;
+
+        std::chrono::steady_clock::time_point const now =
+            std::chrono::steady_clock::now();
+
+        for (auto itr = LegacyRunePatch4Notices.begin(); itr != LegacyRunePatch4Notices.end();)
+        {
+            if (now < itr->second.nextNoticeAt)
+            {
+                ++itr;
+                continue;
+            }
+
+            WorldSession* session = sWorld->FindSession(itr->first);
+            Player* player = session ? session->GetPlayer() : nullptr;
+
+            if (!player)
+            {
+                itr = LegacyRunePatch4Notices.erase(itr);
+                continue;
+            }
+
+            SendLegacyRunePatch4MissingNotice(player);
+
+            if (itr->second.remainingCount <= 1)
+            {
+                itr = LegacyRunePatch4Notices.erase(itr);
+                continue;
+            }
+
+            --itr->second.remainingCount;
+            itr->second.nextNoticeAt =
+                now + std::chrono::seconds(LEGACY_RUNE_PATCH4_NOTICE_INTERVAL_SECONDS);
+
+            ++itr;
+        }
+    }
+
     static void HandleLegacyRuneAddonVersion(Player* player, uint32 addonVersion)
     {
         if (!player || !player->GetSession())
@@ -3720,18 +4400,42 @@ namespace
         if (!GetLegacyRuneAddonPayload(msg, payload))
             return false;
 
-        if (payload == LEGACY_RUNE_PATCH4_OK_COMMAND || payload == LEGACY_RUNE_PATCH4_MISSING_COMMAND)
+// ============================================================================
+// [LIGHT_GUARDIAN_MPQ_AUTH - 향후 서버 강제 인증 적용]
+//
+// 현재는 기존 클라이언트 사용자를 위해 서버 강제 인증을 사용하지 않는다.
+//
+// 향후 patch-4.MPQ 등 필수 패치가 충분히 배포되면:
+// 1. 플레이어 로그인 시 MPQ 미인증 상태로 등록
+// 2. MPQRUNTIME:HELLO 수신 시 인증완료 상태로 변경
+// 3. 로그인 후 약 10초 이내 HELLO가 없으면 서버에서 강제 접속 종료
+// 4. 실제 강제 종료는 WorldSession::KickPlayer() 방식으로 구현
+//
+// 현재 클라이언트 동작:
+// MPQRUNTIME:HELLO -> 서버 MPQRUNTIME:OK
+//
+// 주의: 기존 클라이언트가 남아있는 동안에는 강제 인증을 활성화하지 말 것.
+// 검색 키워드: LIGHT_GUARDIAN_MPQ_AUTH
+// ============================================================================
+
+		if (payload == LEGACY_RUNE_MPQ_RUNTIME_HELLO_COMMAND)
+		{
+			SendLegacyRuneAddonMessage(player, "MPQRUNTIME:OK");
+			return true;
+		}
+
+        if (payload == LEGACY_RUNE_PATCH4_OK_COMMAND)
         {
             MarkLegacyRuneAddonDetected(player);
+            CancelLegacyRunePatch4MissingNotice(player);
+            return true;
+        }
 
-            if (payload == LEGACY_RUNE_PATCH4_MISSING_COMMAND)
-			{
-				std::string const message = Trinity::StringFormat(
-                "|cffff2020[패치관리]|r 패치4가 감지되지 않았습니다. 일부 콘텐츠를 이용할 수 없습니다. 홈페이지에서 패치4를 설치하세요 |r");
-
-				ChatHandler(player->GetSession()).SendSysMessage(message.c_str());
-	            return true;
-			}
+        if (payload == LEGACY_RUNE_PATCH4_MISSING_COMMAND)
+        {
+            MarkLegacyRuneAddonDetected(player);
+            QueueLegacyRunePatch4MissingNotice(player);
+            return true;
         }
 
         if (payload.compare(0, LEGACY_RUNE_ADDON_VERSION_PREFIX.size(), LEGACY_RUNE_ADDON_VERSION_PREFIX) == 0)
@@ -3747,6 +4451,53 @@ namespace
         {
             MarkLegacyRuneAddonDetected(player);
             SendLegacyRuneState(player);
+            return true;
+        }
+
+        if (payload == LEGACY_RUNE_COLLECTION_GET_COMMAND)
+        {
+            MarkLegacyRuneAddonDetected(player);
+            SendLegacyRuneCollectionState(player);
+            return true;
+        }
+
+        /*
+         * Custom Update - 2026-08-16
+         * 기간제 커스텀 스펠 조회
+         */
+        if (payload == LEGACY_RUNE_CUSTOM_SPELL_GET_COMMAND)
+        {
+            MarkLegacyRuneAddonDetected(player);
+            SendLegacyRuneCustomSpellState(player);
+            return true;
+        }
+
+        if (payload == LEGACY_RUNE_REENGRAVE_GET_COMMAND)
+        {
+            MarkLegacyRuneAddonDetected(player);
+            SendLegacyRuneReengraveState(player);
+            return true;
+        }
+
+        if (payload.compare(
+                0,
+                LEGACY_RUNE_REENGRAVE_APPLY_PREFIX.size(),
+                LEGACY_RUNE_REENGRAVE_APPLY_PREFIX) == 0)
+        {
+            uint32 itemEntry = 0;
+
+            if (!ParseLegacyRuneUInt32(
+                    payload.substr(
+                        LEGACY_RUNE_REENGRAVE_APPLY_PREFIX.size()),
+                    itemEntry))
+            {
+                SendLegacyRuneReengraveFail(
+                    player,
+                    "재각인할 전승 기술 정보가 올바르지 않습니다.");
+                return true;
+            }
+
+            HandleLegacyRuneReengrave(player, itemEntry);
             return true;
         }
 
@@ -3830,6 +4581,21 @@ namespace
     }
 }
 
+/*
+ * Custom Update - 2026-07-27
+ * 패치4 미설치 안내 반복 타이머
+ */
+class legacy_rune_worldscript : public WorldScript
+{
+public:
+    legacy_rune_worldscript() : WorldScript("legacy_rune_worldscript") { }
+
+    void OnUpdate(uint32 /*diff*/) override
+    {
+        UpdateLegacyRunePatch4MissingNotices();
+    }
+};
+
 class legacy_rune_serverscript : public ServerScript
 {
 public:
@@ -3870,7 +4636,6 @@ public:
         return new go_legacy_rune_magic_altarAI(gameObject);
     }
 };
-
 
 
 
@@ -4317,6 +5082,3198 @@ public:
 
 
 
+
+
+
+//전승룬 제작
+namespace
+{
+    /*
+     * Custom Update - 2026-07-31
+     * 달력 아래에 독립적으로 연결되는 전승룬 제작 시스템
+     *
+     * - 월드 DB에서 활성 레시피와 재료를 읽는다.
+     * - 캐릭터 DB에는 습득한 recipe_type과 마지막 제작 시각을 저장한다.
+     * - 레시피별 제작 쿨다운은 12시간이다.
+     * - 애드온에는 전체 활성 레시피, 소유 여부, 남은 쿨다운을 전송한다.
+     * - 습득했고 쿨다운이 끝난 레시피만 밝게 표시하고 제작할 수 있다.
+     * - 처형의 레시피 아이템 사용 시 recipe_type 1~5 중 하나를
+     *   현재 습득 여부와 관계없이 완전히 무작위로 선택한다.
+     * - 이미 습득한 타입이 선택되어도 아이템은 정상 소모된다.
+     * - 첫 레시피:
+     *   죽음의 룬 100개 + 심연의 수정 1개
+     *   -> 절단의 파편 1개
+     */
+    static std::string const LEGACY_RUNE_CRAFT_PREFIX = "LRCRAFT";
+    static std::string const LEGACY_RUNE_CRAFT_GET_COMMAND = "GET";
+    static std::string const LEGACY_RUNE_CRAFT_MAKE_PREFIX = "MAKE:";
+    static std::string const LEGACY_RUNE_CRAFT_ITEM_GET_PREFIX = "ITEM:GET:";
+    static constexpr uint32 LEGACY_RUNE_CRAFT_COOLDOWN_SECONDS =
+        12 * 60 * 60;
+
+    static constexpr uint32 LEGACY_RUNE_EXECUTION_RECIPE_ITEM_ID = 33145;
+    static constexpr uint32 LEGACY_RUNE_EXECUTION_RECIPE_MIN_TYPE = 1;
+    static constexpr uint32 LEGACY_RUNE_EXECUTION_RECIPE_MAX_TYPE = 5;
+
+    struct LegacyRuneCraftRecipe
+    {
+        uint32 RecipeType = 0;
+        std::string RecipeName;
+        uint32 ResultItem = 0;
+        uint32 ResultCount = 0;
+    };
+
+    struct LegacyRuneCraftMaterial
+    {
+        uint8 MaterialSlot = 0;
+        uint32 ItemEntry = 0;
+        uint32 ItemCount = 0;
+    };
+
+    static bool IsLegacyRuneCraftRequestPayload(
+        std::string const& payload)
+    {
+        return payload == LEGACY_RUNE_CRAFT_GET_COMMAND
+            || payload.compare(
+                0,
+                LEGACY_RUNE_CRAFT_MAKE_PREFIX.size(),
+                LEGACY_RUNE_CRAFT_MAKE_PREFIX) == 0
+            || payload.compare(
+                0,
+                LEGACY_RUNE_CRAFT_ITEM_GET_PREFIX.size(),
+                LEGACY_RUNE_CRAFT_ITEM_GET_PREFIX) == 0;
+    }
+
+    static bool GetLegacyRuneCraftRequestPayload(
+        std::string const& message,
+        std::string& payload)
+    {
+        payload.clear();
+
+        if (IsLegacyRuneCraftRequestPayload(message))
+        {
+            payload = message;
+            return true;
+        }
+
+        if (message.compare(
+                0,
+                LEGACY_RUNE_CRAFT_PREFIX.size(),
+                LEGACY_RUNE_CRAFT_PREFIX) != 0)
+        {
+            return false;
+        }
+
+        if (message.size() <= LEGACY_RUNE_CRAFT_PREFIX.size())
+            return false;
+
+        char separator =
+            message[LEGACY_RUNE_CRAFT_PREFIX.size()];
+
+        if (separator != '\t'
+            && separator != ' '
+            && separator != ':')
+        {
+            return false;
+        }
+
+        std::string innerPayload =
+            message.substr(
+                LEGACY_RUNE_CRAFT_PREFIX.size() + 1);
+
+        if (!IsLegacyRuneCraftRequestPayload(innerPayload))
+            return false;
+
+        payload = innerPayload;
+        return true;
+    }
+
+    static std::string CleanLegacyRuneCraftAddonText(
+        std::string text)
+    {
+        if (text.size() > 100)
+            text.resize(100);
+
+        for (char& ch : text)
+        {
+            if (ch == ':'
+                || ch == '\t'
+                || ch == '\r'
+                || ch == '\n')
+            {
+                ch = ' ';
+            }
+        }
+
+        return text;
+    }
+
+    static void SendLegacyRuneCraftAddonMessage(
+        Player* player,
+        std::string const& payload)
+    {
+        if (!player || payload.empty())
+            return;
+
+        player->WhisperAddon(
+            LEGACY_RUNE_CRAFT_PREFIX
+                + "\t"
+                + payload,
+            player);
+    }
+
+    static bool SendLegacyRuneCraftItemCache(
+        Player* player,
+        uint32 itemEntry)
+    {
+        if (!player
+            || !player->GetSession()
+            || !itemEntry)
+        {
+            return false;
+        }
+
+        ItemTemplate const* itemTemplate =
+            sObjectMgr->GetItemTemplate(itemEntry);
+
+        if (!itemTemplate)
+            return false;
+
+        WorldPacket itemQueryData =
+            itemTemplate->BuildQueryData(
+                player->GetSession()->GetSessionDbLocaleIndex());
+
+        player->GetSession()->SendPacket(
+            &itemQueryData);
+
+        return true;
+    }
+
+    static void SendLegacyRuneCraftFail(
+        Player* player,
+        std::string const& reason)
+    {
+        SendLegacyRuneCraftAddonMessage(
+            player,
+            "CRAFT:FAIL:"
+                + CleanLegacyRuneCraftAddonText(reason));
+    }
+
+    static bool ParseLegacyRuneCraftRecipeType(
+        std::string const& payload,
+        uint32& recipeType)
+    {
+        recipeType = 0;
+
+        if (payload.compare(
+                0,
+                LEGACY_RUNE_CRAFT_MAKE_PREFIX.size(),
+                LEGACY_RUNE_CRAFT_MAKE_PREFIX) != 0)
+        {
+            return false;
+        }
+
+        std::string recipeTypeText =
+            payload.substr(
+                LEGACY_RUNE_CRAFT_MAKE_PREFIX.size());
+
+        if (recipeTypeText.empty())
+            return false;
+
+        char* end = nullptr;
+
+        unsigned long parsed =
+            std::strtoul(
+                recipeTypeText.c_str(),
+                &end,
+                10);
+
+        if (!end
+            || *end != '\0'
+            || parsed == 0
+            || parsed > std::numeric_limits<uint32>::max())
+        {
+            return false;
+        }
+
+        recipeType = uint32(parsed);
+        return true;
+    }
+
+    static bool ParseLegacyRuneCraftItemEntry(
+        std::string const& payload,
+        uint32& itemEntry)
+    {
+        itemEntry = 0;
+
+        if (payload.compare(
+                0,
+                LEGACY_RUNE_CRAFT_ITEM_GET_PREFIX.size(),
+                LEGACY_RUNE_CRAFT_ITEM_GET_PREFIX) != 0)
+        {
+            return false;
+        }
+
+        std::string itemEntryText =
+            payload.substr(
+                LEGACY_RUNE_CRAFT_ITEM_GET_PREFIX.size());
+
+        if (itemEntryText.empty())
+            return false;
+
+        char* end = nullptr;
+
+        unsigned long parsed =
+            std::strtoul(
+                itemEntryText.c_str(),
+                &end,
+                10);
+
+        if (!end
+            || *end != '\0'
+            || parsed == 0
+            || parsed > std::numeric_limits<uint32>::max())
+        {
+            return false;
+        }
+
+        itemEntry = uint32(parsed);
+        return true;
+    }
+
+    static bool GetLegacyRuneCraftRecipeState(
+        Player* player,
+        uint32 recipeType,
+        uint32& cooldownRemaining)
+    {
+        cooldownRemaining = 0;
+
+        if (!player || !recipeType)
+            return false;
+
+        QueryResult result =
+            CharacterDatabase.PQuery(
+                "SELECT "
+                "CASE "
+                "WHEN last_craft_at IS NULL THEN 0 "
+                "ELSE GREATEST(0, {} - "
+                "TIMESTAMPDIFF(SECOND, last_craft_at, CURRENT_TIMESTAMP)) "
+                "END AS cooldown_remaining "
+                "FROM custom_character_legacy_rune_recipe "
+                "WHERE guid = {} "
+                "AND recipe_type = {} "
+                "LIMIT 1",
+                LEGACY_RUNE_CRAFT_COOLDOWN_SECONDS,
+                player->GetGUID().GetCounter(),
+                recipeType);
+
+        if (!result)
+            return false;
+
+        cooldownRemaining =
+            result->Fetch()[0].GetUInt32();
+
+        return true;
+    }
+
+    static std::string FormatLegacyRuneCraftCooldown(
+        uint32 cooldownRemaining)
+    {
+        uint32 hours =
+            cooldownRemaining / 3600;
+
+        uint32 minutes =
+            (cooldownRemaining % 3600) / 60;
+
+        uint32 seconds =
+            cooldownRemaining % 60;
+
+        return std::to_string(hours)
+            + "시간 "
+            + std::to_string(minutes)
+            + "분 "
+            + std::to_string(seconds)
+            + "초";
+    }
+
+    static bool LoadLegacyRuneCraftRecipe(
+        uint32 recipeType,
+        LegacyRuneCraftRecipe& recipe)
+    {
+        recipe = LegacyRuneCraftRecipe();
+
+        QueryResult result =
+            WorldDatabase.PQuery(
+                "SELECT recipe_type, recipe_name, "
+                "result_item, result_count "
+                "FROM custom_legacy_rune_craft_recipe "
+                "WHERE recipe_type = {} "
+                "AND enabled = 1 "
+                "LIMIT 1",
+                recipeType);
+
+        if (!result)
+            return false;
+
+        Field* fields = result->Fetch();
+
+        recipe.RecipeType =
+            fields[0].GetUInt32();
+
+        recipe.RecipeName =
+            fields[1].GetString();
+
+        recipe.ResultItem =
+            fields[2].GetUInt32();
+
+        recipe.ResultCount =
+            fields[3].GetUInt32();
+
+        return recipe.RecipeType != 0
+            && recipe.ResultItem != 0
+            && recipe.ResultCount != 0;
+    }
+
+    static bool LoadLegacyRuneCraftMaterials(
+        uint32 recipeType,
+        std::vector<LegacyRuneCraftMaterial>& materials)
+    {
+        materials.clear();
+
+        QueryResult result =
+            WorldDatabase.PQuery(
+                "SELECT material_slot, item_entry, item_count "
+                "FROM custom_legacy_rune_craft_material "
+                "WHERE recipe_type = {} "
+                "ORDER BY material_slot ASC",
+                recipeType);
+
+        if (!result)
+            return false;
+
+        do
+        {
+            Field* fields = result->Fetch();
+
+            LegacyRuneCraftMaterial material;
+
+            material.MaterialSlot =
+                fields[0].GetUInt8();
+
+            material.ItemEntry =
+                fields[1].GetUInt32();
+
+            material.ItemCount =
+                fields[2].GetUInt32();
+
+            if (!material.MaterialSlot
+                || !material.ItemEntry
+                || !material.ItemCount)
+            {
+                return false;
+            }
+
+            materials.push_back(material);
+        }
+        while (result->NextRow());
+
+        return !materials.empty();
+    }
+
+    static void SendLegacyRuneCraftState(
+        Player* player)
+    {
+        if (!player)
+            return;
+
+        std::unordered_map<uint32, uint32> ownedRecipeCooldowns;
+
+        QueryResult ownedResult =
+            CharacterDatabase.PQuery(
+                "SELECT recipe_type, "
+                "CASE "
+                "WHEN last_craft_at IS NULL THEN 0 "
+                "ELSE GREATEST(0, {} - "
+                "TIMESTAMPDIFF(SECOND, last_craft_at, CURRENT_TIMESTAMP)) "
+                "END AS cooldown_remaining "
+                "FROM custom_character_legacy_rune_recipe "
+                "WHERE guid = {} "
+                "ORDER BY recipe_type ASC",
+                LEGACY_RUNE_CRAFT_COOLDOWN_SECONDS,
+                player->GetGUID().GetCounter());
+
+        if (ownedResult)
+        {
+            do
+            {
+                Field* fields =
+                    ownedResult->Fetch();
+
+                uint32 recipeType =
+                    fields[0].GetUInt32();
+
+                uint32 cooldownRemaining =
+                    fields[1].GetUInt32();
+
+                ownedRecipeCooldowns[recipeType] =
+                    cooldownRemaining;
+            }
+            while (ownedResult->NextRow());
+        }
+
+        SendLegacyRuneCraftAddonMessage(
+            player,
+            "CLEAR");
+
+        QueryResult recipeResult =
+            WorldDatabase.Query(
+                "SELECT recipe_type, recipe_name, "
+                "result_item, result_count "
+                "FROM custom_legacy_rune_craft_recipe "
+                "WHERE enabled = 1 "
+                "ORDER BY sort_order ASC, recipe_type ASC");
+
+        if (recipeResult)
+        {
+            do
+            {
+                Field* fields =
+                    recipeResult->Fetch();
+
+                uint32 recipeType =
+                    fields[0].GetUInt32();
+
+                std::string recipeName =
+                    CleanLegacyRuneCraftAddonText(
+                        fields[1].GetString());
+
+                uint32 resultItem =
+                    fields[2].GetUInt32();
+
+                uint32 resultCount =
+                    fields[3].GetUInt32();
+
+                SendLegacyRuneCraftItemCache(
+                    player,
+                    resultItem);
+
+                auto ownedItr =
+                    ownedRecipeCooldowns.find(recipeType);
+
+                uint32 owned =
+                    ownedItr != ownedRecipeCooldowns.end()
+                    ? 1
+                    : 0;
+
+                uint32 cooldownRemaining =
+                    ownedItr != ownedRecipeCooldowns.end()
+                    ? ownedItr->second
+                    : 0;
+
+                SendLegacyRuneCraftAddonMessage(
+                    player,
+                    "RECIPE:"
+                        + std::to_string(recipeType)
+                        + ":"
+                        + std::to_string(owned)
+                        + ":"
+                        + std::to_string(cooldownRemaining)
+                        + ":"
+                        + std::to_string(resultItem)
+                        + ":"
+                        + std::to_string(resultCount)
+                        + ":"
+                        + recipeName);
+            }
+            while (recipeResult->NextRow());
+        }
+
+        QueryResult materialResult =
+            WorldDatabase.Query(
+                "SELECT m.recipe_type, "
+                "m.material_slot, "
+                "m.item_entry, "
+                "m.item_count "
+                "FROM custom_legacy_rune_craft_material m "
+                "INNER JOIN custom_legacy_rune_craft_recipe r "
+                "ON r.recipe_type = m.recipe_type "
+                "WHERE r.enabled = 1 "
+                "ORDER BY r.sort_order ASC, "
+                "m.recipe_type ASC, "
+                "m.material_slot ASC");
+
+        if (materialResult)
+        {
+            do
+            {
+                Field* fields =
+                    materialResult->Fetch();
+
+                uint32 recipeType =
+                    fields[0].GetUInt32();
+
+                uint8 materialSlot =
+                    fields[1].GetUInt8();
+
+                uint32 itemEntry =
+                    fields[2].GetUInt32();
+
+                uint32 itemCount =
+                    fields[3].GetUInt32();
+
+                SendLegacyRuneCraftItemCache(
+                    player,
+                    itemEntry);
+
+                SendLegacyRuneCraftAddonMessage(
+                    player,
+                    "MATERIAL:"
+                        + std::to_string(recipeType)
+                        + ":"
+                        + std::to_string(materialSlot)
+                        + ":"
+                        + std::to_string(itemEntry)
+                        + ":"
+                        + std::to_string(itemCount));
+            }
+            while (materialResult->NextRow());
+        }
+
+        SendLegacyRuneCraftAddonMessage(
+            player,
+            "END");
+    }
+
+    static bool HandleLegacyRuneCraftMake(
+        Player* player,
+        uint32 recipeType)
+    {
+        if (!player)
+            return false;
+
+        uint32 cooldownRemaining = 0;
+
+        if (!GetLegacyRuneCraftRecipeState(
+                player,
+                recipeType,
+                cooldownRemaining))
+        {
+            SendLegacyRuneCraftFail(
+                player,
+                "습득하지 않은 전승룬 레시피입니다.");
+            return true;
+        }
+
+        if (cooldownRemaining > 0)
+        {
+            SendLegacyRuneCraftFail(
+                player,
+                "제작 대기시간이 남아 있습니다. "
+                    + FormatLegacyRuneCraftCooldown(
+                        cooldownRemaining));
+
+            SendLegacyRuneCraftState(player);
+            return true;
+        }
+
+        LegacyRuneCraftRecipe recipe;
+
+        if (!LoadLegacyRuneCraftRecipe(
+                recipeType,
+                recipe))
+        {
+            SendLegacyRuneCraftFail(
+                player,
+                "사용할 수 없는 전승룬 레시피입니다.");
+            return true;
+        }
+
+        if (!sObjectMgr->GetItemTemplate(
+                recipe.ResultItem))
+        {
+            SendLegacyRuneCraftFail(
+                player,
+                "제작 결과 아이템 정보가 없습니다.");
+            return true;
+        }
+
+        std::vector<LegacyRuneCraftMaterial> materials;
+
+        if (!LoadLegacyRuneCraftMaterials(
+                recipeType,
+                materials))
+        {
+            SendLegacyRuneCraftFail(
+                player,
+                "레시피 재료 정보가 없습니다.");
+            return true;
+        }
+
+        std::unordered_map<uint32, uint64> requiredItems;
+
+        for (LegacyRuneCraftMaterial const& material : materials)
+        {
+            if (!sObjectMgr->GetItemTemplate(
+                    material.ItemEntry))
+            {
+                SendLegacyRuneCraftFail(
+                    player,
+                    "등록되지 않은 재료 아이템이 포함되어 있습니다.");
+                return true;
+            }
+
+            requiredItems[material.ItemEntry] +=
+                material.ItemCount;
+        }
+
+        for (auto const& requiredItem : requiredItems)
+        {
+            if (requiredItem.second
+                > std::numeric_limits<uint32>::max())
+            {
+                SendLegacyRuneCraftFail(
+                    player,
+                    "재료 수량이 허용 범위를 초과했습니다.");
+                return true;
+            }
+
+            uint32 requiredCount =
+                uint32(requiredItem.second);
+
+            if (!player->HasItemCount(
+                    requiredItem.first,
+                    requiredCount,
+                    false))
+            {
+                SendLegacyRuneCraftFail(
+                    player,
+                    "제작에 필요한 재료가 부족합니다.");
+                return true;
+            }
+        }
+
+        ItemPosCountVec destination;
+
+        InventoryResult storeResult =
+            player->CanStoreNewItem(
+                NULL_BAG,
+                NULL_SLOT,
+                destination,
+                recipe.ResultItem,
+                recipe.ResultCount);
+
+        if (storeResult != EQUIP_ERR_OK)
+        {
+            SendLegacyRuneCraftFail(
+                player,
+                "가방에 제작 결과를 받을 공간이 없습니다.");
+            return true;
+        }
+
+        for (auto const& requiredItem : requiredItems)
+        {
+            player->DestroyItemCount(
+                requiredItem.first,
+                uint32(requiredItem.second),
+                true);
+        }
+
+        Item* resultItem =
+            player->StoreNewItem(
+                destination,
+                recipe.ResultItem,
+                true);
+
+        if (!resultItem)
+        {
+            for (auto const& requiredItem : requiredItems)
+            {
+                player->AddItem(
+                    requiredItem.first,
+                    uint32(requiredItem.second));
+            }
+
+            SendLegacyRuneCraftFail(
+                player,
+                "제작 결과 아이템 지급에 실패하여 재료를 반환했습니다.");
+            return true;
+        }
+
+        player->SendNewItem(
+            resultItem,
+            recipe.ResultCount,
+            true,
+            false);
+
+        CharacterDatabase.PExecute(
+            "UPDATE custom_character_legacy_rune_recipe "
+            "SET last_craft_at = CURRENT_TIMESTAMP "
+            "WHERE guid = {} "
+            "AND recipe_type = {}",
+            player->GetGUID().GetCounter(),
+            recipe.RecipeType);
+
+        SendLegacyRuneCraftAddonMessage(
+            player,
+            "CRAFT:OK:"
+                + std::to_string(recipe.RecipeType)
+                + ":"
+                + std::to_string(recipe.ResultItem)
+                + ":"
+                + std::to_string(recipe.ResultCount)
+                + ":"
+                + std::to_string(
+                    LEGACY_RUNE_CRAFT_COOLDOWN_SECONDS));
+
+        std::string notification = Trinity::StringFormat(
+            "전승룬 제작: {} 제작이 완료되었습니다. "
+            "다음 제작은 12시간 후 가능합니다.",
+            recipe.RecipeName);
+
+        player->GetSession()->SendNotification(
+			"%s",
+			notification.c_str()
+		);
+
+        return true;
+    }
+
+    static bool HandleLegacyRuneExecutionRecipeUse(
+        Player* player,
+        Item* item)
+    {
+        if (!player
+            || !player->GetSession()
+            || !item)
+        {
+            return false;
+        }
+
+        if (item->GetEntry()
+            != LEGACY_RUNE_EXECUTION_RECIPE_ITEM_ID)
+        {
+            return false;
+        }
+
+        QueryResult recipeResult =
+            WorldDatabase.PQuery(
+                "SELECT recipe_type, recipe_name "
+                "FROM custom_legacy_rune_craft_recipe "
+                "WHERE recipe_type BETWEEN {} AND {} "
+                "AND enabled = 1 "
+                "ORDER BY RAND() "
+                "LIMIT 1",
+                LEGACY_RUNE_EXECUTION_RECIPE_MIN_TYPE,
+                LEGACY_RUNE_EXECUTION_RECIPE_MAX_TYPE);
+
+        if (!recipeResult)
+        {
+            player->GetSession()->SendNotification(
+                "처형의 레시피: 사용 가능한 제작 레시피가 없습니다.");
+            return true;
+        }
+
+        Field* fields =
+            recipeResult->Fetch();
+
+        uint32 recipeType =
+            fields[0].GetUInt32();
+
+        std::string recipeName =
+            fields[1].GetString();
+
+        uint32 cooldownRemaining = 0;
+
+        bool alreadyOwned =
+            GetLegacyRuneCraftRecipeState(
+                player,
+                recipeType,
+                cooldownRemaining);
+
+        if (!alreadyOwned)
+        {
+            CharacterDatabase.PExecute(
+                "INSERT IGNORE INTO "
+                "custom_character_legacy_rune_recipe "
+                "(guid, recipe_type, learned_at, last_craft_at) "
+                "VALUES ({}, {}, CURRENT_TIMESTAMP, NULL)",
+                player->GetGUID().GetCounter(),
+                recipeType);
+        }
+
+        uint32 consumeCount = 1;
+
+        player->DestroyItemCount(
+            item,
+            consumeCount,
+            true);
+
+        SendLegacyRuneCraftState(player);
+
+        std::string notification;
+
+        if (alreadyOwned)
+        {
+            notification =
+                Trinity::StringFormat(
+                    "처형의 레시피: {} 레시피가 나왔지만 "
+                    "이미 습득한 레시피입니다.",
+                    recipeName);
+        }
+        else
+        {
+            notification =
+                Trinity::StringFormat(
+                    "처형의 레시피: {} 레시피를 습득했습니다.",
+                    recipeName);
+        }
+
+        ChatHandler(
+            player->GetSession()).SendSysMessage(
+                notification.c_str());
+
+        return true;
+    }
+}
+
+class item_legacy_rune_execution_recipe : public ItemScript
+{
+public:
+    item_legacy_rune_execution_recipe()
+        : ItemScript(
+            "item_legacy_rune_execution_recipe")
+    {
+    }
+
+    bool OnUse(
+        Player* player,
+        Item* item,
+        SpellCastTargets const& /*targets*/) override
+    {
+        return HandleLegacyRuneExecutionRecipeUse(
+            player,
+            item);
+    }
+};
+
+class custom_legacy_rune_craft : public ServerScript
+{
+public:
+    custom_legacy_rune_craft()
+        : ServerScript(
+            "custom_legacy_rune_craft")
+    {
+    }
+
+    void OnPacketReceive(
+        WorldSession* session,
+        WorldPacket& packet) override
+    {
+        if (!session
+            || packet.GetOpcode() != CMSG_MESSAGECHAT)
+        {
+            return;
+        }
+
+        Player* player = session->GetPlayer();
+        if (!player)
+            return;
+
+        WorldPacket data(packet);
+        data.rpos(0);
+
+        uint32 chatType = 0;
+        uint32 language = 0;
+
+        data >> chatType;
+        data >> language;
+
+        if (language != LANG_ADDON)
+            return;
+
+        if (chatType != CHAT_MSG_WHISPER)
+            return;
+
+        std::string target;
+        data >> target;
+
+        if (!target.empty()
+            && target != player->GetName())
+        {
+            return;
+        }
+
+        std::string message;
+        data >> message;
+
+        std::string payload;
+
+        if (!GetLegacyRuneCraftRequestPayload(
+                message,
+                payload))
+        {
+            return;
+        }
+
+        if (payload == LEGACY_RUNE_CRAFT_GET_COMMAND)
+        {
+            SendLegacyRuneCraftState(player);
+            return;
+        }
+
+        if (payload.compare(
+                0,
+                LEGACY_RUNE_CRAFT_ITEM_GET_PREFIX.size(),
+                LEGACY_RUNE_CRAFT_ITEM_GET_PREFIX) == 0)
+        {
+            uint32 itemEntry = 0;
+
+            if (!ParseLegacyRuneCraftItemEntry(
+                    payload,
+                    itemEntry))
+            {
+                return;
+            }
+
+            SendLegacyRuneCraftItemCache(
+                player,
+                itemEntry);
+
+            return;
+        }
+
+        uint32 recipeType = 0;
+
+        if (!ParseLegacyRuneCraftRecipeType(
+                payload,
+                recipeType))
+        {
+            SendLegacyRuneCraftFail(
+                player,
+                "제작할 레시피 타입이 올바르지 않습니다.");
+            return;
+        }
+
+        HandleLegacyRuneCraftMake(
+            player,
+            recipeType);
+    }
+};
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+//보석결합 배우기
+/*
+ * Custom Update - 2026-08-01
+ *
+ * 캐릭터 접속 시 보석 결합 주문 자동 습득
+ * - 보석 결합 주문 900200을 배우지 않은 경우 영구 습득
+ */
+class custom_gem_combine_login : public PlayerScript
+{
+public:
+    custom_gem_combine_login()
+        : PlayerScript("custom_gem_combine_login")
+    {
+    }
+
+    void OnLogin(Player* player, bool /*firstLogin*/) override
+    {
+        if (!player)
+            return;
+
+        static constexpr uint32 SPELL_GEM_COMBINE = 900200;
+
+        if (!player->HasSpell(SPELL_GEM_COMBINE))
+            player->LearnSpell(SPELL_GEM_COMBINE, false);
+    }
+};
+
+/*
+ * Custom Burning Adrenaline
+ *
+ * Spell ID : 900212
+ *
+ * 보조 Spell ID : 900214
+ * - Burning Adrenaline - No Threat
+ * - 불타는 아드레날린 유지 중 Threat -100%
+ *
+ * 효과:
+ * - 공격력 50% 증가               : DBC
+ * - 모든 주문 즉시 시전           : DBC
+ * - 12초 지속                     : DBC
+ * - 매초 현재 생명력의 5% 피해    : C++
+ * - 12초 동안 신규 Threat -100%   : 900214
+ * - 12초 정상 종료 시
+ *      본인에게 5000 화염 피해
+ *      10야드 내 아군 플레이어에게 15000 화염 피해
+ *
+ * 쿨다운:
+ * - 5분
+ * - character_spell_cooldown 직접 저장
+ *
+ * 주의:
+ * - 기존 어그로는 유지
+ * - 불타는 아드레날린 동안 신규 Threat만 -100%
+ * - 900212 제거 시 900214도 즉시 제거
+ * - 디스펠/죽음/수동 제거 시 종료 폭발 없음
+ * - 정상적으로 지속시간이 끝났을 때만 종료 폭발
+ */
+
+#include "ScriptMgr.h"
+#include "SpellScript.h"
+#include "SpellAuraEffects.h"
+#include "Player.h"
+#include "Map.h"
+#include "DatabaseEnv.h"
+#include "WorldSession.h"
+#include "StringFormat.h"
+#include "SpellHistory.h"
+#include "Duration.h"
+#include "WorldPacket.h"
+#include "Opcodes.h"
+
+#include <ctime>
+#include <string>
+
+namespace
+{
+    enum CustomBurningAdrenaline
+    {
+        SPELL_CUSTOM_BURNING_ADRENALINE            = 900212,
+        SPELL_CUSTOM_BURNING_ADRENALINE_NO_THREAT  = 900214,
+
+        BURNING_ADRENALINE_TICK_PCT                 = 5,
+
+        // 종료 시 본인 피해
+        BURNING_ADRENALINE_END_DAMAGE_ME            = 15000,
+
+        // 종료 시 주변 아군 피해
+        BURNING_ADRENALINE_END_DAMAGE               = 15000,
+
+        // 쿨다운 5분
+        BURNING_ADRENALINE_COOLDOWN_SECONDS         = 5 * 60
+    };
+
+    float constexpr BURNING_ADRENALINE_END_RANGE = 10.0f;
+
+    // ---------------------------------------------------------
+    // 남은 쿨다운 표시 문자열
+    // ---------------------------------------------------------
+    std::string FormatBurningAdrenalineCooldown(uint32 seconds)
+    {
+        uint32 minutes = seconds / 60;
+        uint32 remainSeconds = seconds % 60;
+
+        if (minutes > 0 && remainSeconds > 0)
+        {
+            return Trinity::StringFormat(
+                "{}분 {}초",
+                minutes,
+                remainSeconds
+            );
+        }
+
+        if (minutes > 0)
+        {
+            return Trinity::StringFormat(
+                "{}분",
+                minutes
+            );
+        }
+
+        return Trinity::StringFormat(
+            "{}초",
+            remainSeconds
+        );
+    }
+
+    // ---------------------------------------------------------
+    // character_spell_cooldown에서 남은 시간 확인
+    // ---------------------------------------------------------
+    uint32 GetBurningAdrenalineCooldownRemaining(Player* player)
+    {
+        if (!player)
+            return 0;
+
+        uint32 now = uint32(::time(nullptr));
+        uint64 guid = player->GetGUID().GetCounter();
+
+        std::string query = Trinity::StringFormat(
+            "SELECT `time` "
+            "FROM `character_spell_cooldown` "
+            "WHERE `guid` = {} "
+            "AND `spell` = {} "
+            "AND `item` = 0",
+            guid,
+            uint32(SPELL_CUSTOM_BURNING_ADRENALINE)
+        );
+
+        QueryResult result =
+            CharacterDatabase.Query(query.c_str());
+
+        if (!result)
+            return 0;
+
+        Field* fields =
+            result->Fetch();
+
+        uint32 cooldownUntil =
+            fields[0].GetUInt32();
+
+        // -------------------------------------------------
+        // 이미 만료된 DB 데이터라면 제거
+        // -------------------------------------------------
+        if (cooldownUntil <= now)
+        {
+            std::string deleteQuery =
+                Trinity::StringFormat(
+                    "DELETE FROM `character_spell_cooldown` "
+                    "WHERE `guid` = {} "
+                    "AND `spell` = {} "
+                    "AND `item` = 0",
+                    guid,
+                    uint32(SPELL_CUSTOM_BURNING_ADRENALINE)
+                );
+
+            CharacterDatabase.DirectExecute(
+                deleteQuery.c_str()
+            );
+
+            return 0;
+        }
+
+        return cooldownUntil - now;
+    }
+
+    // ---------------------------------------------------------
+    // 클라이언트 쿨다운 표시
+    // ---------------------------------------------------------
+    void SendBurningAdrenalineCooldownPacket(
+        Player* player,
+        uint32 cooldownSeconds)
+    {
+        if (!player)
+            return;
+
+        if (cooldownSeconds == 0)
+            return;
+
+        WorldPacket data(
+            SMSG_SPELL_COOLDOWN,
+            8 + 1 + 4 + 4
+        );
+
+        data << uint64(
+            player->GetGUID().GetRawValue()
+        );
+
+        data << uint8(0);
+
+        data << uint32(
+            SPELL_CUSTOM_BURNING_ADRENALINE
+        );
+
+        data << uint32(
+            cooldownSeconds * 1000
+        );
+
+        player->SendDirectMessage(
+            &data
+        );
+    }
+
+    // ---------------------------------------------------------
+    // 쿨다운 적용
+    //
+    // 1. 서버 메모리
+    // 2. 클라이언트 표시
+    // 3. character_spell_cooldown DB 저장
+    // ---------------------------------------------------------
+    void ApplyBurningAdrenalineCooldown(Player* player)
+    {
+        if (!player)
+            return;
+
+        uint32 now =
+            uint32(::time(nullptr));
+
+        uint32 cooldownUntil =
+            now +
+            uint32(BURNING_ADRENALINE_COOLDOWN_SECONDS);
+
+        uint64 guid =
+            player->GetGUID().GetCounter();
+
+        // -------------------------------------------------
+        // 서버 메모리 쿨다운
+        // -------------------------------------------------
+        player->GetSpellHistory()->AddCooldown(
+            uint32(SPELL_CUSTOM_BURNING_ADRENALINE),
+            0,
+            Seconds(
+                uint32(BURNING_ADRENALINE_COOLDOWN_SECONDS)
+            )
+        );
+
+        // -------------------------------------------------
+        // 클라이언트 쿨다운 표시
+        // -------------------------------------------------
+        SendBurningAdrenalineCooldownPacket(
+            player,
+            uint32(BURNING_ADRENALINE_COOLDOWN_SECONDS)
+        );
+
+        // -------------------------------------------------
+        // DB 직접 저장
+        // -------------------------------------------------
+        std::string query =
+            Trinity::StringFormat(
+                "REPLACE INTO `character_spell_cooldown` "
+                "(`guid`, `spell`, `item`, `time`, `categoryId`, `categoryEnd`) "
+                "VALUES "
+                "({}, {}, 0, {}, 0, 0)",
+                guid,
+                uint32(SPELL_CUSTOM_BURNING_ADRENALINE),
+                cooldownUntil
+            );
+
+        CharacterDatabase.DirectExecute(
+            query.c_str()
+        );
+    }
+}
+
+// ---------------------------------------------------------
+// 900212 - 불타는 아드레날린
+// ---------------------------------------------------------
+class spell_custom_burning_adrenaline
+    : public SpellScriptLoader
+{
+public:
+    spell_custom_burning_adrenaline()
+        : SpellScriptLoader(
+            "spell_custom_burning_adrenaline"
+        )
+    {
+    }
+
+    // =========================================================
+    // SpellScript
+    //
+    // - 시전 전 DB 쿨다운 확인
+    // - 정상 시전 후 5분 쿨다운 저장
+    // =========================================================
+    class spell_custom_burning_adrenaline_SpellScript
+        : public SpellScript
+    {
+        PrepareSpellScript(
+            spell_custom_burning_adrenaline_SpellScript
+        );
+
+        // -------------------------------------------------
+        // 시전 가능 여부 확인
+        // -------------------------------------------------
+        SpellCastResult CheckCast()
+        {
+            Player* player =
+                GetCaster()
+                    ? GetCaster()->ToPlayer()
+                    : nullptr;
+
+            if (!player)
+                return SPELL_FAILED_DONT_REPORT;
+
+            uint32 remaining =
+                GetBurningAdrenalineCooldownRemaining(
+                    player
+                );
+
+            if (remaining == 0)
+                return SPELL_CAST_OK;
+
+            if (player->GetSession())
+            {
+                std::string message =
+                    Trinity::StringFormat(
+                        "불타는 아드레날린 재사용 대기시간이 남아 있습니다. 남은 시간: {}",
+                        FormatBurningAdrenalineCooldown(
+                            remaining
+                        )
+                    );
+
+                ChatHandler(player->GetSession()).SendSysMessage(
+					message.c_str()
+				);
+            }
+
+            return SPELL_FAILED_DONT_REPORT;
+        }
+
+        // -------------------------------------------------
+        // 정상 시전 후 5분 쿨다운 적용/저장
+        // -------------------------------------------------
+        void HandleAfterCast()
+        {
+            Player* player =
+                GetCaster()
+                    ? GetCaster()->ToPlayer()
+                    : nullptr;
+
+            if (!player)
+                return;
+
+            ApplyBurningAdrenalineCooldown(
+                player
+            );
+        }
+
+        void Register() override
+        {
+            OnCheckCast += SpellCheckCastFn(
+                spell_custom_burning_adrenaline_SpellScript::CheckCast
+            );
+
+            AfterCast += SpellCastFn(
+                spell_custom_burning_adrenaline_SpellScript::HandleAfterCast
+            );
+        }
+    };
+
+    // =========================================================
+    // AuraScript
+    // =========================================================
+    class spell_custom_burning_adrenaline_AuraScript
+        : public AuraScript
+    {
+        PrepareAuraScript(
+            spell_custom_burning_adrenaline_AuraScript
+        );
+
+        // -------------------------------------------------
+        // 900212 적용
+        //
+        // 900214 Threat -100% 보조 Aura 적용
+        // -------------------------------------------------
+        void HandleApply(
+            AuraEffect const* /*aurEff*/,
+            AuraEffectHandleModes /*mode*/)
+        {
+            Player* player =
+                GetTarget()->ToPlayer();
+
+            if (!player)
+                return;
+
+            if (!player->IsAlive())
+                return;
+
+            // 혹시 기존 900214가 남아 있다면 제거
+            player->RemoveAurasDueToSpell(
+                uint32(
+                    SPELL_CUSTOM_BURNING_ADRENALINE_NO_THREAT
+                )
+            );
+
+            // -------------------------------------------------
+            // Threat -100% 보조 Aura
+            // -------------------------------------------------
+            player->CastSpell(
+                player,
+                uint32(
+                    SPELL_CUSTOM_BURNING_ADRENALINE_NO_THREAT
+                ),
+                true
+            );
+        }
+
+        // -------------------------------------------------
+        // 매초 현재 생명력의 5% 피해
+        //
+        // DBC Effect3:
+        // SPELL_AURA_PERIODIC_TRIGGER_SPELL
+        //
+        // 원본 23620은 매초 23619를 발동하지만
+        // 기본 발동을 막고 직접 처리한다.
+        // -------------------------------------------------
+        void HandlePeriodic(
+            AuraEffect const* /*aurEff*/)
+        {
+            PreventDefaultAction();
+
+            Player* player =
+                GetTarget()->ToPlayer();
+
+            if (!player)
+                return;
+
+            if (!player->IsAlive())
+                return;
+
+            // -------------------------------------------------
+            // 현재 생명력
+            // -------------------------------------------------
+            uint32 currentHealth =
+                player->GetHealth();
+
+            // -------------------------------------------------
+            // 현재 생명력의 5%
+            // -------------------------------------------------
+            uint32 damage =
+                uint32(
+                    (
+                        uint64(currentHealth) *
+                        BURNING_ADRENALINE_TICK_PCT
+                    ) / 100
+                );
+
+            if (!damage)
+                damage = 1;
+
+            Unit::DealDamage(
+                player,
+                player,
+                damage,
+                nullptr,
+                DIRECT_DAMAGE,
+                SPELL_SCHOOL_MASK_FIRE,
+                nullptr,
+                false
+            );
+        }
+
+        // -------------------------------------------------
+        // 900212 제거
+        //
+        // 900214는 제거 원인과 관계없이 항상 같이 제거
+        //
+        // 단, 종료 폭발은 정상 만료일 때만 발생
+        // -------------------------------------------------
+        void HandleRemove(
+            AuraEffect const* /*aurEff*/,
+            AuraEffectHandleModes /*mode*/)
+        {
+            Player* player =
+                GetTarget()->ToPlayer();
+
+            if (!player)
+                return;
+
+            // -------------------------------------------------
+            // Threat -100% 보조 Aura 즉시 제거
+            //
+            // 정상 종료 / 디스펠 / 죽음 / 강제 제거
+            // 모두 처리
+            // -------------------------------------------------
+            player->RemoveAurasDueToSpell(
+                uint32(
+                    SPELL_CUSTOM_BURNING_ADRENALINE_NO_THREAT
+                )
+            );
+
+            AuraApplication const* application =
+                GetTargetApplication();
+
+            if (!application)
+                return;
+
+            // -------------------------------------------------
+            // 정상적으로 12초가 끝났을 때만 폭발
+            // -------------------------------------------------
+            if (
+                application->GetRemoveMode()
+                != AURA_REMOVE_BY_EXPIRE
+            )
+            {
+                return;
+            }
+
+            if (!player->IsAlive())
+                return;
+
+            std::list<Player*> friendlyPlayers;
+
+            Map* map =
+                player->GetMap();
+
+            if (map)
+            {
+                Map::PlayerList const& players =
+                    map->GetPlayers();
+
+                if (!players.isEmpty())
+                {
+                    for (
+                        Map::PlayerList::const_iterator itr =
+                            players.begin();
+                        itr != players.end();
+                        ++itr
+                    )
+                    {
+                        Player* target =
+                            itr->GetSource();
+
+                        if (!target)
+                            continue;
+
+                        if (target == player)
+                            continue;
+
+                        if (!target->IsAlive())
+                            continue;
+
+                        // -------------------------------------
+                        // 10야드
+                        // -------------------------------------
+                        if (
+                            !player->IsWithinDistInMap(
+                                target,
+                                BURNING_ADRENALINE_END_RANGE
+                            )
+                        )
+                        {
+                            continue;
+                        }
+
+                        // -------------------------------------
+                        // 아군만
+                        // -------------------------------------
+                        if (
+                            !player->IsFriendlyTo(
+                                target
+                            )
+                        )
+                        {
+                            continue;
+                        }
+
+                        friendlyPlayers.push_back(
+                            target
+                        );
+                    }
+                }
+            }
+
+            // -------------------------------------------------
+            // 주변 아군
+            // 10야드 / 15000 화염 피해
+            // -------------------------------------------------
+            for (
+                Player* target
+                : friendlyPlayers
+            )
+            {
+                if (!target)
+                    continue;
+
+                if (!target->IsAlive())
+                    continue;
+
+                Unit::DealDamage(
+                    player,
+                    target,
+                    BURNING_ADRENALINE_END_DAMAGE,
+                    nullptr,
+                    DIRECT_DAMAGE,
+                    SPELL_SCHOOL_MASK_FIRE,
+                    nullptr,
+                    false
+                );
+            }
+
+            // -------------------------------------------------
+            // 본인
+            // 5000 화염 피해
+            // -------------------------------------------------
+            if (player->IsAlive())
+            {
+                Unit::DealDamage(
+                    player,
+                    player,
+                    BURNING_ADRENALINE_END_DAMAGE_ME,
+                    nullptr,
+                    DIRECT_DAMAGE,
+                    SPELL_SCHOOL_MASK_FIRE,
+                    nullptr,
+                    false
+                );
+            }
+        }
+
+        void Register() override
+        {
+            // -------------------------------------------------
+            // Effect1 적용 시
+            // 900214 Threat -100% 보조 Aura 적용
+            // -------------------------------------------------
+            AfterEffectApply += AuraEffectApplyFn(
+                spell_custom_burning_adrenaline_AuraScript::HandleApply,
+                EFFECT_0,
+                SPELL_AURA_MOD_DAMAGE_PERCENT_DONE,
+                AURA_EFFECT_HANDLE_REAL
+            );
+
+            // -------------------------------------------------
+            // Effect3
+            // 1초 Periodic Trigger
+            // -------------------------------------------------
+            OnEffectPeriodic += AuraEffectPeriodicFn(
+                spell_custom_burning_adrenaline_AuraScript::HandlePeriodic,
+                EFFECT_2,
+                SPELL_AURA_PERIODIC_TRIGGER_SPELL
+            );
+
+            // -------------------------------------------------
+            // Effect1 기준 제거 감지
+            //
+            // 여기서 900214 제거
+            // 정상 만료인 경우 종료 폭발까지 처리
+            // -------------------------------------------------
+            AfterEffectRemove += AuraEffectRemoveFn(
+                spell_custom_burning_adrenaline_AuraScript::HandleRemove,
+                EFFECT_0,
+                SPELL_AURA_MOD_DAMAGE_PERCENT_DONE,
+                AURA_EFFECT_HANDLE_REAL
+            );
+        }
+    };
+
+    SpellScript* GetSpellScript() const override
+    {
+        return new spell_custom_burning_adrenaline_SpellScript();
+    }
+
+    AuraScript* GetAuraScript() const override
+    {
+        return new spell_custom_burning_adrenaline_AuraScript();
+    }
+};
+
+/*
+ * Custom Time Rewind
+ *
+ * Spell ID : 900213
+ *
+ * 효과:
+ * - 사용 순간 현재 생명력 저장
+ * - 마나 / 분노 / 기력 / 룬마력 저장
+ * - 8초 동안 새로 발생하는 Threat 100% 감소
+ * - 8초 후 저장 당시 생명력 / 자원으로 복원
+ * - 위치는 되돌리지 않음
+ *
+ * 쿨다운:
+ * - 3분
+ * - character_spell_cooldown 직접 저장
+ *
+ * 주의:
+ * - 기존에 이미 가지고 있던 어그로는 유지
+ * - 8초 동안 새로 발생하는 어그로만 0
+ * - 죽으면 되감기 없음
+ * - 디스펠/강제 제거 시 되감기 없음
+ * - 정상적으로 8초가 끝났을 때만 HP / 자원 복원
+ */
+
+#include "ScriptMgr.h"
+#include "SpellScript.h"
+#include "SpellAuraEffects.h"
+#include "Player.h"
+#include "DatabaseEnv.h"
+#include "WorldSession.h"
+#include "StringFormat.h"
+#include "SpellHistory.h"
+#include "Duration.h"
+#include "WorldPacket.h"
+#include "Opcodes.h"
+
+#include <ctime>
+#include <string>
+#include <algorithm>
+
+namespace
+{
+    enum CustomTimeRewind
+    {
+        SPELL_CUSTOM_TIME_REWIND     = 900213,
+
+        // 쿨다운 3분
+        TIME_REWIND_COOLDOWN_SECONDS = 3 * 60
+    };
+
+    // ---------------------------------------------------------
+    // 남은 쿨다운 표시
+    // ---------------------------------------------------------
+    std::string FormatTimeRewindCooldown(uint32 seconds)
+    {
+        uint32 minutes = seconds / 60;
+        uint32 remainSeconds = seconds % 60;
+
+        if (minutes > 0 && remainSeconds > 0)
+        {
+            return Trinity::StringFormat(
+                "{}분 {}초",
+                minutes,
+                remainSeconds
+            );
+        }
+
+        if (minutes > 0)
+        {
+            return Trinity::StringFormat(
+                "{}분",
+                minutes
+            );
+        }
+
+        return Trinity::StringFormat(
+            "{}초",
+            remainSeconds
+        );
+    }
+
+    // ---------------------------------------------------------
+    // DB에서 남은 쿨다운 확인
+    // ---------------------------------------------------------
+    uint32 GetTimeRewindCooldownRemaining(Player* player)
+    {
+        if (!player)
+            return 0;
+
+        uint32 now = uint32(::time(nullptr));
+        uint64 guid = player->GetGUID().GetCounter();
+
+        std::string query = Trinity::StringFormat(
+            "SELECT `time` "
+            "FROM `character_spell_cooldown` "
+            "WHERE `guid` = {} "
+            "AND `spell` = {} "
+            "AND `item` = 0",
+            guid,
+            uint32(SPELL_CUSTOM_TIME_REWIND)
+        );
+
+        QueryResult result =
+            CharacterDatabase.Query(query.c_str());
+
+        if (!result)
+            return 0;
+
+        Field* fields =
+            result->Fetch();
+
+        uint32 cooldownUntil =
+            fields[0].GetUInt32();
+
+        // 이미 만료된 경우 삭제
+        if (cooldownUntil <= now)
+        {
+            std::string deleteQuery =
+                Trinity::StringFormat(
+                    "DELETE FROM `character_spell_cooldown` "
+                    "WHERE `guid` = {} "
+                    "AND `spell` = {} "
+                    "AND `item` = 0",
+                    guid,
+                    uint32(SPELL_CUSTOM_TIME_REWIND)
+                );
+
+            CharacterDatabase.DirectExecute(
+                deleteQuery.c_str()
+            );
+
+            return 0;
+        }
+
+        return cooldownUntil - now;
+    }
+
+    // ---------------------------------------------------------
+    // 클라이언트 쿨다운 표시
+    // ---------------------------------------------------------
+    void SendTimeRewindCooldownPacket(
+        Player* player,
+        uint32 cooldownSeconds)
+    {
+        if (!player)
+            return;
+
+        if (cooldownSeconds == 0)
+            return;
+
+        WorldPacket data(
+            SMSG_SPELL_COOLDOWN,
+            8 + 1 + 4 + 4
+        );
+
+        data << uint64(
+            player->GetGUID().GetRawValue()
+        );
+
+        data << uint8(0);
+
+        data << uint32(
+            SPELL_CUSTOM_TIME_REWIND
+        );
+
+        data << uint32(
+            cooldownSeconds * 1000
+        );
+
+        player->SendDirectMessage(
+            &data
+        );
+    }
+
+    // ---------------------------------------------------------
+    // 쿨다운 적용 및 DB 저장
+    // ---------------------------------------------------------
+    void ApplyTimeRewindCooldown(Player* player)
+    {
+        if (!player)
+            return;
+
+        uint32 now =
+            uint32(::time(nullptr));
+
+        uint32 cooldownUntil =
+            now +
+            uint32(TIME_REWIND_COOLDOWN_SECONDS);
+
+        uint64 guid =
+            player->GetGUID().GetCounter();
+
+        // 서버 메모리
+        player->GetSpellHistory()->AddCooldown(
+            uint32(SPELL_CUSTOM_TIME_REWIND),
+            0,
+            Seconds(
+                uint32(TIME_REWIND_COOLDOWN_SECONDS)
+            )
+        );
+
+        // 클라이언트 표시
+        SendTimeRewindCooldownPacket(
+            player,
+            uint32(TIME_REWIND_COOLDOWN_SECONDS)
+        );
+
+        // DB 직접 저장
+        std::string query =
+            Trinity::StringFormat(
+                "REPLACE INTO `character_spell_cooldown` "
+                "(`guid`, `spell`, `item`, `time`, `categoryId`, `categoryEnd`) "
+                "VALUES "
+                "({}, {}, 0, {}, 0, 0)",
+                guid,
+                uint32(SPELL_CUSTOM_TIME_REWIND),
+                cooldownUntil
+            );
+
+        CharacterDatabase.DirectExecute(
+            query.c_str()
+        );
+    }
+}
+
+// ---------------------------------------------------------
+// 900213 - 시간 되감기
+// ---------------------------------------------------------
+class spell_custom_time_rewind
+    : public SpellScriptLoader
+{
+public:
+    spell_custom_time_rewind()
+        : SpellScriptLoader(
+            "spell_custom_time_rewind"
+        )
+    {
+    }
+
+    // =========================================================
+    // SpellScript
+    // =========================================================
+    class spell_custom_time_rewind_SpellScript
+        : public SpellScript
+    {
+        PrepareSpellScript(
+            spell_custom_time_rewind_SpellScript
+        );
+
+        SpellCastResult CheckCast()
+        {
+            Player* player =
+                GetCaster()
+                    ? GetCaster()->ToPlayer()
+                    : nullptr;
+
+            if (!player)
+                return SPELL_FAILED_DONT_REPORT;
+
+            uint32 remaining =
+                GetTimeRewindCooldownRemaining(
+                    player
+                );
+
+            if (remaining == 0)
+                return SPELL_CAST_OK;
+
+            if (player->GetSession())
+            {
+                std::string message =
+                    Trinity::StringFormat(
+                        "시간 되감기 재사용 대기시간이 남아 있습니다. 남은 시간: {}",
+                        FormatTimeRewindCooldown(
+                            remaining
+                        )
+                    );
+
+                ChatHandler(player->GetSession()).SendSysMessage(
+					message.c_str()
+				);
+            }
+
+            return SPELL_FAILED_DONT_REPORT;
+        }
+
+        void HandleAfterCast()
+        {
+            Player* player =
+                GetCaster()
+                    ? GetCaster()->ToPlayer()
+                    : nullptr;
+
+            if (!player)
+                return;
+
+            ApplyTimeRewindCooldown(
+                player
+            );
+        }
+
+        void Register() override
+        {
+            OnCheckCast += SpellCheckCastFn(
+                spell_custom_time_rewind_SpellScript::CheckCast
+            );
+
+            AfterCast += SpellCastFn(
+                spell_custom_time_rewind_SpellScript::HandleAfterCast
+            );
+        }
+    };
+
+    // =========================================================
+    // AuraScript
+    //
+    // Effect1:
+    // SPELL_AURA_DUMMY
+    //
+    // Effect2:
+    // SPELL_AURA_MOD_THREAT
+    // DBC에서 -100%
+    // =========================================================
+    class spell_custom_time_rewind_AuraScript
+        : public AuraScript
+    {
+        PrepareAuraScript(
+            spell_custom_time_rewind_AuraScript
+        );
+
+    private:
+
+        bool _saved = false;
+
+        uint32 _health = 0;
+
+        uint32 _mana = 0;
+        uint32 _rage = 0;
+        uint32 _energy = 0;
+        uint32 _runicPower = 0;
+
+        // -------------------------------------------------
+        // 버프 적용 순간
+        //
+        // HP / 자원 저장
+        // -------------------------------------------------
+        void HandleApply(
+            AuraEffect const* /*aurEff*/,
+            AuraEffectHandleModes /*mode*/)
+        {
+            Player* player =
+                GetTarget()->ToPlayer();
+
+            if (!player)
+                return;
+
+            if (!player->IsAlive())
+                return;
+
+            // 현재 HP 저장
+            _health =
+                player->GetHealth();
+
+            // 마나 저장
+            _mana =
+                player->GetPower(
+                    POWER_MANA
+                );
+
+            // 분노 저장
+            _rage =
+                player->GetPower(
+                    POWER_RAGE
+                );
+
+            // 기력 저장
+            _energy =
+                player->GetPower(
+                    POWER_ENERGY
+                );
+
+            // 룬마력 저장
+            _runicPower =
+                player->GetPower(
+                    POWER_RUNIC_POWER
+                );
+
+            _saved = true;
+        }
+
+        // -------------------------------------------------
+        // 8초 정상 종료 시
+        //
+        // HP / 자원 복원
+        //
+        // Threat는 따로 건드리지 않는다.
+        // Effect2의 SPELL_AURA_MOD_THREAT가
+        // 8초 동안 신규 Threat 생성을 막는다.
+        // -------------------------------------------------
+        void HandleRemove(
+            AuraEffect const* /*aurEff*/,
+            AuraEffectHandleModes /*mode*/)
+        {
+            if (!_saved)
+                return;
+
+            AuraApplication const* application =
+                GetTargetApplication();
+
+            if (!application)
+                return;
+
+            // 정상 만료일 때만 복원
+            if (
+                application->GetRemoveMode()
+                != AURA_REMOVE_BY_EXPIRE
+            )
+            {
+                return;
+            }
+
+            Player* player =
+                GetTarget()->ToPlayer();
+
+            if (!player)
+                return;
+
+            if (!player->IsAlive())
+                return;
+
+            // -------------------------------------------------
+            // HP 복원
+            // -------------------------------------------------
+            uint32 restoreHealth =
+                std::min(
+                    _health,
+                    player->GetMaxHealth()
+                );
+
+            if (!restoreHealth)
+                restoreHealth = 1;
+
+            player->SetHealth(
+                restoreHealth
+            );
+
+            // -------------------------------------------------
+            // 마나 복원
+            // -------------------------------------------------
+            player->SetPower(
+                POWER_MANA,
+                std::min(
+                    _mana,
+                    player->GetMaxPower(
+                        POWER_MANA
+                    )
+                )
+            );
+
+            // -------------------------------------------------
+            // 분노 복원
+            // -------------------------------------------------
+            player->SetPower(
+                POWER_RAGE,
+                std::min(
+                    _rage,
+                    player->GetMaxPower(
+                        POWER_RAGE
+                    )
+                )
+            );
+
+            // -------------------------------------------------
+            // 기력 복원
+            // -------------------------------------------------
+            player->SetPower(
+                POWER_ENERGY,
+                std::min(
+                    _energy,
+                    player->GetMaxPower(
+                        POWER_ENERGY
+                    )
+                )
+            );
+
+            // -------------------------------------------------
+            // 룬마력 복원
+            // -------------------------------------------------
+            player->SetPower(
+                POWER_RUNIC_POWER,
+                std::min(
+                    _runicPower,
+                    player->GetMaxPower(
+                        POWER_RUNIC_POWER
+                    )
+                )
+            );
+
+            _saved = false;
+        }
+
+        void Register() override
+        {
+            // Effect1 = Dummy
+            AfterEffectApply += AuraEffectApplyFn(
+                spell_custom_time_rewind_AuraScript::HandleApply,
+                EFFECT_0,
+                SPELL_AURA_DUMMY,
+                AURA_EFFECT_HANDLE_REAL
+            );
+
+            AfterEffectRemove += AuraEffectRemoveFn(
+                spell_custom_time_rewind_AuraScript::HandleRemove,
+                EFFECT_0,
+                SPELL_AURA_DUMMY,
+                AURA_EFFECT_HANDLE_REAL
+            );
+        }
+    };
+
+    SpellScript* GetSpellScript() const override
+    {
+        return new spell_custom_time_rewind_SpellScript();
+    }
+
+    AuraScript* GetAuraScript() const override
+    {
+        return new spell_custom_time_rewind_AuraScript();
+    }
+};
+
+/*
+ * Custom Temporary Spell Scroll
+ *
+ * Item 35556
+ * - 불타는 아드레날린
+ * - Spell 900212
+ *
+ * Item 24229
+ * - 시간의 쇠퇴
+ * - Spell 900213
+ *
+ * 기능:
+ * - 두루마리 사용 시 해당 스펠 습득
+ * - 사용 시점부터 30일 동안 사용 가능
+ * - DB에 learn_time / expire_time 저장
+ * - 동일 두루마리 재사용 시 현재 시점부터 30일로 갱신
+ * - 로그인 시 남은 사용기간 표시
+ * - 만료 시 스펠 자동 삭제
+ *
+ * DB:
+ * character_temporary_spell
+ */
+
+#include "ScriptMgr.h"
+#include "Player.h"
+#include "Item.h"
+#include "DatabaseEnv.h"
+#include "WorldSession.h"
+#include "StringFormat.h"
+
+#include <ctime>
+#include <string>
+
+namespace
+{
+    enum CustomTemporarySpellScroll
+    {
+        // -----------------------------------------------------
+        // 두루마리 아이템
+        // -----------------------------------------------------
+        ITEM_BURNING_ADRENALINE_SCROLL = 35556,
+        ITEM_TIME_REWIND_SCROLL        = 24229,
+
+        // -----------------------------------------------------
+        // 습득 스펠
+        // -----------------------------------------------------
+        SPELL_BURNING_ADRENALINE       = 900212,
+        SPELL_TIME_REWIND              = 900213,
+
+        // -----------------------------------------------------
+        // 30일
+        // -----------------------------------------------------
+        TEMPORARY_SPELL_DURATION       = 30 * 24 * 60 * 60
+    };
+
+    // =========================================================
+    // 아이템 Entry -> 습득 Spell
+    // =========================================================
+    uint32 GetTemporarySpellByItem(uint32 itemEntry)
+    {
+        switch (itemEntry)
+        {
+            case ITEM_BURNING_ADRENALINE_SCROLL:
+                return uint32(SPELL_BURNING_ADRENALINE);
+
+            case ITEM_TIME_REWIND_SCROLL:
+                return uint32(SPELL_TIME_REWIND);
+
+            default:
+                return 0;
+        }
+    }
+
+    // =========================================================
+    // 스펠 이름
+    // =========================================================
+    char const* GetTemporarySpellName(uint32 spellId)
+    {
+        switch (spellId)
+        {
+            case SPELL_BURNING_ADRENALINE:
+                return "불타는 아드레날린";
+
+            case SPELL_TIME_REWIND:
+                return "시간의 쇠퇴";
+
+            default:
+                return "기간제 스펠";
+        }
+    }
+
+    // =========================================================
+    // 남은 기간 문자열
+    //
+    // 예:
+    // 29일 18시간 32분
+    // =========================================================
+    std::string FormatTemporarySpellRemaining(uint32 seconds)
+    {
+        uint32 days =
+            seconds / (24 * 60 * 60);
+
+        seconds %=
+            (24 * 60 * 60);
+
+        uint32 hours =
+            seconds / (60 * 60);
+
+        seconds %=
+            (60 * 60);
+
+        uint32 minutes =
+            seconds / 60;
+
+        if (days > 0)
+        {
+            return Trinity::StringFormat(
+                "{}일 {}시간 {}분",
+                days,
+                hours,
+                minutes
+            );
+        }
+
+        if (hours > 0)
+        {
+            return Trinity::StringFormat(
+                "{}시간 {}분",
+                hours,
+                minutes
+            );
+        }
+
+        if (minutes > 0)
+        {
+            return Trinity::StringFormat(
+                "{}분",
+                minutes
+            );
+        }
+
+        return Trinity::StringFormat(
+            "{}초",
+            seconds
+        );
+    }
+
+    // =========================================================
+    // 기간제 스펠 DB 저장
+    //
+    // 재사용하면:
+    //
+    // learn_time  = 현재시간
+    // expire_time = 현재시간 + 30일
+    //
+    // 로 완전히 갱신
+    // =========================================================
+    void SaveTemporarySpell(
+        Player* player,
+        uint32 spellId)
+    {
+        if (!player)
+            return;
+
+        uint64 guid =
+            player->GetGUID().GetCounter();
+
+        uint32 now =
+            uint32(::time(nullptr));
+
+        uint32 expireTime =
+            now +
+            uint32(TEMPORARY_SPELL_DURATION);
+
+        std::string query =
+            Trinity::StringFormat(
+                "REPLACE INTO `character_temporary_spell` "
+                "(`guid`, `spell`, `learn_time`, `expire_time`) "
+                "VALUES ({}, {}, {}, {})",
+                guid,
+                spellId,
+                now,
+                expireTime
+            );
+
+        CharacterDatabase.DirectExecute(
+            query.c_str()
+        );
+    }
+
+    // =========================================================
+    // 기간제 스펠 만료 검사
+    //
+    // showRemaining = true
+    // 로그인 시:
+    // 남은 기간도 표시
+    //
+    // showRemaining = false
+    // 캐릭터 저장 시:
+    // 만료만 검사하고 메시지는 표시하지 않음
+    // =========================================================
+    void CheckTemporarySpellExpiration(
+        Player* player,
+        bool showRemaining)
+    {
+        if (!player)
+            return;
+
+        uint64 guid =
+            player->GetGUID().GetCounter();
+
+        uint32 now =
+            uint32(::time(nullptr));
+
+        std::string query =
+            Trinity::StringFormat(
+                "SELECT "
+                "`spell`, "
+                "`expire_time` "
+                "FROM `character_temporary_spell` "
+                "WHERE `guid` = {}",
+                guid
+            );
+
+        QueryResult result =
+            CharacterDatabase.Query(
+                query.c_str()
+            );
+
+        if (!result)
+            return;
+
+        do
+        {
+            Field* fields =
+                result->Fetch();
+
+            uint32 spellId =
+                fields[0].GetUInt32();
+
+            uint32 expireTime =
+                fields[1].GetUInt32();
+
+            // =================================================
+            // 아직 기간이 남아 있음
+            // =================================================
+            if (expireTime > now)
+            {
+                // ---------------------------------------------
+                // DB에는 기록이 있는데
+                // 스펠이 없다면 다시 복구
+                //
+                // 접속 데이터 문제 등 대비
+                // ---------------------------------------------
+                if (!player->HasSpell(spellId))
+                {
+                    player->LearnSpell(
+                        spellId,
+                        false
+                    );
+                }
+
+                // ---------------------------------------------
+                // 로그인 시에만 남은 기간 표시
+                // ---------------------------------------------
+                if (
+                    showRemaining &&
+                    player->GetSession()
+                )
+                {
+                    uint32 remaining =
+                        expireTime - now;
+
+                    std::string message =
+                        Trinity::StringFormat(
+                            "[기간제 스펠] {} - 남은 사용기간: {}",
+                            GetTemporarySpellName(spellId),
+                            FormatTemporarySpellRemaining(
+                                remaining
+                            )
+                        );
+
+                    ChatHandler(player->GetSession()).SendSysMessage(
+						message.c_str()
+					);
+                }
+
+                continue;
+            }
+
+            // =================================================
+            // 기간 만료
+            // =================================================
+
+            // ---------------------------------------------
+            // 스펠 제거
+            // ---------------------------------------------
+            if (player->HasSpell(spellId))
+            {
+                player->RemoveSpell(
+                    spellId,
+                    false,
+                    false
+                );
+            }
+
+            // ---------------------------------------------
+            // DB 기록 삭제
+            // ---------------------------------------------
+            std::string deleteQuery =
+                Trinity::StringFormat(
+                    "DELETE FROM `character_temporary_spell` "
+                    "WHERE `guid` = {} "
+                    "AND `spell` = {}",
+                    guid,
+                    spellId
+                );
+
+            CharacterDatabase.DirectExecute(
+                deleteQuery.c_str()
+            );
+
+            // ---------------------------------------------
+            // 만료 안내
+            // ---------------------------------------------
+            if (player->GetSession())
+            {
+                std::string message =
+                    Trinity::StringFormat(
+                        "{} 사용 기간이 만료되어 스펠이 삭제되었습니다.",
+                        GetTemporarySpellName(spellId)
+                    );
+
+                ChatHandler(player->GetSession()).SendSysMessage(
+					message.c_str()
+				);
+            }
+
+        } while (result->NextRow());
+    }
+}
+
+// =============================================================
+// 기간제 스펠 두루마리
+//
+// 35556
+// 불타는 아드레날린 -> 900212
+//
+// 24229
+// 시간의 쇠퇴 -> 900213
+// =============================================================
+class item_custom_temporary_spell_scroll
+    : public ItemScript
+{
+public:
+    item_custom_temporary_spell_scroll()
+        : ItemScript(
+            "item_custom_temporary_spell_scroll"
+        )
+    {
+    }
+
+    bool OnUse(
+        Player* player,
+        Item* item,
+        SpellCastTargets const& /*targets*/)
+        override
+    {
+        if (!player)
+            return true;
+
+        if (!item)
+            return true;
+
+        uint32 itemEntry =
+            item->GetEntry();
+
+        uint32 spellId =
+            GetTemporarySpellByItem(
+                itemEntry
+            );
+
+        // -----------------------------------------------------
+        // 등록되지 않은 아이템
+        // -----------------------------------------------------
+        if (!spellId)
+            return true;
+
+        bool alreadyLearned =
+            player->HasSpell(
+                spellId
+            );
+
+        // =====================================================
+        // 스펠 습득
+        // =====================================================
+        if (!alreadyLearned)
+        {
+            player->LearnSpell(
+                spellId,
+                false
+            );
+        }
+
+        // =====================================================
+        // 30일 기간 저장
+        //
+        // 기존에 배우고 있는 상태여도
+        // 현재 시간부터 30일로 다시 갱신
+        // =====================================================
+        SaveTemporarySpell(
+            player,
+            spellId
+        );
+
+        // =====================================================
+        // 두루마리 1개 소비
+        // =====================================================
+        player->DestroyItemCount(
+            itemEntry,
+            1,
+            true
+        );
+
+        // =====================================================
+        // 안내
+        // =====================================================
+        if (player->GetSession())
+        {
+            std::string message;
+
+            if (alreadyLearned)
+            {
+                message =
+                    Trinity::StringFormat(
+                        "{}의 사용 기간이 현재 시점부터 30일로 갱신되었습니다.",
+                        GetTemporarySpellName(spellId)
+                    );
+            }
+            else
+            {
+                message =
+                    Trinity::StringFormat(
+                        "{}을(를) 습득했습니다. 30일 동안 사용할 수 있습니다.",
+                        GetTemporarySpellName(spellId)
+                    );
+            }
+
+            ChatHandler(player->GetSession()).SendSysMessage(
+				message.c_str()
+			);
+        }
+
+        return true;
+    }
+};
+
+// =============================================================
+// 기간제 스펠 관리
+// =============================================================
+class player_custom_temporary_spell
+    : public PlayerScript
+{
+public:
+    player_custom_temporary_spell()
+        : PlayerScript(
+            "player_custom_temporary_spell"
+        )
+    {
+    }
+
+    // =========================================================
+    // 로그인
+    //
+    // - 만료 확인
+    // - 남은 기간 표시
+    // =========================================================
+    void OnLogin(
+        Player* player,
+        bool /*firstLogin*/)
+        override
+    {
+        CheckTemporarySpellExpiration(
+            player,
+            true
+        );
+    }
+
+    // =========================================================
+    // 캐릭터 저장
+    //
+    // - 만료 여부만 검사
+    // - 남은 기간 메시지는 표시하지 않음
+    // =========================================================
+    void OnSave(
+        Player* player)
+        override
+    {
+        CheckTemporarySpellExpiration(
+            player,
+            false
+        );
+    }
+};
+
+/*
+ * 광폭화 무기 강화 시스템
+ *
+ * 900216 : 광폭화 무기 강화
+ * 3923   : 광폭화 임시 인챈트
+ * 900217 : 광폭화 Proc Aura
+ * 900215 : 실제 광폭화 버프
+ *
+ * 동작:
+ *
+ * 900216 사용
+ *   ↓
+ * 무기에 3923 적용
+ *   ↓
+ * 플레이어에게 900217 부여
+ *
+ * 장착 무기에 3923이 하나라도 존재
+ *   → 900217 유지
+ *
+ * 3923이 더 이상 존재하지 않음
+ *   → 900217 제거
+ *
+ * 인챈트된 무기를 다시 장착
+ *   → 900217 자동 복구
+ */
+
+#include "ScriptMgr.h"
+#include "SpellScript.h"
+#include "Player.h"
+#include "Item.h"
+#include "DBCStores.h"
+#include "Chat.h"
+
+namespace
+{
+    enum CustomBerserkWeaponEnchant
+    {
+        SPELL_CUSTOM_BERSERK_BUFF          = 900215,
+        SPELL_CUSTOM_BERSERK_WEAPON_ENCHANT = 900216,
+        SPELL_CUSTOM_BERSERK_PROC_AURA     = 900217,
+
+        ENCHANT_CUSTOM_BERSERK             = 3923,
+
+        // 1시간
+        BERSERK_ENCHANT_DURATION           = 60 * 60 * 1000
+    };
+
+    // ---------------------------------------------------------
+    // 모든 무기 허용
+    // ---------------------------------------------------------
+    static bool IsCustomBerserkWeapon(Item const* item)
+    {
+        if (!item)
+            return false;
+
+        ItemTemplate const* proto =
+            item->GetTemplate();
+
+        if (!proto)
+            return false;
+
+        return proto->Class == ITEM_CLASS_WEAPON;
+    }
+
+    // ---------------------------------------------------------
+    // 특정 아이템에 3923이 있는지 확인
+    // ---------------------------------------------------------
+    static bool HasCustomBerserkEnchant(Item const* item)
+    {
+        if (!item)
+            return false;
+
+        return
+            item->GetEnchantmentId(
+                TEMP_ENCHANTMENT_SLOT
+            ) == ENCHANT_CUSTOM_BERSERK;
+    }
+
+    // ---------------------------------------------------------
+    // 현재 장착 중인 무기 중
+    // 3923 인챈트가 하나라도 존재하는지 확인
+    // ---------------------------------------------------------
+    static bool HasEquippedCustomBerserkEnchant(Player* player)
+    {
+        if (!player)
+            return false;
+
+        // 주무기
+        Item* mainHand =
+            player->GetItemByPos(
+                INVENTORY_SLOT_BAG_0,
+                EQUIPMENT_SLOT_MAINHAND
+            );
+
+        if (HasCustomBerserkEnchant(mainHand))
+            return true;
+
+        // 보조무기
+        Item* offHand =
+            player->GetItemByPos(
+                INVENTORY_SLOT_BAG_0,
+                EQUIPMENT_SLOT_OFFHAND
+            );
+
+        if (HasCustomBerserkEnchant(offHand))
+            return true;
+
+        // 원거리 무기
+        Item* ranged =
+            player->GetItemByPos(
+                INVENTORY_SLOT_BAG_0,
+                EQUIPMENT_SLOT_RANGED
+            );
+
+        if (HasCustomBerserkEnchant(ranged))
+            return true;
+
+        return false;
+    }
+
+    // ---------------------------------------------------------
+    // 900217 상태 동기화
+    // ---------------------------------------------------------
+    static void UpdateCustomBerserkProcAura(Player* player)
+    {
+        if (!player)
+            return;
+
+        bool const hasEnchant =
+            HasEquippedCustomBerserkEnchant(player);
+
+        bool const hasAura =
+            player->HasAura(
+                SPELL_CUSTOM_BERSERK_PROC_AURA
+            );
+
+        // -----------------------------------------------------
+        // 광폭화 인챈트 있음
+        // 900217 없음
+        //
+        // → 900217 부여
+        // -----------------------------------------------------
+        if (hasEnchant && !hasAura)
+        {
+            player->CastSpell(
+                player,
+                SPELL_CUSTOM_BERSERK_PROC_AURA,
+                true
+            );
+
+            return;
+        }
+
+        // -----------------------------------------------------
+        // 광폭화 인챈트 없음
+        // 900217 있음
+        //
+        // → 900217 제거
+        // -----------------------------------------------------
+        if (!hasEnchant && hasAura)
+        {
+            player->RemoveAurasDueToSpell(
+                SPELL_CUSTOM_BERSERK_PROC_AURA
+            );
+        }
+    }
+
+    // ---------------------------------------------------------
+    // 실제 3923 적용
+    // ---------------------------------------------------------
+    static bool ApplyCustomBerserkEnchant(
+        Player* player,
+        Item* item)
+    {
+        if (!player || !item)
+            return false;
+
+        if (!IsCustomBerserkWeapon(item))
+            return false;
+
+        // 서버 DBC에서 3923 존재 확인
+        if (!sSpellItemEnchantmentStore.LookupEntry(
+                ENCHANT_CUSTOM_BERSERK))
+        {
+            return false;
+        }
+
+        // 기존 임시 인챈트 제거
+        player->ApplyEnchantment(
+            item,
+            TEMP_ENCHANTMENT_SLOT,
+            false
+        );
+
+        // 3923 적용
+        item->SetEnchantment(
+            TEMP_ENCHANTMENT_SLOT,
+            ENCHANT_CUSTOM_BERSERK,
+            BERSERK_ENCHANT_DURATION,
+            0,
+            player->GetGUID()
+        );
+
+        // 새 인챈트 적용
+        player->ApplyEnchantment(
+            item,
+            TEMP_ENCHANTMENT_SLOT,
+            true
+        );
+
+        // 지속시간 등록
+        player->AddEnchantmentDuration(
+            item,
+            TEMP_ENCHANTMENT_SLOT,
+            BERSERK_ENCHANT_DURATION
+        );
+
+        return true;
+    }
+}
+
+// =============================================================
+// 900216 - 광폭화 무기 강화
+// =============================================================
+class spell_custom_berserk_weapon_enchant
+    : public SpellScriptLoader
+{
+public:
+    spell_custom_berserk_weapon_enchant()
+        : SpellScriptLoader(
+            "spell_custom_berserk_weapon_enchant"
+        )
+    {
+    }
+
+    class spell_custom_berserk_weapon_enchant_SpellScript
+        : public SpellScript
+    {
+        PrepareSpellScript(
+            spell_custom_berserk_weapon_enchant_SpellScript
+        );
+
+        SpellCastResult CheckCast()
+        {
+            Player* player =
+                GetCaster()
+                    ? GetCaster()->ToPlayer()
+                    : nullptr;
+
+            if (!player)
+                return SPELL_FAILED_DONT_REPORT;
+
+            Item* targetItem =
+                GetExplTargetItem();
+
+            if (!targetItem)
+            {
+                ChatHandler(
+                    player->GetSession()
+                ).SendSysMessage(
+                    "광폭화를 적용할 무기를 선택하세요."
+                );
+
+                return SPELL_FAILED_DONT_REPORT;
+            }
+
+            if (!IsCustomBerserkWeapon(targetItem))
+            {
+                ChatHandler(
+                    player->GetSession()
+                ).SendSysMessage(
+                    "광폭화는 무기에만 적용할 수 있습니다."
+                );
+
+                return SPELL_FAILED_DONT_REPORT;
+            }
+
+            return SPELL_CAST_OK;
+        }
+
+        void HandleEnchant(
+            SpellEffIndex effIndex)
+        {
+            // DBC Effect 54의 기본 처리는 막고
+            // 직접 3923을 적용
+            PreventHitDefaultEffect(
+                effIndex
+            );
+
+            Player* player =
+                GetCaster()
+                    ? GetCaster()->ToPlayer()
+                    : nullptr;
+
+            if (!player)
+                return;
+
+            Item* targetItem =
+                GetHitItem();
+
+            if (!targetItem)
+            {
+                targetItem =
+                    GetExplTargetItem();
+            }
+
+            if (!targetItem)
+                return;
+
+            // -------------------------------------------------
+            // 3923 적용
+            // -------------------------------------------------
+            if (!ApplyCustomBerserkEnchant(
+                    player,
+                    targetItem))
+            {
+                ChatHandler(
+                    player->GetSession()
+                ).SendSysMessage(
+                    "광폭화 무기 강화 적용에 실패했습니다."
+                );
+
+                return;
+            }
+
+            // -------------------------------------------------
+            // 3923 적용 성공
+            //
+            // 즉시 900217 상태 동기화
+            // -------------------------------------------------
+            UpdateCustomBerserkProcAura(
+                player
+            );
+
+            ChatHandler(
+                player->GetSession()
+            ).SendSysMessage(
+                "무기에 광폭화가 적용되었습니다. 지속시간: 1시간"
+            );
+        }
+
+        void Register() override
+        {
+            OnCheckCast += SpellCheckCastFn(
+                spell_custom_berserk_weapon_enchant_SpellScript::CheckCast
+            );
+
+            OnEffectHitTarget += SpellEffectFn(
+                spell_custom_berserk_weapon_enchant_SpellScript::HandleEnchant,
+                EFFECT_0,
+                SPELL_EFFECT_ENCHANT_ITEM_TEMPORARY
+            );
+        }
+    };
+
+    SpellScript* GetSpellScript() const override
+    {
+        return new spell_custom_berserk_weapon_enchant_SpellScript();
+    }
+};
+
+#include "ScriptMgr.h"
+#include "ObjectAccessor.h"
+#include "Player.h"
+#include "Random.h"
+
+#include <ctime>
+
+namespace
+{
+    constexpr uint32 kBuffSpellA = 16609;
+    constexpr uint32 kBuffSpellB = 24425;
+    constexpr uint32 kBuffSpellC = 22888;
+    constexpr uint32 kBuffSpellD = 34410;
+    constexpr uint32 kBuffSpellE = 29235;
+
+    constexpr uint32 kBuffSpells[] =
+    {
+        kBuffSpellA,
+        kBuffSpellB,
+        kBuffSpellC,
+        kBuffSpellD,
+        kBuffSpellE
+    };
+}
+
+class hourly_random_buff_world : public WorldScript
+{
+public:
+    hourly_random_buff_world()
+        : WorldScript("hourly_random_buff_world")
+    {
+    }
+
+    void OnUpdate(uint32 diff) override
+    {
+        // 매 틱마다 시간 확인하지 않고 1초에 한 번만 확인
+        if (_checkTimer > diff)
+        {
+            _checkTimer -= diff;
+            return;
+        }
+
+        _checkTimer = 1000;
+
+        std::time_t now = std::time(nullptr);
+        std::tm* localTime = std::localtime(&now);
+
+        if (!localTime)
+            return;
+
+        // 정각이 아니면 종료
+        if (localTime->tm_min != 0)
+            return;
+
+        // 같은 정각에 중복 실행 방지
+        if (_lastYear == localTime->tm_year &&
+            _lastDay == localTime->tm_yday &&
+            _lastHour == localTime->tm_hour)
+        {
+            return;
+        }
+
+        _lastYear = localTime->tm_year;
+        _lastDay = localTime->tm_yday;
+        _lastHour = localTime->tm_hour;
+
+        // 이번 정각에 사용할 버프 하나만 선택
+        uint32 selectedSpell = kBuffSpells[urand(0, 4)];
+
+        HashMapHolder<Player>::MapType const& players = ObjectAccessor::GetPlayers();
+
+        for (auto const& kv : players)
+        {
+            Player* player = kv.second;
+
+            if (!player)
+                continue;
+
+            if (!player->IsInWorld())
+                continue;
+
+            player->AddAura(selectedSpell, player);
+        }
+    }
+
+private:
+    uint32 _checkTimer = 1000;
+
+    int32 _lastYear = -1;
+    int32 _lastDay = -1;
+    int32 _lastHour = -1;
+};
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 void AddSC_custom_spell_script()
 {
     new spell_guild_hearthstone();
@@ -4325,7 +8282,24 @@ void AddSC_custom_spell_script()
 	RegisterSpellScript(spell_custom_firestone_preparation_redirect);
 	new spell_custom_gem_combine();
 	RegisterSpellScript(spell_guardian_purify);
+	new legacy_rune_worldscript();
 	new legacy_rune_serverscript();
 	new custom_legacy_rune_calendar();
     new go_legacy_rune_magic_altar();
+	new custom_legacy_rune_craft();
+	new item_legacy_rune_execution_recipe();
+	new custom_gem_combine_login();
+
+	//불타ㅓ는 아드레날린
+	new spell_custom_burning_adrenaline();
+	new spell_custom_time_rewind();
+	new item_custom_temporary_spell_scroll();
+	new player_custom_temporary_spell();
+
+	//광폭화
+	new spell_custom_berserk_weapon_enchant();
+
+	//매 정시에 버프
+	new hourly_random_buff_world();
+
 }

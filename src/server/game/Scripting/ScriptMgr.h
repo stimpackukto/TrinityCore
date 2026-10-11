@@ -531,7 +531,7 @@ class TC_GAME_API AuctionHouseScript : public ScriptObject
         // Called when an auction expires.
         virtual void OnAuctionExpire(AuctionHouseObject* ah, AuctionEntry* entry);
 
-		virtual void OnAuctionWon(Player* player, uint32 itemEntry, uint32 itemCount) { }
+		virtual void OnAuctionWon(Player* /*player*/, uint32 /*itemEntry*/, uint32 /*itemCount*/) { }
 };
 
 class TC_GAME_API ConditionScript : public ScriptObject
@@ -725,19 +725,19 @@ class TC_GAME_API PlayerScript : public ScriptObject
         virtual void OnMovieComplete(Player* player, uint32 movieId);
 
 		// [NEW] 누가 어떤 lootGuid에서 어떤 itemId를 몇 개 루팅했는지
-		virtual void OnLootItem(Player* looter, ObjectGuid const& lootGuid, uint32 itemId, uint32 count) { }
+		virtual void OnLootItem(Player* /*looter*/, ObjectGuid const& /*lootGuid*/, uint32 /*itemId*/, uint32 /*count*/) { }
 
 		// [NEW] NPC 대화 감지
-        virtual void OnNpcGossipHello(Player* player, uint32 creatureEntry, ObjectGuid const& creatureGuid) { }
+        virtual void OnNpcGossipHello(Player* /*player*/, uint32 /*creatureEntry*/, ObjectGuid const& /*creatureGuid*/) { }
 
 	    // [NEW] 아이템 판매 훅
-	    virtual bool OnPlayerSellItem(Player* player, Creature* vendor, Item* item, uint32& count, uint32& money) { return false; }
+	    virtual bool OnPlayerSellItem(Player* /*player*/, Creature* /*vendor*/, Item* /*item*/, uint32& /*count*/, uint32& /*money*/) { return false; }
 
-		virtual void OnBattlegroundEnd(Player* player, Battleground* bg, bool won) { }
+		virtual void OnBattlegroundEnd(Player* /*player*/, Battleground* /*bg*/, bool /*won*/) { }
 		// [NEW] 업적 달성 훅
-		virtual void OnAchievementEarned(Player* player, uint32 achievementId) { }
+		virtual void OnAchievementEarned(Player* /*player*/, uint32 /*achievementId*/) { }
 
-		virtual void OnSendMail(Player* sender, ObjectGuid receiverGuid, uint32 receiverAccountId, uint32 money, uint32 cod, std::vector<Item*> const& items) { }
+		virtual void OnSendMail(Player* /*sender*/, ObjectGuid /*receiverGuid*/, uint32 /*receiverAccountId*/, uint32 /*money*/, uint32 /*cod*/, std::vector<Item*> const& /*items*/) { }
 };
 
 class TC_GAME_API AccountScript : public ScriptObject

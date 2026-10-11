@@ -15,6 +15,20 @@
  * with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
+/*
+ * Custom Update - 2026-07-29
+ *
+ * Server-wide instance wipe detection
+ *
+ * - Detects a wipe for every dungeon and raid encounter that uses CreatureAI::UpdateVictim().
+ * - Counts every living non-GM player in the instance, regardless of combat participation.
+ * - Excludes only explicit encounter-exit effects: Feign Death, Divine Intervention,
+ *   Vanish, Invisibility, and Shadowmeld.
+ * - Resets the encounter immediately even when a pet, guardian, or vehicle remains targeted.
+ * - Does not affect outdoor creatures, battlegrounds, arenas, or instances without an
+ *   encounter currently marked IN_PROGRESS.
+ */
+
 #include "CreatureAI.h"
 #include "AreaBoundary.h"
 #include "Creature.h"
@@ -22,6 +36,7 @@
 #include "CreatureTextMgr.h"
 #include "DBCStructure.h"
 #include "Language.h"
+#include "InstanceScript.h"
 #include "Log.h"
 #include "Map.h"
 #include "MapReference.h"
@@ -36,6 +51,96 @@
 
 AISpellInfoType* UnitAI::AISpellInfo;
 AISpellInfoType* GetAISpellInfo(uint32 i) { return &UnitAI::AISpellInfo[i]; }
+
+namespace
+{
+    enum InstanceWipeExcludedSpells : uint32
+    {
+        SPELL_DIVINE_INTERVENTION_AURA = 19753,
+
+        SPELL_VANISH_AURA_RANK_1       = 11327,
+        SPELL_VANISH_AURA_RANK_2       = 11329,
+        SPELL_VANISH_AURA_RANK_3       = 26888,
+
+        SPELL_INVISIBILITY_AURA        = 32612,
+        SPELL_SHADOWMELD_AURA          = 58984
+    };
+
+    bool IsPlayerExcludedFromInstanceWipe(Player const* player)
+    {
+        if (!player)
+            return true;
+
+        // Actual death is handled before this function. UNIT_STATE_DIED and
+        // SPELL_AURA_FEIGN_DEATH are checked separately because Feign Death
+        // keeps the player technically alive.
+        if (player->HasUnitState(UNIT_STATE_DIED))
+            return true;
+
+        if (player->HasAuraType(SPELL_AURA_FEIGN_DEATH))
+            return true;
+
+        // Divine Intervention target aura.
+        if (player->HasAura(SPELL_DIVINE_INTERVENTION_AURA))
+            return true;
+
+        // Vanish applies a separate 10 second improved-stealth aura for each rank.
+        // Normal Stealth is intentionally not checked.
+        if (player->HasAura(SPELL_VANISH_AURA_RANK_1)
+            || player->HasAura(SPELL_VANISH_AURA_RANK_2)
+            || player->HasAura(SPELL_VANISH_AURA_RANK_3))
+            return true;
+
+        // Only the completed Invisibility aura is excluded. The fade period and
+        // ordinary stealth effects still count the player as an encounter survivor.
+        if (player->HasAura(SPELL_INVISIBILITY_AURA))
+            return true;
+
+        if (player->HasAura(SPELL_SHADOWMELD_AURA))
+            return true;
+
+        return false;
+    }
+
+    bool IsInstanceEncounterWipe(Creature* creature)
+    {
+        if (!creature || !creature->IsEngaged())
+            return false;
+
+        Map* map = creature->GetMap();
+        if (!map || !map->IsDungeon())
+            return false;
+
+        InstanceScript* instanceScript = creature->GetInstanceScript();
+        if (!instanceScript || !instanceScript->IsEncounterInProgress())
+            return false;
+
+        for (MapReference const& ref : map->GetPlayers())
+        {
+            Player* player = ref.GetSource();
+            if (!player)
+                continue;
+
+            if (!player->IsInWorld())
+                continue;
+
+            if (player->IsGameMaster())
+                continue;
+
+            if (!player->IsAlive())
+                continue;
+
+            if (IsPlayerExcludedFromInstanceWipe(player))
+                continue;
+
+            // Combat participation is intentionally not checked. Any living player
+            // without an explicit encounter-exit effect prevents a wipe.
+            return false;
+        }
+
+        return true;
+    }
+}
 
 CreatureAI::CreatureAI(Creature* creature) : UnitAI(creature), me(creature), _boundary(nullptr), _negateBoundary(false), _isEngaged(false), _moveInLOSLocked(false)
 {
@@ -245,6 +350,15 @@ bool CreatureAI::UpdateVictim()
     if (!me->IsAlive())
     {
         EngagementOver();
+        return false;
+    }
+
+    // Check the instance player state before selecting another victim. This is
+    // required so a remaining pet, guardian, or vehicle cannot keep an encounter
+    // active after every player is dead or protected by an encounter-exit effect.
+    if (IsInstanceEncounterWipe(me))
+    {
+        EnterEvadeMode(EVADE_REASON_NO_HOSTILES);
         return false;
     }
 

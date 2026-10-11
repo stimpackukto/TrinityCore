@@ -486,6 +486,10 @@ enum PlayerExtraFlags
     PLAYER_EXTRA_HAS_RACE_CHANGED           = 0x0200,
     PLAYER_EXTRA_GRANTED_LEVELS_FROM_RAF    = 0x0400,
     PLAYER_EXTRA_LEVEL_BOOSTED              = 0x0800,       // reserved for master branch
+
+	// Custom Update - 2026-08-01
+    // Volatile marker for active Scourge Sabotage participants.
+    PLAYER_EXTRA_SCOURGE_SABOTAGE           = 0x1000,
 };
 
 // 2^n values
@@ -1038,6 +1042,31 @@ class TC_GAME_API Player : public Unit, public GridObject<Player>
         void SetBeenGrantedLevelsFromRaF() { m_ExtraFlags |= PLAYER_EXTRA_GRANTED_LEVELS_FROM_RAF; }
         bool HasLevelBoosted() const { return (m_ExtraFlags & PLAYER_EXTRA_LEVEL_BOOSTED) != 0; }
         void SetHasLevelBoosted() { m_ExtraFlags |= PLAYER_EXTRA_LEVEL_BOOSTED; }
+
+		// Custom Update - 2026-08-01
+        bool IsScourgeSabotageParticipant() const
+        {
+            return (
+                m_ExtraFlags &
+                PLAYER_EXTRA_SCOURGE_SABOTAGE
+            ) != 0;
+        }
+
+        void SetScourgeSabotageParticipant(
+            bool enabled
+        )
+        {
+            if (enabled)
+            {
+                m_ExtraFlags |=
+                    PLAYER_EXTRA_SCOURGE_SABOTAGE;
+            }
+            else
+            {
+                m_ExtraFlags &=
+                    ~PLAYER_EXTRA_SCOURGE_SABOTAGE;
+            }
+        }
 
         uint32 GetXP() const { return GetUInt32Value(PLAYER_XP); }
         uint32 GetXPForNextLevel() const { return GetUInt32Value(PLAYER_NEXT_LEVEL_XP); }

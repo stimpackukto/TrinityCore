@@ -54,7 +54,12 @@ void AddSC_custom_outdoor_pvp_war_controller();
 void AddSC_custom_execution_meta_gem();
 void AddSC_custom_friend_login_fcm();
 void AddSC_custom_wsg_hide_and_seek();
+void AddSC_custom_wsg_supply_wagon();
 void AddSC_custom_scourge_invasion();
+void AddSC_custom_death_rune_delivery();
+void AddSC_custom_scourge_dungeon_mode();
+void AddSC_custom_treasure_hunt();
+void AddSC_character_trade();
 
 void AddCustomScripts()
 {
@@ -93,5 +98,10 @@ void AddCustomScripts()
 	AddSC_custom_execution_meta_gem();
 	AddSC_custom_friend_login_fcm();
 	AddSC_custom_wsg_hide_and_seek();
+	AddSC_custom_wsg_supply_wagon();
 	AddSC_custom_scourge_invasion();
+	AddSC_custom_death_rune_delivery();
+	AddSC_custom_scourge_dungeon_mode();
+	AddSC_custom_treasure_hunt();
+	AddSC_character_trade();
 }

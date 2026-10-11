@@ -280,6 +280,7 @@ void Creature::AddToWorld()
     ///- Register the creature for guid lookup
     if (!IsInWorld())
     {
+
         GetMap()->GetObjectsStore().Insert<Creature>(GetGUID(), this);
         if (m_spawnId)
             GetMap()->GetCreatureBySpawnIdStore().insert(std::make_pair(m_spawnId, this));
@@ -294,6 +295,7 @@ void Creature::AddToWorld()
 
         if (GetZoneScript())
             GetZoneScript()->OnCreatureCreate(this);
+
     }
 }
 
@@ -301,6 +303,7 @@ void Creature::RemoveFromWorld()
 {
     if (IsInWorld())
     {
+
         if (GetZoneScript())
             GetZoneScript()->OnCreatureRemove(this);
 
@@ -311,6 +314,7 @@ void Creature::RemoveFromWorld()
 
         if (m_spawnId)
             Trinity::Containers::MultimapErasePair(GetMap()->GetCreatureBySpawnIdStore(), m_spawnId, this);
+
 
         TC_LOG_DEBUG("entities.unit", "Removing creature {} with DBGUID {} to world in map {}", GetGUID().ToString(), m_spawnId, GetMap()->GetId());
         GetMap()->GetObjectsStore().Remove<Creature>(GetGUID());
@@ -1599,6 +1603,7 @@ bool Creature::CreateFromProto(ObjectGuid::LowType guidlow, uint32 entry, Creatu
 
 bool Creature::LoadFromDB(ObjectGuid::LowType spawnId, Map* map, bool addToMap, bool allowDuplicate)
 {
+
     if (!allowDuplicate)
     {
         // If an alive instance of this spawnId is already found, skip creation
@@ -1610,8 +1615,10 @@ bool Creature::LoadFromDB(ObjectGuid::LowType spawnId, Map* map, bool addToMap, 
         {
             for (auto itr = creatureBounds.first; itr != creatureBounds.second; ++itr)
             {
+
                 if (itr->second->IsAlive())
                 {
+
                     TC_LOG_DEBUG("maps", "Would have spawned {} but {} already exists", spawnId, creatureBounds.first->second->GetGUID().ToString());
                     return false;
                 }
@@ -1633,6 +1640,7 @@ bool Creature::LoadFromDB(ObjectGuid::LowType spawnId, Map* map, bool addToMap, 
 
     if (!data)
     {
+
         TC_LOG_ERROR("sql.sql", "Creature (SpawnID {}) not found in table `creature`, can't load. ", spawnId);
         return false;
     }
@@ -1644,8 +1652,12 @@ bool Creature::LoadFromDB(ObjectGuid::LowType spawnId, Map* map, bool addToMap, 
     m_wanderDistance = data->wander_distance;
     m_respawnDelay = data->spawntimesecs;
 
+
     if (!Create(map->GenerateLowGuid<HighGuid::Unit>(), map, data->phaseMask, data->id, data->spawnPoint, data, 0U , !m_respawnCompatibilityMode))
+    {
+
         return false;
+    }
 
     //We should set first home position, because then AI calls home movement
     SetHomePosition(*this);
@@ -1654,6 +1666,7 @@ bool Creature::LoadFromDB(ObjectGuid::LowType spawnId, Map* map, bool addToMap, 
 
     m_respawnTime = GetMap()->GetCreatureRespawnTime(m_spawnId);
 
+
     if (!m_respawnTime && !map->IsSpawnGroupActive(data->spawnGroupData->groupId))
     {
         if (!m_respawnCompatibilityMode)
@@ -1661,6 +1674,7 @@ bool Creature::LoadFromDB(ObjectGuid::LowType spawnId, Map* map, bool addToMap, 
             // @todo pools need fixing! this is just a temporary thing, but they violate dynspawn principles
             if (!sPoolMgr->IsPartOfAPool<Creature>(spawnId))
             {
+
                 TC_LOG_ERROR("entities.unit", "Creature (SpawnID {}) trying to load in inactive spawn group '{}':\n{}", spawnId, data->spawnGroupData->name, GetDebugInfo());
                 return false;
             }
@@ -1676,6 +1690,7 @@ bool Creature::LoadFromDB(ObjectGuid::LowType spawnId, Map* map, bool addToMap, 
             // @todo same as above
             if (!sPoolMgr->IsPartOfAPool<Creature>(spawnId))
             {
+
                 TC_LOG_ERROR("entities.unit", "Creature (SpawnID {}) trying to load despite a respawn timer in progress:\n{}", spawnId, GetDebugInfo());
                 return false;
             }
@@ -1702,7 +1717,12 @@ bool Creature::LoadFromDB(ObjectGuid::LowType spawnId, Map* map, bool addToMap, 
     m_stringIds[AsUnderlyingType(StringIdType::Spawn)] = &data->StringId;
 
     if (addToMap && !GetMap()->AddToMap(this))
+    {
+
         return false;
+    }
+
+
     return true;
 }
 

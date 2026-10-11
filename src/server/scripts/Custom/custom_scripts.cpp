@@ -840,7 +840,7 @@ public:
 		uint32 mapid = player->GetMapId();
 		uint32 zone = player->GetZoneId();
 		MapEntry const* mEntry = sMapStore.LookupEntry(mapid);
-		if (player->GetLevel() >= 79 || !player->IsAlive() || mEntry->IsBattlegroundOrArena() || player->IsInCombat() || player->HasInvisibilityAura() || player->HasStealthAura() || player->InBattleground() || player->InArena() || zone == 4197)
+		if (!player->IsAlive() || mEntry->IsBattlegroundOrArena() || player->IsInCombat() || player->HasInvisibilityAura() || player->HasStealthAura() || player->InBattleground() || player->InArena() || zone == 4197)
 		{
 			player->GetSession()->SendNotification("사용할수없습니다.");
 			return true;

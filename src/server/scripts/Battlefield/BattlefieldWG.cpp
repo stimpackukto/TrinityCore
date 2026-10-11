@@ -919,8 +919,8 @@ static constexpr uint8 WG_WORKSHOP_SIEGE_MAX_ALIVE = 5;
 //static constexpr float WG_ELITE_DEMOLISHER_STRUCTURE_FRONT_ARC = 1.57079632f; // 전방 180도
 //static constexpr uint32 WG_ELITE_DEMOLISHER_STRUCTURE_FAIL_LIMIT = 3;
 
-static constexpr float WG_ELITE_DEMOLISHER_STRUCTURE_MELEE_SCAN_RANGE = 5.0f;
-static constexpr uint32 WG_ELITE_DEMOLISHER_STRUCTURE_MELEE_SCAN_TIMER = 500;
+// Reserved for later use: WG_ELITE_DEMOLISHER_STRUCTURE_MELEE_SCAN_RANGE = 5.0f;
+// Reserved for later use: WG_ELITE_DEMOLISHER_STRUCTURE_MELEE_SCAN_TIMER = 500;
 
 static uint32 WGWorkshopSiegeWaveTimer = 0;
 static bool WGWorkshopSiegeWaveEnabled = false;
@@ -1378,7 +1378,7 @@ static void RemoveWintergraspDefenderWorkshopMines(BattlefieldWG* wg)
     if (!wg)
         return;
 
-	DisableAllWintergraspDefenderMineSnapshots();
+    DisableAllWintergraspDefenderMineSnapshots();
 
     for (uint8 slot = 0; slot < WG_DEFENDER_TOTAL_MINE_COUNT; ++slot)
     {
@@ -1795,8 +1795,19 @@ static void SaveWintergraspWorkshopOwnerSnapshot(BattlefieldWG* wg, uint8 worksh
     if (teamId != TEAM_ALLIANCE && teamId != TEAM_HORDE)
         return;
 
-    if (IsWintergraspKeepWorkshop(workshopId))
-        return;
+    // The web snapshot table has a different ID order from WG's enum:
+    // DB 0/1: keep west/east; 2/3: NE/NW; 4/5: SE/SW.
+    uint32 snapshotId = WG_MAX_WORKSHOP;
+    switch (workshopId)
+    {
+        case BATTLEFIELD_WG_WORKSHOP_KEEP_WEST: snapshotId = 0; break;
+        case BATTLEFIELD_WG_WORKSHOP_KEEP_EAST: snapshotId = 1; break;
+        case BATTLEFIELD_WG_WORKSHOP_NE:        snapshotId = 2; break;
+        case BATTLEFIELD_WG_WORKSHOP_NW:        snapshotId = 3; break;
+        case BATTLEFIELD_WG_WORKSHOP_SE:        snapshotId = 4; break;
+        case BATTLEFIELD_WG_WORKSHOP_SW:        snapshotId = 5; break;
+        default: return;
+    }
 
     char const* ownerSide = GetWintergraspStatusOwnerSide(wg, teamId);
 
@@ -1807,7 +1818,7 @@ static void SaveWintergraspWorkshopOwnerSnapshot(BattlefieldWG* wg, uint8 worksh
         "updated_at = NOW() "
         "WHERE workshop_id = {}",
         ownerSide,
-        uint32(workshopId)
+        snapshotId
     );
 
     TC_LOG_INFO(
@@ -2112,7 +2123,7 @@ bool BattlefieldWG::Update(uint32 diff)
     else
         m_saveTimer -= diff;
 
-	WGSpiritImmunityCheckTimer += diff;
+    WGSpiritImmunityCheckTimer += diff;
 
 	if (WGSpiritImmunityCheckTimer >= 1000)
 	{
@@ -2223,7 +2234,7 @@ void BattlefieldWG::OnBattleStart()
     for (WintergraspWorkshop* workshop : Workshops)
         workshop->UpdateGraveyardAndWorkshop();
 
-	SpawnWintergraspWorkshopBanners(this);
+    SpawnWintergraspWorkshopBanners(this);
 
     for (uint8 team = 0; team < PVP_TEAMS_COUNT; ++team)
     {
@@ -2365,7 +2376,7 @@ void BattlefieldWG::OnBattleEnd(bool endByTimer)
         if (BfGraveyard* graveyard = GetGraveyardById(i))
             graveyard->GiveControlTo(GetDefenderTeam());
 
-	for (WintergraspWorkshop* workshop : Workshops)
+    for (WintergraspWorkshop* workshop : Workshops)
 	{
 		if (!workshop)
 			continue;
@@ -2450,7 +2461,7 @@ void BattlefieldWG::OnBattleEnd(bool endByTimer)
         SendWarning(GetDefenderTeam() == TEAM_ALLIANCE ? BATTLEFIELD_WG_TEXT_FORTRESS_DEFEND_ALLIANCE : BATTLEFIELD_WG_TEXT_FORTRESS_DEFEND_HORDE);
 
 		// 전투 종료 시 M키 지도 / 월드스테이트 강제 리프레시
-	SendInitWorldStatesToAll();
+    SendInitWorldStatesToAll();
 
 	SaveWintergraspBattleStatusSnapshot(
 		this,

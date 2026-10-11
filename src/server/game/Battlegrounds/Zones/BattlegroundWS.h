@@ -20,6 +20,7 @@
 
 #include "Battleground.h"
 #include "BattlegroundScore.h"
+#include <map>
 
 enum BG_WS_TimerOrScore
 {
@@ -104,7 +105,8 @@ enum BG_WS_ObjectTypes
     BG_WS_OBJECT_REGENBUFF_2    = 15,
     BG_WS_OBJECT_BERSERKBUFF_1  = 16,
     BG_WS_OBJECT_BERSERKBUFF_2  = 17,
-    BG_WS_OBJECT_MAX            = 18
+    BG_WS_OBJECT_SUPPLY_CRATE   = 18,
+    BG_WS_OBJECT_MAX            = 19
 };
 
 enum BG_WS_ObjectEntry
@@ -145,8 +147,13 @@ enum BG_WS_CreatureTypes
 {
     WS_SPIRIT_MAIN_ALLIANCE   = 0,
     WS_SPIRIT_MAIN_HORDE      = 1,
+    BG_WS_CREATURE_SIEGE_FLAG_H_1 = 2,
+    BG_WS_CREATURE_SIEGE_FLAG_H_2 = 3,
+    BG_WS_CREATURE_SIEGE_FLAG_A_1 = 4,
+    BG_WS_CREATURE_SIEGE_FLAG_A_2 = 5,
+    BG_WS_CREATURE_SUPPLY_WAGON  = 6,
 
-    BG_CREATURES_MAX_WS       = 2
+    BG_CREATURES_MAX_WS       = 7
 };
 
 enum BG_WS_CarrierDebuffs
@@ -231,6 +238,7 @@ class BattlegroundWS : public Battleground
         void RemovePlayer(Player* player, ObjectGuid guid, uint32 team) override;
         void HandleAreaTrigger(Player* player, uint32 trigger) override;
         void HandleKillPlayer(Player* player, Player* killer) override;
+        void HandleKillUnit(Creature* creature, Player* killer) override;
         bool SetupBattleground() override;
         void Reset() override;
         void EndBattleground(uint32 winner) override;
@@ -239,6 +247,10 @@ class BattlegroundWS : public Battleground
         void UpdateFlagState(uint32 team, uint32 value);
         void SetLastFlagCapture(uint32 team)                { _lastFlagCaptureTeam = team; }
         void UpdateTeamScore(uint32 team);
+
+        // Clicked by the custom supply crate GameObject AI.
+        bool ClaimSupplyCrate(Player* player, ObjectGuid crateGuid);
+        bool HasSupplySiegeBuff(Player const* player) const;
         bool UpdatePlayerScore(Player* player, uint32 type, uint32 value, bool doAddHonor = true) override;
         void SetDroppedFlagGUID(ObjectGuid guid, int32 team = -1) override
         {
@@ -275,6 +287,33 @@ class BattlegroundWS : public Battleground
         uint8 _flagDebuffState;                            // 0 - no debuffs, 1 - focused assault, 2 - brutal assault
         uint8 _minutesElapsed;
 
+        // Each siege flag permanently loses its protective effect when destroyed.
+        // These instance-local flags do not change the normal Warsong flags.
+        bool _siegeFlagDestroyed[4] = { false, false, false, false };
+        uint32 _siegeFlagUpdateTimer = 0;
+
+        void UpdateSiegeFlagBuffs(uint32 diff);
+        void RemoveSiegeFlagBuffs(Player* player);
+
+        // Wagon route, instance-local supply crate and temporary faction rewards.
+        uint32 _supplyWagonSpawnTimer = 3 * 60 * 1000;
+        uint32 _supplyWagonThinkTimer = 0;
+        int32 _supplyWagonDirection = 1;
+        int32 _supplyWagonNextPoint = 1;
+        bool _supplyWagonActive = false;
+        bool _supplyWagonDeletePending = false;
+        bool _supplyCrateActive = false;
+        bool _supplyCrateDeletePending = false;
+        uint32 _supplyCrateTimer = 0;
+        uint32 _supplyBuffTeam = 0;
+        uint32 _supplyBuffType = 0;
+        uint32 _supplyBuffTimer = 0;
+        uint32 _supplyRegenTimer = 0;
+        std::map<ObjectGuid, float> _supplySpeedBases;
+
+        void UpdateSupplyWagon(uint32 diff);
+        void UpdateSupplyRewards(uint32 diff);
+        void RemoveSupplySpeed(Player* player);
         void PostUpdateImpl(uint32 diff) override;
 };
 #endif

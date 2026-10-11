@@ -5355,6 +5355,30 @@ void SpellMgr::LoadSpellInfoCorrections()
 		spellInfo->_GetEffect(EFFECT_2).TargetB = SpellImplicitTargetInfo();
 	});
 
+		// Custom Update - 2026-07-27
+	// 전승 룬 점멸
+	// 1953 - 점멸
+	// - 일반 상태에서 사용 가능
+	// - 곰 변신에서 사용 가능, 변신 유지
+	// - 광포한 곰 변신에서 사용 가능, 변신 유지
+	// - 그 외 변신 상태에서는 사용 불가
+	ApplySpellFix({ 1953 }, [](SpellInfo* spellInfo)
+	{
+		uint64 const bearFormMask =
+			(UI64LIT(1) << (FORM_BEAR - 1)) |
+			(UI64LIT(1) << (FORM_DIREBEAR - 1));
+
+		// 곰 변신과 광포한 곰 변신에서만 사용 허용
+		spellInfo->Stances = bearFormMask;
+		spellInfo->StancesNot = 0;
+
+		// 변신 상태 사용 금지 속성 제거
+		spellInfo->Attributes &= ~SPELL_ATTR0_NOT_SHAPESHIFT;
+
+		// 일반 상태에서도 사용 가능
+		spellInfo->AttributesEx2 |= SPELL_ATTR2_NOT_NEED_SHAPESHIFT;
+	});
+
     for (uint32 i = 0; i < GetSpellInfoStoreSize(); ++i)
     {
         SpellInfo* spellInfo = mSpellInfoMap[i];

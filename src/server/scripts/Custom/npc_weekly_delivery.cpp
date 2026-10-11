@@ -160,19 +160,19 @@ namespace
 
     static void AddServerProgress(uint32 goalId, uint32 amount)
     {
-        CharacterDatabase.PExecute(
+     /*   CharacterDatabase.PExecute(
             "UPDATE appdata.weekly_server_goals "
             "SET current_count = current_count + {} "
             "WHERE id={}",
             amount,
             goalId
-        );
+        ); */
     }
 
     static void AddPersonalContribution(uint32 goalId, uint32 accountId, uint32 addAmount, uint32 minPersonal)
     {
         // 중요: weekly_goal_contributions에 UNIQUE(goal_id, account_id) 필요
-        CharacterDatabase.PExecute(
+    /*    CharacterDatabase.PExecute(
             "INSERT INTO appdata.weekly_goal_contributions "
             "(goal_id, account_id, personal_count, qualified, rewarded, updated_at) "
             "VALUES ({}, {}, {}, IF({} >= {}, 1, 0), 0, NOW()) "
@@ -182,7 +182,7 @@ namespace
             "updated_at = NOW()",
             goalId, accountId, addAmount, addAmount, minPersonal,
             addAmount, addAmount, minPersonal
-        );
+        ); */
     }
 
     static void InsertDeliveryLog(uint32 goalId, std::string const& goalType, uint32 accountId, uint64 charGuid,

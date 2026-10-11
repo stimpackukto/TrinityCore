@@ -18,15 +18,66 @@
 #include "BattlegroundWS.h"
 #include "BattlegroundMgr.h"
 #include "BattlegroundPackets.h"
+#include "Chat.h"
+#include "Creature.h"
 #include "DBCStores.h"
 #include "GameObject.h"
 #include "Log.h"
 #include "Map.h"
+#include "MotionMaster.h"
 #include "Object.h"
 #include "ObjectAccessor.h"
 #include "Player.h"
 #include "WorldPacket.h"
 #include "WorldStatePackets.h"
+#include <cmath>
+
+namespace
+{
+    struct SiegeFlagPosition
+    {
+        float x, y, z, orientation;
+        uint32 creatureEntry, creatureSlot, owner;
+    };
+
+    // Measured by .gps on map 489: Horde #1/#2, Alliance #3/#4.
+    constexpr SiegeFlagPosition SiegeFlags[4] =
+    {
+        { 1126.583984f, 1339.359619f, 315.253479f, 2.478714f, 960510,
+          BG_WS_CREATURE_SIEGE_FLAG_H_1, HORDE },
+        { 1124.895508f, 1549.258911f, 306.517609f, 0.592187f, 960511,
+          BG_WS_CREATURE_SIEGE_FLAG_H_2, HORDE },
+        { 1332.749634f, 1545.900269f, 313.258820f, 2.708051f, 960512,
+          BG_WS_CREATURE_SIEGE_FLAG_A_1, ALLIANCE },
+        { 1325.680664f, 1394.760742f, 315.322327f, 4.289058f, 960513,
+          BG_WS_CREATURE_SIEGE_FLAG_A_2, ALLIANCE }
+    };
+    // Use the original Warsong Gulch Berserking pickup aura throughout the home territory.
+    constexpr uint32 SIEGE_FLAG_BERSERKING_SPELL = 23505;
+    constexpr uint32 SIEGE_FLAG_HEALTH = 150000;
+
+    struct WagonStop { float x, y, z, facing; };
+    // Exactly the four in-game .gps markers; endpoint 1 and 4 alternate.
+    constexpr WagonStop WagonPath[4] =
+    {
+        { 1232.643799f, 1306.164673f, 312.712524f, 4.712390f },
+        { 1232.529297f, 1426.125488f, 309.566864f, 1.501681f },
+        { 1249.989990f, 1458.854126f, 310.981934f, 1.080707f },
+        { 1235.336426f, 1564.624878f, 308.178741f, 1.684679f }
+    };
+    constexpr uint32 WSG_SUPPLY_WAGON_ENTRY = 960520;
+    constexpr uint32 WSG_SUPPLY_CRATE_ENTRY = 960521;
+    constexpr uint32 WSG_SUPPLY_WAGON_HEALTH = 500000;
+    constexpr uint32 WSG_SUPPLY_TRIP_DELAY = 5 * MINUTE * IN_MILLISECONDS;
+    constexpr uint32 WSG_SUPPLY_CRATE_TIMEOUT = 30 * IN_MILLISECONDS;
+    constexpr uint32 WSG_SUPPLY_BUFF_DURATION = 90 * IN_MILLISECONDS;
+    enum : uint32
+    {
+        WSG_SUPPLY_SIEGE = 1, // +50% damage to custom siege objectives
+        WSG_SUPPLY_MORALE = 2, // +20% run speed
+        WSG_SUPPLY_REGEN = 3  // 3% max HP / mana every 3 seconds
+    };
+}
 
 // these variables aren't used outside of this file, so declare them only here
 enum BG_WSG_Rewards
@@ -81,6 +132,13 @@ BattlegroundWS::~BattlegroundWS() { }
 
 void BattlegroundWS::PostUpdateImpl(uint32 diff)
 {
+    if (IsCustomWarsong() && GetStatus() == STATUS_IN_PROGRESS)
+    {
+        UpdateSiegeFlagBuffs(diff);
+        UpdateSupplyWagon(diff);
+        UpdateSupplyRewards(diff);
+    }
+
     if (GetStatus() == STATUS_IN_PROGRESS)
     {
         if (GetStartTime() >= 27*MINUTE*IN_MILLISECONDS)
@@ -205,6 +263,292 @@ void BattlegroundWS::PostUpdateImpl(uint32 diff)
     }
 }
 
+void BattlegroundWS::RemoveSiegeFlagBuffs(Player* player)
+{
+    if (!IsCustomWarsong() || !player)
+        return;
+
+    // Remove only siege-flag-cast auras; do not remove a Berserking pickup aura.
+    for (SiegeFlagPosition const& point : SiegeFlags)
+        if (Creature* flag = GetBGCreature(point.creatureSlot, false))
+            player->RemoveAurasDueToSpell(SIEGE_FLAG_BERSERKING_SPELL, flag->GetGUID());
+}
+
+void BattlegroundWS::UpdateSiegeFlagBuffs(uint32 diff)
+{
+    if (_siegeFlagUpdateTimer > diff)
+    {
+        _siegeFlagUpdateTimer -= diff;
+        return;
+    }
+    _siegeFlagUpdateTimer = IN_MILLISECONDS;
+
+    // The four siege flags remain passive and must never target players.
+    for (SiegeFlagPosition const& point : SiegeFlags)
+        if (Creature* flag = GetBGCreature(point.creatureSlot, false))
+            if (flag->GetTarget() != ObjectGuid::Empty)
+                flag->SetTarget(ObjectGuid::Empty);
+
+    for (auto const& [guid, bgPlayer] : GetPlayers())
+    {
+        Player* player = ObjectAccessor::FindPlayer(guid);
+        if (!player)
+            continue;
+
+        // Only one surviving flag may supply Berserking at a time.
+        // Each flag protects the ENTIRE rear half of its faction's territory,
+        // from the forward flags all the way back to the home base.
+        Creature* buffSource = nullptr;
+        if (player->IsAlive())
+        {
+            for (uint32 i = 0; i < 4; ++i)
+            {
+                SiegeFlagPosition const& point = SiegeFlags[i];
+                Creature* flag = GetBGCreature(point.creatureSlot, false);
+                if (!flag || !flag->IsAlive() || _siegeFlagDestroyed[i] || bgPlayer.Team != point.owner)
+                    continue;
+
+                bool onHomeSide = point.owner == ALLIANCE
+                    ? player->GetPositionX() >= point.x
+                    : player->GetPositionX() <= point.x;
+
+                if (onHomeSide)
+                {
+                    buffSource = flag;
+                    break;
+                }
+            }
+        }
+
+        for (SiegeFlagPosition const& point : SiegeFlags)
+        {
+            if (Creature* flag = GetBGCreature(point.creatureSlot, false))
+                if (flag != buffSource)
+                    player->RemoveAurasDueToSpell(SIEGE_FLAG_BERSERKING_SPELL, flag->GetGUID());
+        }
+
+        // Self-cast avoids the flag's normal spell range when a player is near
+        // the base, while attributing the aura to the flag for exact cleanup.
+        // Preserve any separate Berserking aura from a normal power-up.
+        if (buffSource && !player->HasAura(SIEGE_FLAG_BERSERKING_SPELL))
+            player->CastSpell(player, SIEGE_FLAG_BERSERKING_SPELL, buffSource->GetGUID());
+    }
+}
+
+bool BattlegroundWS::HasSupplySiegeBuff(Player const* player) const
+{
+    if (!IsCustomWarsong() || GetStatus() != STATUS_IN_PROGRESS ||
+        !player || !_supplyBuffTimer || _supplyBuffType != WSG_SUPPLY_SIEGE)
+        return false;
+
+    auto const it = GetPlayers().find(player->GetGUID());
+    return it != GetPlayers().end() && it->second.Team == _supplyBuffTeam;
+}
+
+void BattlegroundWS::RemoveSupplySpeed(Player* player)
+{
+    if (!player)
+        return;
+
+    auto it = _supplySpeedBases.find(player->GetGUID());
+    if (it == _supplySpeedBases.end())
+        return;
+
+    // Avoid clobbering a newer unrelated movement-speed modifier.
+    float current = player->GetSpeedRate(MOVE_RUN);
+    if (std::fabs(current - it->second * 1.20f) < 0.02f)
+        player->SetSpeedRate(MOVE_RUN, it->second);
+    _supplySpeedBases.erase(it);
+}
+
+bool BattlegroundWS::ClaimSupplyCrate(Player* player, ObjectGuid crateGuid)
+{
+    if (!player || !IsCustomWarsong() || GetStatus() != STATUS_IN_PROGRESS || !_supplyCrateActive)
+        return false;
+
+    GameObject* crate = GetBGObject(BG_WS_OBJECT_SUPPLY_CRATE, false);
+    if (!crate || crate->GetGUID() != crateGuid)
+        return false;
+
+    auto it = GetPlayers().find(player->GetGUID());
+    if (it == GetPlayers().end())
+        return false;
+
+    // A click awards one random team-wide buff, not a portable inventory item.
+    for (auto const& entry : GetPlayers())
+        if (Player* member = ObjectAccessor::FindPlayer(entry.first))
+            RemoveSupplySpeed(member);
+
+    _supplyCrateActive = false;
+    _supplyCrateTimer = 0;
+    _supplyCrateDeletePending = true; // delayed deletion: GameObject::Use is still running
+    SpawnBGObject(BG_WS_OBJECT_SUPPLY_CRATE, RESPAWN_ONE_DAY);
+
+    _supplyBuffTeam = it->second.Team;
+    _supplyBuffType = urand(WSG_SUPPLY_SIEGE, WSG_SUPPLY_REGEN);
+    _supplyBuffTimer = WSG_SUPPLY_BUFF_DURATION;
+    _supplyRegenTimer = 0;
+
+    char const* reward =
+        _supplyBuffType == WSG_SUPPLY_SIEGE ? "공성 화약 (+50% 공성 목표 공격력)" :
+        _supplyBuffType == WSG_SUPPLY_MORALE ? "전장의 사기 (+20% 이동속도)" :
+                                                "전투 보급품 (생명력/마나 주기적 회복)";
+    for (auto const& entry : GetPlayers())
+        if (Player* member = ObjectAccessor::FindPlayer(entry.first))
+        {
+            std::string message = Trinity::StringFormat(
+                "중앙 보급 상자를 {} 진영이 확보했습니다! {} - 90초간 적용",
+                _supplyBuffTeam == ALLIANCE ? "얼라이언스" : "호드", reward);
+            ChatHandler(member->GetSession()).SendSysMessage(message.c_str());
+        }
+
+    return true;
+}
+
+void BattlegroundWS::UpdateSupplyRewards(uint32 diff)
+{
+    if (!_supplyBuffTimer)
+        return;
+
+    if (diff >= _supplyBuffTimer)
+    {
+        for (auto const& entry : GetPlayers())
+            if (Player* member = ObjectAccessor::FindPlayer(entry.first))
+                RemoveSupplySpeed(member);
+        _supplyBuffTimer = 0;
+        _supplyBuffType = 0;
+        _supplyBuffTeam = 0;
+        return;
+    }
+    _supplyBuffTimer -= diff;
+
+    if (_supplyBuffType == WSG_SUPPLY_MORALE)
+    {
+        for (auto const& entry : GetPlayers())
+            if (Player* player = ObjectAccessor::FindPlayer(entry.first))
+                if (entry.second.Team == _supplyBuffTeam &&
+                    !_supplySpeedBases.count(entry.first))
+                {
+                    float original = player->GetSpeedRate(MOVE_RUN);
+                    _supplySpeedBases[entry.first] = original;
+                    player->SetSpeedRate(MOVE_RUN, original * 1.20f);
+                }
+    }
+
+    if (_supplyBuffType != WSG_SUPPLY_REGEN)
+        return;
+
+    _supplyRegenTimer += diff;
+    if (_supplyRegenTimer < 3 * IN_MILLISECONDS)
+        return;
+    _supplyRegenTimer %= 3 * IN_MILLISECONDS;
+
+    for (auto const& entry : GetPlayers())
+        if (entry.second.Team == _supplyBuffTeam)
+            if (Player* player = ObjectAccessor::FindPlayer(entry.first))
+                if (player->IsAlive())
+                {
+                    player->ModifyHealth(int32(player->CountPctFromMaxHealth(3)));
+                    if (player->GetPowerType() == POWER_MANA)
+                        player->ModifyPower(POWER_MANA, int32(player->CountPctFromMaxPower(POWER_MANA, 3)));
+                }
+}
+
+void BattlegroundWS::UpdateSupplyWagon(uint32 diff)
+{
+    // Never release a Creature or GameObject from inside its own death/use callback.
+    if (_supplyWagonDeletePending)
+    {
+        DelCreature(BG_WS_CREATURE_SUPPLY_WAGON);
+        _supplyWagonDeletePending = false;
+    }
+    if (_supplyCrateDeletePending)
+    {
+        DelObject(BG_WS_OBJECT_SUPPLY_CRATE);
+        _supplyCrateDeletePending = false;
+    }
+
+    if (_supplyCrateActive)
+    {
+        if (diff >= _supplyCrateTimer)
+        {
+            _supplyCrateActive = false;
+            _supplyCrateDeletePending = true;
+            _supplyCrateTimer = 0;
+            SpawnBGObject(BG_WS_OBJECT_SUPPLY_CRATE, RESPAWN_ONE_DAY);
+        }
+        else
+            _supplyCrateTimer -= diff;
+    }
+
+    if (!_supplyWagonActive)
+    {
+        if (_supplyWagonSpawnTimer > diff)
+        {
+            _supplyWagonSpawnTimer -= diff;
+            return;
+        }
+        _supplyWagonSpawnTimer = 0;
+        uint32 start = _supplyWagonDirection > 0 ? 0 : 3;
+        WagonStop const& point = WagonPath[start];
+        Creature* wagon = AddCreature(WSG_SUPPLY_WAGON_ENTRY, BG_WS_CREATURE_SUPPLY_WAGON,
+            point.x, point.y, point.z, point.facing, TEAM_NEUTRAL, RESPAWN_ONE_DAY);
+        if (!wagon)
+        {
+            TC_LOG_ERROR("bg.battleground",
+                "Custom WSG supply wagon template {} missing; apply sql/custom/custom_wsg_supply_wagon_335.sql",
+                WSG_SUPPLY_WAGON_ENTRY);
+            _supplyWagonSpawnTimer = WSG_SUPPLY_TRIP_DELAY;
+            return;
+        }
+        wagon->SetFaction(14); // hostile to both Horde and Alliance
+        wagon->RemoveUnitFlag(UNIT_FLAG_NON_ATTACKABLE | UNIT_FLAG_NOT_ATTACKABLE_1 |
+            UNIT_FLAG_IMMUNE_TO_PC | UNIT_FLAG_NON_ATTACKABLE_2 | UNIT_FLAG_UNINTERACTIBLE);
+        wagon->SetReactState(REACT_PASSIVE);
+        wagon->SetUnitFlag(UNIT_FLAG_PACIFIED);
+        wagon->SetMaxHealth(WSG_SUPPLY_WAGON_HEALTH);
+        wagon->SetHealth(WSG_SUPPLY_WAGON_HEALTH);
+        wagon->SetRespawnDelay(RESPAWN_ONE_DAY);
+        wagon->SetWalk(true);
+        _supplyWagonActive = true;
+        _supplyWagonNextPoint = int32(start) + _supplyWagonDirection;
+        WagonStop const& next = WagonPath[_supplyWagonNextPoint];
+        wagon->GetMotionMaster()->MovePoint(uint32(_supplyWagonNextPoint), next.x, next.y, next.z, true);
+        return;
+    }
+
+    if (_supplyWagonThinkTimer > diff)
+    {
+        _supplyWagonThinkTimer -= diff;
+        return;
+    }
+    _supplyWagonThinkTimer = 500;
+
+    Creature* wagon = GetBGCreature(BG_WS_CREATURE_SUPPLY_WAGON, false);
+    if (!wagon || !wagon->IsAlive())
+        return;
+
+    WagonStop const& destination = WagonPath[_supplyWagonNextPoint];
+    if (!wagon->IsWithinDist3d(destination.x, destination.y, destination.z, 3.0f))
+        return;
+
+    // 1-2-3-4 -> despawn -> wait -> 4-3-2-1 -> despawn, repeating.
+    if ((_supplyWagonDirection > 0 && _supplyWagonNextPoint == 3) ||
+        (_supplyWagonDirection < 0 && _supplyWagonNextPoint == 0))
+    {
+        _supplyWagonActive = false;
+        _supplyWagonDeletePending = true;
+        _supplyWagonSpawnTimer = WSG_SUPPLY_TRIP_DELAY;
+        _supplyWagonDirection = -_supplyWagonDirection;
+        return;
+    }
+
+    _supplyWagonNextPoint += _supplyWagonDirection;
+    WagonStop const& next = WagonPath[_supplyWagonNextPoint];
+    wagon->GetMotionMaster()->MovePoint(uint32(_supplyWagonNextPoint),
+        next.x, next.y, next.z, true);
+}
+
 void BattlegroundWS::StartingEventCloseDoors()
 {
     for (uint32 i = BG_WS_OBJECT_DOOR_A_1; i <= BG_WS_OBJECT_DOOR_H_4; ++i)
@@ -233,6 +577,39 @@ void BattlegroundWS::StartingEventOpenDoors()
     SpawnBGObject(BG_WS_OBJECT_DOOR_A_6, RESPAWN_ONE_DAY);
     SpawnBGObject(BG_WS_OBJECT_DOOR_H_3, RESPAWN_ONE_DAY);
     SpawnBGObject(BG_WS_OBJECT_DOOR_H_4, RESPAWN_ONE_DAY);
+
+    if (IsCustomWarsong())
+    {
+        // Show the corresponding flag only when its attackable target is available.
+        for (SiegeFlagPosition const& point : SiegeFlags)
+        {
+            Creature* flag = AddCreature(point.creatureEntry, point.creatureSlot,
+                point.x, point.y, point.z, point.orientation,
+                point.owner == ALLIANCE ? TEAM_ALLIANCE : TEAM_HORDE, RESPAWN_ONE_DAY);
+            if (!flag)
+            {
+                TC_LOG_ERROR("bg.battleground",
+                    "Custom Warsong: missing siege flag creature {}. Apply sql/custom/custom_wsg_flags_335.sql",
+                    point.creatureEntry);
+                continue;
+            }
+
+            flag->SetFaction(point.owner == ALLIANCE ? 1732 : 1735);
+            flag->RemoveUnitFlag(UNIT_FLAG_NON_ATTACKABLE | UNIT_FLAG_NOT_ATTACKABLE_1 |
+                UNIT_FLAG_IMMUNE_TO_PC | UNIT_FLAG_NON_ATTACKABLE_2 | UNIT_FLAG_UNINTERACTIBLE);
+            // This NPC itself is the visible, attackable battle standard.
+            // Its model comes from the existing 3.3.5 Kor'kron/Skybreaker standard templates.
+            // Do not replace it with an invisible trigger (11686).
+            // A siege flag is stationary and never attacks players.
+            flag->SetReactState(REACT_PASSIVE);
+            flag->SetTarget(ObjectGuid::Empty);
+            flag->SetMaxHealth(SIEGE_FLAG_HEALTH);
+            flag->SetHealth(SIEGE_FLAG_HEALTH);
+            flag->SetUnitFlag(UNIT_FLAG_PACIFIED);
+            flag->AddUnitState(UNIT_STATE_ROOT);
+            flag->SetRespawnDelay(RESPAWN_ONE_DAY);
+        }
+    }
 
     // players joining later are not eligibles
     StartTimedAchievement(ACHIEVEMENT_TIMED_TYPE_EVENT, WS_EVENT_START_BATTLE);
@@ -602,6 +979,8 @@ void BattlegroundWS::EventPlayerClickedOnFlag(Player* player, GameObject* target
 
 void BattlegroundWS::RemovePlayer(Player* player, ObjectGuid guid, uint32 /*team*/)
 {
+    RemoveSiegeFlagBuffs(player);
+    RemoveSupplySpeed(player);
     // sometimes flag aura not removed :(
     if (IsAllianceFlagPickedup() && m_FlagKeepers[TEAM_ALLIANCE] == guid)
     {
@@ -778,10 +1157,36 @@ void BattlegroundWS::Reset()
     _flagsDropTimer[TEAM_HORDE]      = 0;
     _flagsTimer[TEAM_ALLIANCE]       = 0;
     _flagsTimer[TEAM_HORDE]          = 0;
+
+    for (bool& destroyed : _siegeFlagDestroyed)
+        destroyed = false;
+    _siegeFlagUpdateTimer = 0;
+
+    _supplyWagonSpawnTimer = 3 * MINUTE * IN_MILLISECONDS;
+    _supplyWagonThinkTimer = 0;
+    _supplyWagonDirection = 1;
+    _supplyWagonNextPoint = 1;
+    _supplyWagonActive = false;
+    _supplyWagonDeletePending = false;
+    _supplyCrateActive = false;
+    _supplyCrateDeletePending = false;
+    _supplyCrateTimer = 0;
+    _supplyBuffTeam = 0;
+    _supplyBuffType = 0;
+    _supplyBuffTimer = 0;
+    _supplyRegenTimer = 0;
+    _supplySpeedBases.clear();
 }
 
 void BattlegroundWS::EndBattleground(uint32 winner)
 {
+    if (IsCustomWarsong())
+        for (auto const& playerEntry : GetPlayers())
+            if (Player* player = ObjectAccessor::FindPlayer(playerEntry.first))
+            {
+                RemoveSiegeFlagBuffs(player);
+                RemoveSupplySpeed(player);
+            }
     // Win reward
     if (winner == ALLIANCE)
         RewardHonorToTeam(GetBonusHonorFromKill(m_HonorWinKills), ALLIANCE);
@@ -792,6 +1197,61 @@ void BattlegroundWS::EndBattleground(uint32 winner)
     RewardHonorToTeam(GetBonusHonorFromKill(m_HonorEndKills), HORDE);
 
     Battleground::EndBattleground(winner);
+}
+
+void BattlegroundWS::HandleKillUnit(Creature* creature, Player* /*killer*/)
+{
+    if (!IsCustomWarsong() || GetStatus() != STATUS_IN_PROGRESS || !creature)
+        return;
+
+    if (creature->GetEntry() == WSG_SUPPLY_WAGON_ENTRY && _supplyWagonActive)
+    {
+        _supplyWagonActive = false;
+        _supplyWagonDeletePending = true;
+        _supplyWagonDirection = -_supplyWagonDirection;
+        _supplyWagonSpawnTimer = WSG_SUPPLY_TRIP_DELAY;
+
+        float x = creature->GetPositionX();
+        float y = creature->GetPositionY();
+        float z = creature->GetPositionZ();
+        float o = creature->GetOrientation();
+
+        if (!_supplyCrateActive && AddObject(BG_WS_OBJECT_SUPPLY_CRATE,
+            WSG_SUPPLY_CRATE_ENTRY, x, y, z, o, 0.0f, 0.0f,
+            std::sin(o * 0.5f), std::cos(o * 0.5f), RESPAWN_IMMEDIATELY))
+        {
+            _supplyCrateActive = true;
+            _supplyCrateTimer = WSG_SUPPLY_CRATE_TIMEOUT;
+            for (auto const& entry : GetPlayers())
+                if (Player* player = ObjectAccessor::FindPlayer(entry.first))
+                    ChatHandler(player->GetSession()).SendSysMessage(
+                        "보급 마차가 파괴되었습니다! 30초 안에 보급 상자를 클릭해 획득하세요.");
+        }
+        else
+            TC_LOG_ERROR("bg.battleground",
+                "Custom WSG supply crate missing; apply sql/custom/custom_wsg_supply_wagon_335.sql");
+        return;
+    }
+
+    for (uint32 i = 0; i < 4; ++i)
+    {
+        SiegeFlagPosition const& point = SiegeFlags[i];
+        if (creature->GetEntry() != point.creatureEntry || _siegeFlagDestroyed[i])
+            continue;
+
+        _siegeFlagDestroyed[i] = true;
+
+        for (auto const& playerEntry : GetPlayers())
+            if (Player* player = ObjectAccessor::FindPlayer(playerEntry.first))
+            {
+                player->RemoveAurasDueToSpell(SIEGE_FLAG_BERSERKING_SPELL, creature->GetGUID());
+                ChatHandler(player->GetSession()).SendSysMessage(
+                    point.owner == HORDE
+                        ? "호드 방어 깃발이 파괴되었습니다! 해당 구역 버프가 비활성화됩니다."
+                        : "얼라이언스 방어 깃발이 파괴되었습니다! 해당 구역 버프가 비활성화됩니다.");
+            }
+        return;
+    }
 }
 
 void BattlegroundWS::HandleKillPlayer(Player* player, Player* killer)

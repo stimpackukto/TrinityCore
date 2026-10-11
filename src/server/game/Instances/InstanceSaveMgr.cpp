@@ -430,7 +430,7 @@ void InstanceSaveManager::LoadResetTimes()
             CharacterDatabase.DirectExecute(stmt);
         }
 
-        if (t < now)
+   /*     if (t < now)
         {
             // assume that expired instances have already been cleaned
             // calculate the next reset time
@@ -442,7 +442,7 @@ void InstanceSaveManager::LoadResetTimes()
             stmt->setUInt16(1, uint16(mapid));
             stmt->setUInt8(2, uint8(difficulty));
             CharacterDatabase.DirectExecute(stmt);
-        }
+        }  */
 
         InitializeResetTimeFor(mapid, difficulty, t);
 

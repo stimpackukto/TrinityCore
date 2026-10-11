@@ -124,12 +124,13 @@ bool BattlegroundQueue::SelectionPool::AddGroup(GroupQueueInfo* ginfo, uint32 de
 /*********************************************************/
 
 // add group or player (grp == NULL) to bg queue with the given leader and bg specifications
-GroupQueueInfo* BattlegroundQueue::AddGroup(Player* leader, Group const* group, PvPDifficultyEntry const* bracketEntry, bool isRated, bool isPremade, uint32 ArenaRating, uint32 MatchmakerRating, uint32 arenateamid, uint32 PreviousOpponentsArenaTeamId)
+GroupQueueInfo* BattlegroundQueue::AddGroup(Player* leader, Group const* group, PvPDifficultyEntry const* bracketEntry, bool isRated, bool isPremade, uint32 ArenaRating, uint32 MatchmakerRating, uint32 arenateamid, uint32 PreviousOpponentsArenaTeamId, bool isCustomWarsong)
 {
     // create new ginfo
     GroupQueueInfo* ginfo            = new GroupQueueInfo;
     ginfo->ArenaTeamId               = arenateamid;
     ginfo->IsRated                   = isRated;
+    ginfo->IsCustomWarsong           = isCustomWarsong;
     ginfo->IsInvitedToBGInstanceGUID = 0;
     ginfo->JoinTime                  = GameTime::GetGameTimeMS();
     ginfo->RemoveInviteTime          = 0;
@@ -148,6 +149,8 @@ GroupQueueInfo* BattlegroundQueue::AddGroup(Player* leader, Group const* group, 
         index += PVP_TEAMS_COUNT;
     if (ginfo->Team == HORDE)
         index++;
+    if (isCustomWarsong)
+        index = BG_QUEUE_CUSTOM_WARSONG_ALLIANCE + (ginfo->Team == HORDE ? 1 : 0);
     TC_LOG_DEBUG("bg.battleground", "Adding Group to BattlegroundQueue bgTypeId : {}, bracket_id : {}, index : {}", m_queueId.BattlemasterListId, m_queueId.BracketId, index);
 
     uint32 lastOnlineTime = GameTime::GetGameTimeMS();
@@ -500,6 +503,18 @@ large groups are disadvantageous, because they will be kicked first if invitatio
 */
 void BattlegroundQueue::FillPlayersToBG(Battleground* bg)
 {
+    if (bg->IsCustomWarsong())
+    {
+        for (uint32 i = 0; i < PVP_TEAMS_COUNT; ++i)
+        {
+            uint32 slots = bg->GetFreeSlotsForTeam(i == TEAM_ALLIANCE ? ALLIANCE : HORDE);
+            for (GroupQueueInfo* group : m_QueuedGroups[BG_QUEUE_CUSTOM_WARSONG_ALLIANCE + i])
+                if (!group->IsInvitedToBGInstanceGUID)
+                    m_SelectionPools[i].AddGroup(group, slots);
+        }
+        return;
+    }
+
     int32 hordeFree = bg->GetFreeSlotsForTeam(HORDE);
     int32 aliFree   = bg->GetFreeSlotsForTeam(ALLIANCE);
     uint32 aliCount   = m_QueuedGroups[BG_QUEUE_NORMAL_ALLIANCE].size();
@@ -703,6 +718,19 @@ bool BattlegroundQueue::CheckNormalMatch(Battleground* bg_template, uint32 minPl
     return m_SelectionPools[TEAM_ALLIANCE].GetPlayerCount() >= minPlayers && m_SelectionPools[TEAM_HORDE].GetPlayerCount() >= minPlayers;
 }
 
+bool BattlegroundQueue::CheckCustomWarsongMatch(uint32 maxPlayers)
+{
+    m_SelectionPools[TEAM_ALLIANCE].Init();
+    m_SelectionPools[TEAM_HORDE].Init();
+    for (uint32 i = 0; i < PVP_TEAMS_COUNT; ++i)
+        for (GroupQueueInfo* group : m_QueuedGroups[BG_QUEUE_CUSTOM_WARSONG_ALLIANCE + i])
+            if (!group->IsInvitedToBGInstanceGUID)
+                m_SelectionPools[i].AddGroup(group, maxPlayers);
+
+    return m_SelectionPools[TEAM_ALLIANCE].GetPlayerCount() != 0 ||
+           m_SelectionPools[TEAM_HORDE].GetPlayerCount() != 0;
+}
+
 // this method will check if we can invite players to same faction skirmish match
 bool BattlegroundQueue::CheckSkirmishForSameFaction(uint32 minPlayersPerTeam)
 {
@@ -787,7 +815,9 @@ void BattlegroundQueue::BattlegroundQueueUpdate(uint32 /*diff*/, bool isRated, u
     if (m_QueuedGroups[BG_QUEUE_PREMADE_ALLIANCE].empty() &&
         m_QueuedGroups[BG_QUEUE_PREMADE_HORDE].empty() &&
         m_QueuedGroups[BG_QUEUE_NORMAL_ALLIANCE].empty() &&
-        m_QueuedGroups[BG_QUEUE_NORMAL_HORDE].empty())
+        m_QueuedGroups[BG_QUEUE_NORMAL_HORDE].empty() &&
+        m_QueuedGroups[BG_QUEUE_CUSTOM_WARSONG_ALLIANCE].empty() &&
+        m_QueuedGroups[BG_QUEUE_CUSTOM_WARSONG_HORDE].empty())
         return;
 
     // battleground with free slot for player should be always in the beggining of the queue
@@ -902,6 +932,23 @@ void BattlegroundQueue::BattlegroundQueueUpdate(uint32 /*diff*/, bool isRated, u
                     InviteGroupToBG((*citr), bg2, (*citr)->Team);
             // start bg
             bg2->StartBattleground();
+        }
+
+        // Independent custom Warsong queue: one applicant is sufficient.
+        if (bgTypeId == BATTLEGROUND_WS && CheckCustomWarsongMatch(MaxPlayersPerTeam))
+        {
+            Battleground* customBg = sBattlegroundMgr->CreateNewBattleground(bgTypeId, bracketEntry, 0, false);
+            if (!customBg)
+            {
+                TC_LOG_ERROR("bg.battleground", "Unable to create custom Warsong battleground");
+                return;
+            }
+            customBg->SetCustomWarsong(true);
+            customBg->SetMinPlayersPerTeam(1);
+            for (uint32 i = 0; i < PVP_TEAMS_COUNT; ++i)
+                for (GroupQueueInfo* group : m_SelectionPools[i].SelectedGroups)
+                    InviteGroupToBG(group, customBg, group->Team);
+            customBg->StartBattleground();
         }
     }
     else if (bg_template->isArena())

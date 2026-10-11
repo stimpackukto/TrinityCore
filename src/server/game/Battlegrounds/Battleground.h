@@ -313,6 +313,9 @@ class TC_GAME_API Battleground
         void SetLevelRange(uint32 min, uint32 max) { m_LevelMin = min; m_LevelMax = max; }
         void SetRated(bool state)           { m_IsRated = state; }
         void SetArenaType(uint8 type)       { m_ArenaType = type; }
+        // Independent custom Warsong instances may start with one faction.
+        void SetCustomWarsong(bool enabled) { m_CustomWarsong = enabled; }
+        bool IsCustomWarsong() const        { return m_CustomWarsong; }
         void SetArenaorBGType(bool _isArena) { m_IsArena = _isArena; }
         void SetWinner(PvPTeamId winnerTeamId) { _winnerTeamId = winnerTeamId; }
         void SetScriptId(uint32 scriptId)   { ScriptId = scriptId; }
@@ -575,6 +578,7 @@ class TC_GAME_API Battleground
         PvPTeamId _winnerTeamId;
         int32  m_StartDelayTime;
         bool   m_IsRated;                                   // is this battle rated?
+        bool   m_CustomWarsong = false;
         bool   m_PrematureCountDown;
         uint32 m_PrematureCountDownTimer;
         std::string m_Name;

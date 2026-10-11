@@ -37,6 +37,72 @@
 
 class Aura;
 
+namespace
+{
+    /*
+     * Custom Update - 2026-08-03
+     *
+     * Scourge sabotage manual party invitation lock
+     *
+     * - Map 329 phase 2 is the active sabotage battlefield.
+     * - Automatic sabotage raid creation uses Group directly and is unaffected.
+     */
+    bool IsScourgeSabotagePartyLocked(
+        Player const* player
+    )
+    {
+        return player &&
+            player->GetMapId() == 329 &&
+            (player->GetPhaseMask() & 2) != 0;
+    }
+}
+
+namespace
+{
+    /*
+     * Custom Update - 2026-08-03
+     *
+     * Scourge sabotage one-member raid preservation
+     *
+     * TrinityCore normally disbands a regular party or raid when a
+     * two-member group loses one member. Disband marks every remaining
+     * player inside a dungeon as instance-invalid.
+     *
+     * The sabotage battlefield uses map 329 and phase mask 2.
+     * Preserve the remaining one-member raid only for a manual leave.
+     */
+    bool IsScourgeSabotageRaid(
+        Group const* group
+    )
+    {
+        if (!group ||
+            !group->isRaidGroup())
+        {
+            return false;
+        }
+
+        for (Group::MemberSlot const& slot :
+             group->GetMemberSlots())
+        {
+            Player* member =
+                ObjectAccessor::FindConnectedPlayer(
+                    slot.guid
+                );
+
+            if (!member)
+                continue;
+
+            if (member->GetMapId() == 329 &&
+                (member->GetPhaseMask() & 2) != 0)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+}
+
 /* differeces from off:
     -you can uninvite yourself - is is useful
     -you can accept invitation even if leader went offline
@@ -79,6 +145,16 @@ void WorldSession::HandleGroupInviteOpcode(WorldPackets::Party::PartyInviteClien
     if (!invitedPlayer)
     {
         SendPartyResult(PARTY_OP_INVITE, packet.TargetName, ERR_BAD_PLAYER_NAME_S);
+        return;
+    }
+
+	if (IsScourgeSabotagePartyLocked(invitingPlayer) ||
+        IsScourgeSabotagePartyLocked(invitedPlayer))
+    {
+        SendNotification(
+            "폭파전 진행 중에는 파티 초대 기능을 이용할 수 없습니다."
+        );
+
         return;
     }
 
@@ -212,6 +288,21 @@ void WorldSession::HandleGroupAcceptOpcode(WorldPacket& recvData)
 
     if (!group)
         return;
+
+	if (IsScourgeSabotagePartyLocked(
+            GetPlayer()
+        ))
+    {
+        group->RemoveInvite(
+            GetPlayer()
+        );
+
+        SendNotification(
+            "폭파전 진행 중에는 파티 초대 기능을 이용할 수 없습니다."
+        );
+
+        return;
+    }
 
     // Remove player from invitees in any case
     group->RemoveInvite(GetPlayer());

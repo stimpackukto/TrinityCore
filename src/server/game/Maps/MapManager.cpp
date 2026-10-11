@@ -155,7 +155,18 @@ Map::EnterState MapManager::PlayerCannotEnter(uint32 mapid, Player* player, bool
     char const* mapName = entry->MapName[player->GetSession()->GetSessionDbcLocale()];
 
     Group* group = player->GetGroup();
-    if (entry->IsRaid()) // can only enter in a raid group
+
+    // Treasure Hunt is a solo FFA event in a dedicated Ruby Sanctum instance.
+    // Only its temporarily bound participants can skip the raid-group check.
+    InstancePlayerBind* treasureBind =
+        mapid == 724 && !group &&
+        player->GetPhaseMask() == 0x40000000 &&
+        player->GetRaidDifficulty() == RAID_DIFFICULTY_10MAN_NORMAL
+        ? player->GetBoundInstance(mapid, RAID_DIFFICULTY_10MAN_NORMAL, true)
+        : nullptr;
+    bool const treasureHuntSoloEntry = treasureBind && treasureBind->save;
+
+    if (entry->IsRaid() && !treasureHuntSoloEntry) // can only enter in a raid group
 	{
 		if (Map::IsSoloRaidMap(mapid))
 			return Map::CAN_ENTER;
@@ -202,7 +213,8 @@ Map::EnterState MapManager::PlayerCannotEnter(uint32 mapid, Player* player, bool
     }
 
     // players are only allowed to enter 5 instances per hour
-    if (entry->IsDungeon() && (!player->GetGroup() || (player->GetGroup() && !player->GetGroup()->isLFGGroup())))
+    if (entry->IsDungeon() && !treasureHuntSoloEntry &&
+        (!player->GetGroup() || (player->GetGroup() && !player->GetGroup()->isLFGGroup())))
     {
         uint32 instanceIdToCheck = 0;
         if (InstanceSave* save = player->GetInstanceSave(mapid, entry->IsRaid()))

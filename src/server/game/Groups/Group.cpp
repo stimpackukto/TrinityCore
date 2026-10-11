@@ -42,6 +42,52 @@
 #include "WorldPacket.h"
 #include "WorldSession.h"
 
+namespace
+{
+    /*
+     * Custom Update - 2026-08-03
+     *
+     * Scourge sabotage one-member raid preservation
+     *
+     * TrinityCore normally disbands a regular party or raid when a
+     * two-member group loses one member. Disband marks every remaining
+     * player inside a dungeon as instance-invalid.
+     *
+     * The sabotage battlefield uses map 329 and phase mask 2.
+     * Preserve the remaining one-member raid only for a manual leave.
+     */
+    bool IsScourgeSabotageRaid(
+        Group const* group
+    )
+    {
+        if (!group ||
+            !group->isRaidGroup())
+        {
+            return false;
+        }
+
+        for (Group::MemberSlot const& slot :
+             group->GetMemberSlots())
+        {
+            Player* member =
+                ObjectAccessor::FindConnectedPlayer(
+                    slot.guid
+                );
+
+            if (!member)
+                continue;
+
+            if (member->GetMapId() == 329 &&
+                (member->GetPhaseMask() & 2) != 0)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+}
+
 Roll::Roll(ObjectGuid _guid, LootItem const& li) : itemGUID(_guid), itemid(li.itemid),
 itemRandomPropId(li.randomPropertyId), itemRandomSuffix(li.randomSuffix), itemCount(li.count),
 totalPlayersRolling(0), totalNeed(0), totalGreed(0), totalPass(0), itemSlot(0),
@@ -541,6 +587,11 @@ bool Group::RemoveMember(ObjectGuid guid, RemoveMethod const& method /*= GROUP_R
 
     sScriptMgr->OnGroupRemoveMember(this, guid, method, kicker, reason);
 
+	bool preserveScourgeSabotageSingleMemberRaid =
+        method == GROUP_REMOVEMETHOD_LEAVE &&
+        GetMembersCount() == 2 &&
+        IsScourgeSabotageRaid(this);
+
     Player* player = ObjectAccessor::FindConnectedPlayer(guid);
     if (player)
     {
@@ -562,7 +613,7 @@ bool Group::RemoveMember(ObjectGuid guid, RemoveMethod const& method /*= GROUP_R
         return !m_memberSlots.empty();
 
     // remove member and change leader (if need) only if strong more 2 members _before_ member remove (BG/BF allow 1 member group)
-    if (GetMembersCount() > ((isBGGroup() || isLFGGroup() || isBFGroup()) ? 1u : 2u))
+    if (GetMembersCount() > ((isBGGroup() || isLFGGroup() || isBFGroup()) ? 1u : 2u) || preserveScourgeSabotageSingleMemberRaid)
     {
         if (player)
         {
@@ -688,8 +739,30 @@ bool Group::RemoveMember(ObjectGuid guid, RemoveMethod const& method /*= GROUP_R
             }
         }
 
-        if (m_memberMgr.getSize() < ((isLFGGroup() || isBGGroup()) ? 1u : 2u))
+        if (!preserveScourgeSabotageSingleMemberRaid && m_memberMgr.getSize() < ((isLFGGroup() || isBGGroup()) ? 1u : 2u))
             Disband();
+
+		if (preserveScourgeSabotageSingleMemberRaid)
+        {
+            for (GroupReference* itr = GetFirstMember();
+                 itr != nullptr;
+                 itr = itr->next())
+            {
+                Player* remainingMember =
+                    itr->GetSource();
+
+                if (!remainingMember)
+                    continue;
+
+                remainingMember->m_InstanceValid = true;
+                remainingMember->UpdateHomebindTime(0);
+                remainingMember->SetGroupUpdateFlag(
+                    GROUP_UPDATE_FULL
+                );
+            }
+
+            SendUpdate();
+        }
 
         return true;
     }

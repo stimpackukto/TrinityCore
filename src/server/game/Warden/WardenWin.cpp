@@ -16,6 +16,7 @@
  */
 
 #include "WardenWin.h"
+
 #include "Common.h"
 #include "ByteBuffer.h"
 #include "Containers.h"
@@ -36,12 +37,242 @@
 #include "WorldPacket.h"
 #include "WorldSession.h"
 
- // GUILD is the shortest string that has no client validation (RAID only sends if in a raid group)
+#include <limits>
+#include <mutex>
+#include <unordered_map>
+#include <vector>
+
+// GUILD is the shortest string that has no client validation (RAID only sends if in a raid group)
 static constexpr char _luaEvalPrefix[] = "local S,T,R=SendAddonMessage,function()";
 static constexpr char _luaEvalMidfix[] = " end R=S and T()if R then S('_TW',";
 static constexpr char _luaEvalPostfix[] = ",'GUILD')end";
-
 static_assert((sizeof(_luaEvalPrefix)-1 + sizeof(_luaEvalMidfix)-1 + sizeof(_luaEvalPostfix)-1 + WARDEN_MAX_LUA_CHECK_LENGTH) == 255);
+
+// -----------------------------------------------------------------------------
+// Custom Single-PC multi-client check
+//
+// 핵심:
+// 1) WardenWin::Init() 시점에 각 WorldSession의 접속 순서를 먼저 고정한다.
+// 2) TIMING_CHECK 결과가 들어오면 IP + client tick offset으로 같은 PC 후보를 찾는다.
+// 3) 같은 PC 후보가 2개 이상이면 SessionOrder가 가장 작은 세션 하나만 OWNER로 유지한다.
+// 4) OWNER 이외의 세션만 Blocked로 고정하고 Kick한다.
+// 5) Blocked 세션은 연결이 완전히 사라질 때까지 OWNER 후보가 될 수 없다.
+//
+// 이렇게 하면 Warden 응답 순서가 뒤집혀도 먼저 접속한 세션은 절대 역으로 Kick되지 않는다.
+// -----------------------------------------------------------------------------
+namespace
+{
+    struct WardenSinglePcState
+    {
+        uint32 AccountId = 0;
+        std::string Ip;
+        uint32 TickOffset = 0;
+        uint64 SessionOrder = 0;
+        WorldSession* Session = nullptr;
+        bool HasFingerprint = false;
+        bool Blocked = false;
+    };
+
+    struct WardenSinglePcKickTarget
+    {
+        uint32 AccountId = 0;
+        WorldSession* Session = nullptr;
+    };
+
+    struct WardenSinglePcDecision
+    {
+        uint32 OwnerAccount = 0;
+        std::vector<WardenSinglePcKickTarget> KickTargets;
+    };
+
+    std::mutex WardenSinglePcMutex;
+    std::unordered_map<WorldSession*, WardenSinglePcState> WardenSinglePcStates;
+    uint64 WardenSinglePcNextOrder = 0;
+
+    // 같은 PC의 tick offset 오차 허용 범위.
+    static constexpr uint32 WARDEN_SINGLE_PC_TOLERANCE_MS = 750;
+
+    uint32 WardenSinglePcTickDistance(uint32 left, uint32 right)
+    {
+        int32 const diff = static_cast<int32>(left - right);
+        int64 const distance = diff < 0 ? -static_cast<int64>(diff) : static_cast<int64>(diff);
+        return static_cast<uint32>(distance);
+    }
+
+    void WardenSinglePcCleanupLocked()
+    {
+        for (auto itr = WardenSinglePcStates.begin(); itr != WardenSinglePcStates.end();)
+        {
+            WardenSinglePcState const& state = itr->second;
+            WorldSession* onlineSession = sWorld->FindSession(state.AccountId);
+
+            // account 세션이 완전히 사라졌거나 새 WorldSession으로 교체된 경우만 삭제한다.
+            if (!onlineSession || onlineSession != state.Session)
+                itr = WardenSinglePcStates.erase(itr);
+            else
+                ++itr;
+        }
+    }
+
+    void WardenSinglePcRegisterSession(WorldSession* session)
+    {
+        if (!session)
+            return;
+
+        std::lock_guard<std::mutex> lock(WardenSinglePcMutex);
+
+        WardenSinglePcCleanupLocked();
+
+        if (WardenSinglePcStates.find(session) != WardenSinglePcStates.end())
+            return;
+
+        WardenSinglePcState state;
+        state.AccountId = session->GetAccountId();
+        state.Ip = session->GetRemoteAddress();
+        state.SessionOrder = ++WardenSinglePcNextOrder;
+        state.Session = session;
+
+        WardenSinglePcStates.emplace(session, std::move(state));
+
+        TC_LOG_WARN("warden",
+            "[SinglePC] session order registered: account={}, ip={}, order={}",
+            session->GetAccountId(), session->GetRemoteAddress(), WardenSinglePcNextOrder);
+    }
+
+    WardenSinglePcDecision WardenSinglePcEvaluate(WorldSession* session, uint32 clientTicks, uint32 serverTicks)
+    {
+        WardenSinglePcDecision decision;
+
+        if (!session)
+            return decision;
+
+        // 실제 월드에서 플레이 중인 캐릭터만 투클 판정 대상으로 한다.
+        Player* currentPlayer = session->GetPlayer();
+        if (!currentPlayer || session->PlayerLoading() || !currentPlayer->IsInWorld())
+            return decision;
+
+        // GM accounts may use multiple clients for testing. This exemption
+        // applies only to SinglePC; all other Warden checks still run.
+        if (session->GetSecurity() >= SEC_GAMEMASTER)
+            return decision;
+
+        std::lock_guard<std::mutex> lock(WardenSinglePcMutex);
+
+        WardenSinglePcCleanupLocked();
+
+        auto currentItr = WardenSinglePcStates.find(session);
+        if (currentItr == WardenSinglePcStates.end())
+        {
+            // 정상적으로는 Init()에서 먼저 등록되지만 안전장치로 여기서도 등록한다.
+            WardenSinglePcState state;
+            state.AccountId = session->GetAccountId();
+            state.Ip = session->GetRemoteAddress();
+            state.SessionOrder = ++WardenSinglePcNextOrder;
+            state.Session = session;
+
+            currentItr = WardenSinglePcStates.emplace(session, std::move(state)).first;
+
+            TC_LOG_WARN("warden",
+                "[SinglePC] late session order registered: account={}, ip={}, order={}",
+                session->GetAccountId(), session->GetRemoteAddress(), currentItr->second.SessionOrder);
+        }
+
+        WardenSinglePcState& current = currentItr->second;
+
+        current.Ip = session->GetRemoteAddress();
+        current.TickOffset = serverTicks - clientTicks;
+        current.HasFingerprint = true;
+
+        // 이미 중복으로 확정된 세션은 다시 OWNER 후보가 될 수 없다.
+        if (current.Blocked)
+        {
+            decision.KickTargets.push_back({ current.AccountId, current.Session });
+            return decision;
+        }
+
+        std::vector<WardenSinglePcState*> group;
+        group.reserve(4);
+
+        // 현재 세션 자신은 항상 후보에 포함
+        group.push_back(&current);
+
+        for (auto& pair : WardenSinglePcStates)
+        {
+            WardenSinglePcState& other = pair.second;
+
+            if (other.Session == session)
+                continue;
+
+            if (other.Blocked || !other.HasFingerprint)
+                continue;
+
+            if (other.Ip != current.Ip)
+                continue;
+
+            WorldSession* otherSession = sWorld->FindSession(other.AccountId);
+            if (!otherSession || otherSession != other.Session)
+                continue;
+
+            // A GM session never counts as a duplicate of a regular player.
+            if (otherSession->GetSecurity() >= SEC_GAMEMASTER)
+                continue;
+
+            Player* otherPlayer = otherSession->GetPlayer();
+            if (!otherPlayer || otherSession->PlayerLoading() || !otherPlayer->IsInWorld())
+                continue;
+
+            uint32 const distance = WardenSinglePcTickDistance(current.TickOffset, other.TickOffset);
+
+            TC_LOG_WARN("warden",
+                "[SinglePC] compare: account={}, otherAccount={}, ip={}, myOffset={}, otherOffset={}, distance={}ms, myOrder={}, otherOrder={}",
+                current.AccountId, other.AccountId, current.Ip,
+                current.TickOffset, other.TickOffset, distance,
+                current.SessionOrder, other.SessionOrder);
+
+            if (distance <= WARDEN_SINGLE_PC_TOLERANCE_MS)
+                group.push_back(&other);
+        }
+
+        if (group.size() < 2)
+            return decision;
+
+        // Warden 응답 순서가 아니라 Init()에서 고정된 최초 접속 순서로 OWNER 결정.
+        WardenSinglePcState* owner = group.front();
+
+        for (WardenSinglePcState* state : group)
+        {
+            if (state->SessionOrder < owner->SessionOrder)
+                owner = state;
+        }
+
+        decision.OwnerAccount = owner->AccountId;
+
+        TC_LOG_WARN("warden",
+            "[SinglePC] OWNER fixed: account={}, ip={}, order={}, clients={}",
+            owner->AccountId, owner->Ip, owner->SessionOrder, group.size());
+
+        // OWNER를 제외한 세션만 Blocked로 고정.
+        for (WardenSinglePcState* state : group)
+        {
+            if (state == owner)
+                continue;
+
+            if (!state->Blocked)
+            {
+                state->Blocked = true;
+
+                TC_LOG_WARN("warden",
+                    "[SinglePC] BLOCKED: account={}, ownerAccount={}, ip={}, order={}, ownerOrder={}",
+                    state->AccountId, owner->AccountId, state->Ip,
+                    state->SessionOrder, owner->SessionOrder);
+            }
+
+            decision.KickTargets.push_back({ state->AccountId, state->Session });
+        }
+
+        return decision;
+    }
+}
 
 WardenWin::WardenWin() : Warden(), _serverTicks(0)
 {
@@ -57,6 +288,10 @@ WardenWin::WardenWin() : Warden(), _serverTicks(0)
 void WardenWin::Init(WorldSession* session, SessionKey const& K)
 {
     _session = session;
+
+    // SinglePC 접속 순서는 Warden 첫 응답 시점이 아니라 세션 초기화 시점에 고정한다.
+    WardenSinglePcRegisterSession(session);
+
     // Generate Warden Key
     SessionKeyGenerator<Trinity::Crypto::SHA1> WK(K);
     WK.Generate(_inputKey.data(), _inputKey.size());
@@ -66,16 +301,18 @@ void WardenWin::Init(WorldSession* session, SessionKey const& K)
 
     _inputCrypto.Init(_inputKey);
     _outputCrypto.Init(_outputKey);
+
     TC_LOG_DEBUG("warden", "Server side warden for client {} initializing...", session->GetAccountId());
     TC_LOG_DEBUG("warden", "C->S Key: {}", ByteArrayToHexStr(_inputKey));
     TC_LOG_DEBUG("warden", "S->C Key: {}", ByteArrayToHexStr(_outputKey));
-    TC_LOG_DEBUG("warden", "  Seed: {}", ByteArrayToHexStr(_seed));
+    TC_LOG_DEBUG("warden", " Seed: {}", ByteArrayToHexStr(_seed));
     TC_LOG_DEBUG("warden", "Loading Module...");
 
     MakeModuleForClient();
 
     TC_LOG_DEBUG("warden", "Module Key: {}", ByteArrayToHexStr(_module->Key));
     TC_LOG_DEBUG("warden", "Module ID: {}", ByteArrayToHexStr(_module->Id));
+
     RequestModule();
 }
 
@@ -99,10 +336,10 @@ void WardenWin::InitializeModule()
     Request.Unk2 = 0;
     Request.Type = 1;
     Request.String_library1 = 0;
-    Request.Function1[0] = 0x00024F80;                      // 0x00400000 + 0x00024F80 SFileOpenFile
-    Request.Function1[1] = 0x000218C0;                      // 0x00400000 + 0x000218C0 SFileGetFileSize
-    Request.Function1[2] = 0x00022530;                      // 0x00400000 + 0x00022530 SFileReadFile
-    Request.Function1[3] = 0x00022910;                      // 0x00400000 + 0x00022910 SFileCloseFile
+    Request.Function1[0] = 0x00024F80; // 0x00400000 + 0x00024F80 SFileOpenFile
+    Request.Function1[1] = 0x000218C0; // 0x00400000 + 0x000218C0 SFileGetFileSize
+    Request.Function1[2] = 0x00022530; // 0x00400000 + 0x00022530 SFileReadFile
+    Request.Function1[3] = 0x00022910; // 0x00400000 + 0x00022910 SFileCloseFile
     Request.CheckSumm1 = BuildChecksum(&Request.Unk1, 20);
 
     Request.Command2 = WARDEN_SMSG_MODULE_INITIALIZE;
@@ -110,7 +347,7 @@ void WardenWin::InitializeModule()
     Request.Unk3 = 4;
     Request.Unk4 = 0;
     Request.String_library2 = 0;
-    Request.Function2 = 0x00419210;                         // 0x00400000 + 0x00419210 FrameScript::Execute
+    Request.Function2 = 0x00419210; // 0x00400000 + 0x00419210 FrameScript::Execute
     Request.Function2_set = 1;
     Request.CheckSumm2 = BuildChecksum(&Request.Unk3, 8);
 
@@ -119,7 +356,7 @@ void WardenWin::InitializeModule()
     Request.Unk5 = 1;
     Request.Unk6 = 1;
     Request.String_library3 = 0;
-    Request.Function3 = 0x0046AE20;                         // 0x00400000 + 0x0046AE20 PerformanceCounter
+    Request.Function3 = 0x0046AE20; // 0x00400000 + 0x0046AE20 PerformanceCounter
     Request.Function3_set = 1;
     Request.CheckSumm3 = BuildChecksum(&Request.Unk5, 8);
 
@@ -166,6 +403,7 @@ void WardenWin::HandleHashResult(ByteBuffer &buff)
     // Verify key
     Trinity::Crypto::SHA1::Digest response;
     buff.read(response);
+
     if (response != Module.ClientKeySeedHash)
     {
         char const* penalty = ApplyPenalty(nullptr);
@@ -183,41 +421,58 @@ void WardenWin::HandleHashResult(ByteBuffer &buff)
     _outputCrypto.Init(_outputKey);
 
     _initialized = true;
+
+    // Custom Single-PC: run the first Warden check quickly after initialization.
+    _checkTimer = 1000;
 }
 
 static constexpr uint8 GetCheckPacketBaseSize(WardenCheckType type)
 {
     switch (type)
     {
-        case DRIVER_CHECK: return 1;
-        case LUA_EVAL_CHECK: return 1 + sizeof(_luaEvalPrefix)-1 + sizeof(_luaEvalMidfix)-1 + 4 + sizeof(_luaEvalPostfix)-1;
-        case MPQ_CHECK: return 1;
-        case PAGE_CHECK_A: return (4 + 1);
-        case PAGE_CHECK_B: return (4 + 1);
-        case MODULE_CHECK: return (4 + Trinity::Crypto::HMAC_SHA1::DIGEST_LENGTH);
-        case MEM_CHECK: return (1 + 4 + 1);
-        default: return 0;
+        case DRIVER_CHECK:
+            return 1;
+        case LUA_EVAL_CHECK:
+            return 1 + sizeof(_luaEvalPrefix)-1 + sizeof(_luaEvalMidfix)-1 + 4 + sizeof(_luaEvalPostfix)-1;
+        case MPQ_CHECK:
+            return 1;
+        case PAGE_CHECK_A:
+            return (4 + 1);
+        case PAGE_CHECK_B:
+            return (4 + 1);
+        case MODULE_CHECK:
+            return (4 + Trinity::Crypto::HMAC_SHA1::DIGEST_LENGTH);
+        case MEM_CHECK:
+            return (1 + 4 + 1);
+        default:
+            return 0;
     }
 }
 
 static uint16 GetCheckPacketSize(WardenCheck const& check)
 {
     uint16 size = 1 + GetCheckPacketBaseSize(check.Type); // 1 byte check type
+
     if (!check.Str.empty())
         size += (check.Str.length() + 1); // 1 byte string length
+
     if (!check.Data.empty())
         size += check.Data.size();
+
     return size;
 }
 
 void WardenWin::RequestChecks()
 {
-    TC_LOG_DEBUG("warden", "Request data from {} (account {}) - loaded: {}", _session->GetPlayerName(), _session->GetAccountId(), _session->GetPlayer() && !_session->PlayerLoading());
+    TC_LOG_DEBUG("warden", "Request data from {} (account {}) - loaded: {}",
+        _session->GetPlayerName(), _session->GetAccountId(),
+        _session->GetPlayer() && !_session->PlayerLoading());
 
     // If all checks for a category are done, fill its todo list again
     for (WardenCheckCategory category : EnumUtils::Iterate<WardenCheckCategory>())
     {
         auto& [checks, checksIt] = _checks[category];
+
         if ((checksIt == checks.end()) && !checks.empty())
         {
             TC_LOG_DEBUG("warden", "Finished all {} checks, re-shuffling", EnumUtils::ToConstant(category));
@@ -239,10 +494,12 @@ void WardenWin::RequestChecks()
             continue;
 
         auto& [checks, checksIt] = _checks[category];
+
         for (uint32 i = 0, n = sWorld->getIntConfig(GetWardenCategoryCountConfig(category)); i < n; ++i)
         {
             if (checksIt == checks.end()) // all checks were already sent, list will be re-filled on next Update() run
                 break;
+
             _currentChecks.push_back(*(checksIt++));
         }
     }
@@ -250,12 +507,15 @@ void WardenWin::RequestChecks()
     Trinity::Containers::RandomShuffle(_currentChecks);
 
     uint16 expectedSize = 4;
+
     Trinity::Containers::EraseIf(_currentChecks,
         [&expectedSize](uint16 id)
         {
             uint8 const thisSize = GetCheckPacketSize(sWardenCheckMgr->GetCheckData(id));
+
             if ((expectedSize + thisSize) > 450) // warden packets are truncated to 512 bytes clientside
                 return true;
+
             expectedSize += thisSize;
             return false;
         }
@@ -264,6 +524,7 @@ void WardenWin::RequestChecks()
     for (uint16 const id : _currentChecks)
     {
         WardenCheck const& check = sWardenCheckMgr->GetCheckData(id);
+
         if (check.Type == LUA_EVAL_CHECK)
         {
             buff << uint8(sizeof(_luaEvalPrefix) - 1 + check.Str.size() + sizeof(_luaEvalMidfix) - 1 + check.IdStr.size() + sizeof(_luaEvalPostfix) - 1);
@@ -291,9 +552,10 @@ void WardenWin::RequestChecks()
     for (uint16 const id : _currentChecks)
     {
         WardenCheck const& check = sWardenCheckMgr->GetCheckData(id);
-
         WardenCheckType const type = check.Type;
+
         buff << uint8(type ^ xorByte);
+
         switch (type)
         {
             case MEM_CHECK:
@@ -340,17 +602,20 @@ void WardenWin::RequestChecks()
                 break;
             }*/
             default:
-                break;                                      // Should never happen
+                break; // Should never happen
         }
     }
+
     buff << uint8(xorByte);
     buff.hexlike();
 
     auto idstring = [this]() -> std::string
     {
         std::stringstream stream;
+
         for (uint16 const id : _currentChecks)
             stream << id << " ";
+
         return stream.str();
     };
 
@@ -384,12 +649,14 @@ void WardenWin::HandleCheckResult(ByteBuffer &buff)
 
     uint16 Length;
     buff >> Length;
+
     uint32 Checksum;
     buff >> Checksum;
 
     if (Length != (buff.size() - buff.rpos()))
     {
         buff.rfinish();
+
         char const* penalty = ApplyPenalty(nullptr);
         TC_LOG_WARN("warden", "{} sends manipulated warden packet. Action: {}", _session->GetPlayerInfo(), penalty);
         return;
@@ -398,6 +665,7 @@ void WardenWin::HandleCheckResult(ByteBuffer &buff)
     if (!IsValidCheckSum(Checksum, buff.contents() + buff.rpos(), Length))
     {
         buff.rfinish();
+
         char const* penalty = ApplyPenalty(nullptr);
         TC_LOG_WARN("warden", "{} failed checksum. Action: {}", _session->GetPlayerInfo(), penalty);
         return;
@@ -407,6 +675,7 @@ void WardenWin::HandleCheckResult(ByteBuffer &buff)
     {
         uint8 result;
         buff >> result;
+
         /// @todo test it.
         if (result == 0x00)
         {
@@ -419,15 +688,56 @@ void WardenWin::HandleCheckResult(ByteBuffer &buff)
         buff >> newClientTicks;
 
         uint32 ticksNow = GameTime::GetGameTimeMS();
+
+        // ---------------------------------------------------------------------
+        // Custom Single-PC multi-client check
+        // ---------------------------------------------------------------------
+        WardenSinglePcDecision singlePcDecision = WardenSinglePcEvaluate(_session, newClientTicks, ticksNow);
+
+        bool kickCurrentSession = false;
+
+        for (WardenSinglePcKickTarget const& target : singlePcDecision.KickTargets)
+        {
+            WorldSession* targetSession = sWorld->FindSession(target.AccountId);
+
+            // 같은 accountId로 재접속한 새 세션을 잘못 킥하지 않도록 실제 포인터까지 확인한다.
+            if (!targetSession || targetSession != target.Session)
+                continue;
+
+            if (targetSession == _session)
+            {
+                kickCurrentSession = true;
+                continue;
+            }
+
+            TC_LOG_WARN("warden",
+                "[SinglePC] kicking duplicate session: account={}, ownerAccount={}, ip={}",
+                target.AccountId, singlePcDecision.OwnerAccount, targetSession->GetRemoteAddress());
+
+            targetSession->KickPlayer("Warden SinglePC duplicate client");
+        }
+
+        if (kickCurrentSession)
+        {
+            TC_LOG_WARN("warden",
+                "[SinglePC] kicking current duplicate session: account={}, ownerAccount={}, ip={}",
+                _session->GetAccountId(), singlePcDecision.OwnerAccount, _session->GetRemoteAddress());
+
+            _session->KickPlayer("Warden SinglePC duplicate client");
+            return;
+        }
+        // ---------------------------------------------------------------------
+
         uint32 ourTicks = newClientTicks + (ticksNow - _serverTicks);
 
-        TC_LOG_DEBUG("warden", "Server tick count now:    {}", ticksNow);
+        TC_LOG_DEBUG("warden", "Server tick count now: {}", ticksNow);
         TC_LOG_DEBUG("warden", "Server tick count at req: {}", _serverTicks);
         TC_LOG_DEBUG("warden", "Client ticks in response: {}", newClientTicks);
         TC_LOG_DEBUG("warden", "Round trip response time: {} ms", ourTicks - newClientTicks);
     }
 
     uint16 checkFailed = 0;
+
     for (uint16 const id : _currentChecks)
     {
         WardenCheck const& check = sWardenCheckMgr->GetCheckData(id);
@@ -456,7 +766,7 @@ void WardenWin::HandleCheckResult(ByteBuffer &buff)
                 {
                     TC_LOG_DEBUG("warden", "RESULT MEM_CHECK fail CheckId {} account Id {}", id, _session->GetAccountId());
                     TC_LOG_DEBUG("warden", "Expected: {}", ByteArrayToHexStr(expected));
-                    TC_LOG_DEBUG("warden", "Got:      {}", ByteArrayToHexStr(response));
+                    TC_LOG_DEBUG("warden", "Got: {}", ByteArrayToHexStr(response));
                     checkFailed = id;
                     continue;
                 }
@@ -482,10 +792,12 @@ void WardenWin::HandleCheckResult(ByteBuffer &buff)
             case LUA_EVAL_CHECK:
             {
                 uint8 const result = buff.read<uint8>();
+
                 if (result == 0)
                     buff.read_skip(buff.read<uint8>()); // discard attached string
 
-                TC_LOG_DEBUG("warden", "LUA_EVAL_CHECK CheckId {} account Id {} got in-warden dummy response ({})", id, _session->GetAccountId(), result);
+                TC_LOG_DEBUG("warden", "LUA_EVAL_CHECK CheckId {} account Id {} got in-warden dummy response ({})",
+                    id, _session->GetAccountId(), result);
                 break;
             }
             case MPQ_CHECK:
@@ -503,6 +815,7 @@ void WardenWin::HandleCheckResult(ByteBuffer &buff)
                 std::vector<uint8> result;
                 result.resize(Trinity::Crypto::SHA1::DIGEST_LENGTH);
                 buff.read(result.data(), result.size());
+
                 if (result != sWardenCheckMgr->GetCheckResult(id)) // SHA1
                 {
                     TC_LOG_DEBUG("warden", "RESULT MPQ_CHECK fail, CheckId {} account Id {}", id, _session->GetAccountId());
@@ -513,7 +826,7 @@ void WardenWin::HandleCheckResult(ByteBuffer &buff)
                 TC_LOG_DEBUG("warden", "RESULT MPQ_CHECK passed, CheckId {} account Id {}", id, _session->GetAccountId());
                 break;
             }
-            default:                                        // Should never happen
+            default: // Should never happen
                 break;
         }
     }
@@ -522,7 +835,9 @@ void WardenWin::HandleCheckResult(ByteBuffer &buff)
     {
         WardenCheck const& check = sWardenCheckMgr->GetCheckData(checkFailed);
         char const* penalty = ApplyPenalty(&check);
-        TC_LOG_WARN("warden", "{} failed Warden check {} ({}). Action: {}", _session->GetPlayerInfo(), checkFailed, EnumUtils::ToConstant(check.Type), penalty);
+
+        TC_LOG_WARN("warden", "{} failed Warden check {} ({}). Action: {}",
+            _session->GetPlayerInfo(), checkFailed, EnumUtils::ToConstant(check.Type), penalty);
     }
 
     // Set hold off timer, minimum timer should at least be 1 second
@@ -533,16 +848,19 @@ void WardenWin::HandleCheckResult(ByteBuffer &buff)
 size_t WardenWin::DEBUG_ForceSpecificChecks(std::vector<uint16> const& checks)
 {
     std::array<std::vector<uint16>::iterator, NUM_CHECK_CATEGORIES> swapPositions;
+
     for (WardenCheckCategory category : EnumUtils::Iterate<WardenCheckCategory>())
         swapPositions[category] = _checks[category].first.begin();
 
     size_t n = 0;
+
     for (uint16 check : checks)
     {
         for (WardenCheckCategory category : EnumUtils::Iterate<WardenCheckCategory>())
         {
             std::vector<uint16>& checks = _checks[category].first;
             std::vector<uint16>::iterator& swapPos = swapPositions[category];
+
             if (auto it = std::find(swapPos, checks.end(), check); it != checks.end())
             {
                 std::iter_swap(swapPos, it);

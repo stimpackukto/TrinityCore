@@ -12,23 +12,12 @@
 #include "Chat.h"
 #include "ObjectMgr.h"
 #include "Item.h"
-#include "DatabaseEnv.h"
+#include "Map.h"
+#include "WorldSession.h"
+#include "wrathful_set_mgr.h"
 
 #include <map>
-#include <unordered_map>
 #include <vector>
-
-/* =====================================================
- * 메모리 구조
- * ===================================================== */
-struct WrathfulItemMem
-{
-    uint32     entry;
-    ObjectGuid itemGuid;
-};
-
-// charGuid → 지급된 아이템 목록
-static std::unordered_map<uint32, std::vector<WrathfulItemMem>> g_WrathfulItemMap;
 
 /* =====================================================
  * 세트 정의
@@ -56,33 +45,6 @@ static const std::map<uint8, std::vector<uint32>> PVP_HEAL_SET_MAP =
 };
 
 /* =====================================================
- * DB 기록
- * ===================================================== */
-static void RecordWrathfulItem(uint32 charGuid, WrathfulItemMem const& info)
-{
-    std::string sql = Trinity::StringFormat(
-		"INSERT INTO appdata.wrathful_given_items "
-		"(char_guid, item_guid, item_entry) "
-		"VALUES ({}, {}, {})",
-		charGuid,
-		info.itemGuid.GetRawValue(),
-		info.entry
-	);
-	CharacterDatabase.Execute(sql.c_str());
-}
-
-static void RemoveWrathfulItem(uint32 charGuid, ObjectGuid itemGuid)
-{
-	 std::string sql = Trinity::StringFormat(
-        "DELETE FROM appdata.wrathful_given_items "
-        "WHERE char_guid={} AND item_guid={}",
-        charGuid,
-        itemGuid.GetRawValue()
-    );
-	CharacterDatabase.Execute(sql.c_str());
-}
-
-/* =====================================================
  * 지급 헬퍼
  * ===================================================== */
 static bool GiveItemIfNotOwned(Player* player, uint32 entry)
@@ -100,11 +62,8 @@ static bool GiveItemIfNotOwned(Player* player, uint32 entry)
 
     player->SendNewItem(item, 1, true, false);
 
-    WrathfulItemMem info{ entry, item->GetGUID() };
-    uint32 charGuid = player->GetGUID().GetCounter();
-
-    g_WrathfulItemMap[charGuid].push_back(info);
-    RecordWrathfulItem(charGuid, info);
+    // The shared rental manager persists the exact item GUID for safe reclaim.
+    RegisterWrathfulItem(player, entry, item->GetGUID());
 
     return true;
 }
@@ -164,8 +123,9 @@ public:
                 if (GiveItemIfNotOwned(player, entry))
                     ++count;
 
-            ChatHandler(player->GetSession()).PSendSysMessage(
+            std::string resultMessage = Trinity::StringFormat(
                 "분노한 검투사 세트 지급 완료: {}개", count);
+            ChatHandler(player->GetSession()).SendSysMessage(resultMessage.c_str());
 
             CloseGossipMenuFor(player);
             return true;
@@ -179,9 +139,43 @@ public:
 };
 
 /* =====================================================
+ * 전장 중 로그아웃한 캐릭터도 즉시 임시 장비 회수
+ * (일반 맵 이동/로그인 정리는 기존 custom_scripts.cpp가 수행)
+ * ===================================================== */
+class wrathful_rental_player_script : public PlayerScript
+{
+public:
+    wrathful_rental_player_script() : PlayerScript("wrathful_rental_player_script") { }
+
+    void OnSave(Player* player) override
+    {
+        // The core calls OnPlayerSave before persisting inventory, but OnLogout
+        // only after SaveToDB. Remove rentals here during a real logout so the
+        // inventory deletion is saved in that same character transaction.
+        if (player && player->GetSession() && player->GetSession()->PlayerLogout())
+            RemoveWrathfulItems(player);
+    }
+
+    void OnLogout(Player* player) override
+    {
+        // Fallback for logout paths that do not save the character.
+        RemoveWrathfulItems(player);
+    }
+
+    void OnMapChanged(Player* player) override
+    {
+        // Player::InBattleground() may still refer to the previous battleground
+        // while a map-transfer callback is running. Inspect the destination map.
+        if (player && player->GetMap() && !player->GetMap()->IsBattleground())
+            RemoveWrathfulItems(player);
+    }
+};
+
+/* =====================================================
  * 등록
  * ===================================================== */
 void AddSC_bg_wrathful_set_npc()
 {
     new npc_wrathful_set_giver();
+    new wrathful_rental_player_script();
 }

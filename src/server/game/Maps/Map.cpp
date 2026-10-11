@@ -15,6 +15,21 @@
  * with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
+
+/*
+ * Custom Update - 2026-07-30
+ *
+ * Idle region CPU reduction
+ *
+ * - Regions covered by players keep the original real-time update cycle.
+ * - Active non-player regions outside every player's active cell range update
+ *   once per second.
+ * - Empty-map dynamic tree, relocation notifications, map scripts, and metrics
+ *   are also reduced to the same maintenance interval.
+ * - Transport updates, respawns, script schedules, delayed object removal,
+ *   and grid unload state processing keep their original behavior.
+ */
+
 #include "Map.h"
 #include "Battleground.h"
 #include "CellImpl.h"
@@ -65,6 +80,11 @@ static uint16 const holetab_v[4] = { 0x000F, 0x00F0, 0x0F00, 0xF000 };
 #define DEFAULT_GRID_EXPIRY     300
 #define MAX_GRID_LOAD_TIME      50
 #define MAX_CREATURE_ATTACK_RADIUS  (45.0f * sWorld->getRate(RATE_CREATURE_AGGRO))
+
+namespace
+{
+    constexpr uint32 CUSTOM_IDLE_REGION_UPDATE_INTERVAL = 1 * IN_MILLISECONDS;
+}
 
 GridState* si_GridStates[MAX_GRID_STATE];
 
@@ -294,7 +314,7 @@ i_scriptLock(false), _respawnTimes(std::make_unique<RespawnListContainer>()), _r
     //lets initialize visibility distance for map
     Map::InitVisibilityDistance();
 
-    _weatherUpdateTimer.SetInterval(time_t(1 * IN_MILLISECONDS));
+    _weatherUpdateTimer.SetInterval(time_t(CUSTOM_IDLE_REGION_UPDATE_INTERVAL));
 
     MMAP::MMapFactory::createOrGetMMapManager()->loadMapInstance(sWorld->GetDataPath(), GetId(), GetInstanceId());
 }
@@ -761,7 +781,22 @@ void Map::UpdatePlayerZoneStats(uint32 oldZone, uint32 newZone)
 
 void Map::Update(uint32 t_diff)
 {
-    _dynamicTree.update(t_diff);
+    /*
+     * The weather timer already runs at a one-second interval. Use the same
+     * maintenance tick for regions that are not covered by any player.
+     * This keeps the implementation local to Map.cpp and avoids adding
+     * per-map timer state to Map.h.
+     */
+    _weatherUpdateTimer.Update(t_diff);
+
+    bool const idleRegionUpdate = _weatherUpdateTimer.Passed();
+    uint32 const idleRegionDiff = uint32(_weatherUpdateTimer.GetInterval());
+
+    if (!m_mapRefManager.isEmpty())
+        _dynamicTree.update(t_diff);
+    else if (idleRegionUpdate)
+        _dynamicTree.update(idleRegionDiff);
+
     /// update worldsessions for existing players
     for (m_mapRefIter = m_mapRefManager.begin(); m_mapRefIter != m_mapRefManager.end(); ++m_mapRefIter)
     {
@@ -850,6 +885,35 @@ void Map::Update(uint32 t_diff)
         }
     }
 
+    /*
+     * Snapshot active objects already covered by player-marked cells before
+     * any active object marks additional cells. Without this snapshot, nearby
+     * active objects could keep marking one another and wake an entire chain
+     * of otherwise unused regions.
+     */
+    std::unordered_set<WorldObject*> activeObjectsNearPlayers;
+    activeObjectsNearPlayers.reserve(m_activeNonPlayers.size());
+
+    for (WorldObject* obj : m_activeNonPlayers)
+    {
+        if (!obj || !obj->IsInWorld() || !obj->IsPositionValid())
+            continue;
+
+        CellCoord objectCell = Trinity::ComputeCellCoord(obj->GetPositionX(), obj->GetPositionY());
+        if (!objectCell.IsCoordValid())
+            continue;
+
+        uint32 const cellId =
+            objectCell.y_coord * TOTAL_NUMBER_OF_CELLS_PER_MAP + objectCell.x_coord;
+
+        if (isCellMarked(cellId))
+            activeObjectsNearPlayers.insert(obj);
+    }
+
+    Trinity::ObjectUpdater idleUpdater(idleRegionDiff);
+    TypeContainerVisitor<Trinity::ObjectUpdater, GridTypeMapContainer> idleGridObjectUpdate(idleUpdater);
+    TypeContainerVisitor<Trinity::ObjectUpdater, WorldTypeMapContainer> idleWorldObjectUpdate(idleUpdater);
+
     // non-player active objects, increasing iterator in the loop in case of object removal
     for (m_activeNonPlayersIter = m_activeNonPlayers.begin(); m_activeNonPlayersIter != m_activeNonPlayers.end();)
     {
@@ -859,7 +923,14 @@ void Map::Update(uint32 t_diff)
         if (!obj || !obj->IsInWorld())
             continue;
 
-        VisitNearbyCellsOf(obj, grid_object_update, world_object_update);
+        if (activeObjectsNearPlayers.find(obj) != activeObjectsNearPlayers.end())
+        {
+            VisitNearbyCellsOf(obj, grid_object_update, world_object_update);
+            continue;
+        }
+
+        if (idleRegionUpdate)
+            VisitNearbyCellsOf(obj, idleGridObjectUpdate, idleWorldObjectUpdate);
     }
 
     for (_transportsUpdateIter = _transports.begin(); _transportsUpdateIter != _transports.end();)
@@ -883,8 +954,7 @@ void Map::Update(uint32 t_diff)
         i_scriptLock = false;
     }
 
-    _weatherUpdateTimer.Update(t_diff);
-    if (_weatherUpdateTimer.Passed())
+    if (idleRegionUpdate)
     {
         for (auto&& zoneInfo : _zoneDynamicInfo)
             if (zoneInfo.second.DefaultWeather && !zoneInfo.second.DefaultWeather->Update(_weatherUpdateTimer.GetInterval()))
@@ -896,18 +966,26 @@ void Map::Update(uint32 t_diff)
     MoveAllCreaturesInMoveList();
     MoveAllGameObjectsInMoveList();
 
-    if (!m_mapRefManager.isEmpty() || !m_activeNonPlayers.empty())
+    if (!m_mapRefManager.isEmpty())
         ProcessRelocationNotifies(t_diff);
+    else if (idleRegionUpdate && !m_activeNonPlayers.empty())
+        ProcessRelocationNotifies(idleRegionDiff);
 
-    sScriptMgr->OnMapUpdate(this, t_diff);
+    if (!m_mapRefManager.isEmpty())
+        sScriptMgr->OnMapUpdate(this, t_diff);
+    else if (idleRegionUpdate)
+        sScriptMgr->OnMapUpdate(this, idleRegionDiff);
 
-    TC_METRIC_VALUE("map_creatures", uint64(GetObjectsStore().Size<Creature>()),
-        TC_METRIC_TAG("map_id", std::to_string(GetId())),
-        TC_METRIC_TAG("map_instanceid", std::to_string(GetInstanceId())));
+    if (!m_mapRefManager.isEmpty() || idleRegionUpdate)
+    {
+        TC_METRIC_VALUE("map_creatures", uint64(GetObjectsStore().Size<Creature>()),
+            TC_METRIC_TAG("map_id", std::to_string(GetId())),
+            TC_METRIC_TAG("map_instanceid", std::to_string(GetInstanceId())));
 
-    TC_METRIC_VALUE("map_gameobjects", uint64(GetObjectsStore().Size<GameObject>()),
-        TC_METRIC_TAG("map_id", std::to_string(GetId())),
-        TC_METRIC_TAG("map_instanceid", std::to_string(GetInstanceId())));
+        TC_METRIC_VALUE("map_gameobjects", uint64(GetObjectsStore().Size<GameObject>()),
+            TC_METRIC_TAG("map_id", std::to_string(GetId())),
+            TC_METRIC_TAG("map_instanceid", std::to_string(GetInstanceId())));
+    }
 }
 
 struct ResetNotifier
@@ -2797,6 +2875,14 @@ void Map::GetFullTerrainStatusForPosition(uint32 phaseMask, float x, float y, fl
     if (!data.areaId)
         data.areaId = i_mapEntry->AreaTableID;
 
+	// Custom Update - 2026-08-01
+		// Treat the Stratholme sabotage phase as outdoors.
+		if (GetId() == 329 &&
+			(phaseMask & 2) != 0)
+		{
+			data.outdoors = true;
+		}
+
     AreaTableEntry const* areaEntry = sAreaTableStore.LookupEntry(data.areaId);
 
     // liquid processing
@@ -3859,15 +3945,57 @@ Map::EnterState InstanceMap::CannotEnter(Player* player)
 
     // allow GM's to enter
     if (player->IsGameMaster())
+    {
         return Map::CannotEnter(player);
+    }
 
     // cannot enter if the instance is full (player cap), GMs don't count
-    uint32 maxPlayers = GetMaxPlayers();
+  /*  uint32 maxPlayers = GetMaxPlayers();
     if (GetPlayersCountExceptGMs() >= maxPlayers)
     {
         TC_LOG_WARN("maps", "MAP: Instance '{}' of map '{}' cannot have more than '{}' players. Player '{}' rejected", GetInstanceId(), GetMapName(), maxPlayers, player->GetName());
         return CANNOT_ENTER_MAX_PLAYERS;
-    }
+    }*/
+
+	/*
+	 * Custom Update - 2026-08-02
+	 *
+	 * Scourge sabotage instance player limit exception
+	 *
+	 * - Keeps the normal Stratholme five-player limit.
+	 * - Ignores the dungeon player cap only for active sabotage participants.
+	 * - Allows both sabotage raids to share one Stratholme instance.
+	 */
+	bool const isScourgeSabotageInstance =
+		GetId() == 329 &&
+		player->IsScourgeSabotageParticipant();
+
+	// Treasure Hunt permits up to 40 independent FFA participants.
+	// Its temporary instance bind prevents affecting normal Ruby Sanctum raids.
+	InstancePlayerBind* treasureBind =
+		GetId() == 724 && GetDifficulty() == RAID_DIFFICULTY_10MAN_NORMAL &&
+		player->GetPhaseMask() == 0x40000000 && !player->GetGroup()
+		? player->GetBoundInstance(GetId(), RAID_DIFFICULTY_10MAN_NORMAL, true)
+		: nullptr;
+	bool const isTreasureHuntInstance = treasureBind && treasureBind->save &&
+		treasureBind->save->GetInstanceId() == GetInstanceId();
+
+	uint32 maxPlayers = isTreasureHuntInstance ? 40 : GetMaxPlayers();
+
+	if (!isScourgeSabotageInstance &&
+		GetPlayersCountExceptGMs() >= maxPlayers)
+	{
+		TC_LOG_WARN(
+			"maps",
+			"MAP: Instance '{}' of map '{}' cannot have more than '{}' players. Player '{}' rejected",
+			GetInstanceId(),
+			GetMapName(),
+			maxPlayers,
+			player->GetName()
+		);
+
+		return CANNOT_ENTER_MAX_PLAYERS;
+	}
 
     // cannot enter while an encounter is in progress (unless this is a relog, in which case it is permitted)
     if (!player->IsLoading() && IsRaid() && GetInstanceScript() && GetInstanceScript()->IsEncounterInProgress())
@@ -3902,8 +4030,17 @@ bool InstanceMap::AddPlayerToMap(Player* player)
         {
             Group* group = player->GetGroup();
 
-            // increase current instances (hourly limit)
-            if (!group || !group->isLFGGroup())
+            // A valid Treasure Hunt entry does not count against the normal
+            // five-instanced-dungeons-per-hour restriction.
+            InstancePlayerBind* treasureBind =
+                GetId() == 724 && GetDifficulty() == RAID_DIFFICULTY_10MAN_NORMAL &&
+                player->GetPhaseMask() == 0x40000000 && !group
+                ? player->GetBoundInstance(GetId(), RAID_DIFFICULTY_10MAN_NORMAL, true)
+                : nullptr;
+            bool const isTreasureHuntInstance = treasureBind && treasureBind->save &&
+                treasureBind->save->GetInstanceId() == GetInstanceId();
+
+            if ((!group || !group->isLFGGroup()) && !isTreasureHuntInstance)
                 player->GetSession()->AddInstanceEnterTime(GetInstanceId(), GameTime::GetSystemTime());
 
             // get or create an instance save for the map

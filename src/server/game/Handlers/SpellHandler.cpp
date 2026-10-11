@@ -38,6 +38,7 @@
 #include "TotemPackets.h"
 #include "World.h"
 #include "WorldPacket.h"
+#include "SpellHistory.h"
 
 void WorldSession::HandleClientCastFlags(WorldPacket& recvPacket, uint8 castFlags, SpellCastTargets& targets)
 {
@@ -398,6 +399,59 @@ void WorldSession::HandleCastSpellOpcode(WorldPacket& recvPacket)
             if (actualSpellInfo)
                 spellInfo = actualSpellInfo;
         }
+
+	// ---------------------------------------------------------
+    // Custom Cooldown Guard
+    //
+    // 클라이언트에서 직접 요청한 일반 주문만 검사한다.
+    // 서버 SpellHistory를 기준으로 Spell/Category Cooldown 및
+    // Global Cooldown 상태를 확인한다.
+    //
+    // TRIGGERED_FULL_MASK 등 정상 서버 허용 Trigger 주문은 제외한다.
+    // GM .cheat cooldown 사용도 제외한다.
+    // ---------------------------------------------------------
+    if (triggerFlag == TRIGGERED_NONE && !_player->GetCommandStatus(CHEAT_COOLDOWN))
+    {
+        SpellHistory* spellHistory = _player->GetSpellHistory();
+
+        if (spellHistory)
+        {
+            // -------------------------------------------------
+            // Spell / Category Cooldown
+            // -------------------------------------------------
+            if (!spellHistory->IsReady(spellInfo))
+            {
+                TC_LOG_DEBUG(
+                    "entities.player.cheat",
+                    "CooldownGuard: blocked spell while cooldown active. "
+                    "player={} guid={} spell={}",
+                    _player->GetName(),
+                    _player->GetGUID().ToString(),
+                    spellInfo->Id
+                );
+
+                return;
+            }
+
+            // -------------------------------------------------
+            // Global Cooldown
+            // -------------------------------------------------
+            if (spellInfo->StartRecoveryCategory > 0 &&
+                spellHistory->HasGlobalCooldown(spellInfo))
+            {
+                TC_LOG_DEBUG(
+                    "entities.player.cheat",
+                    "CooldownGuard: blocked spell while GCD active. "
+                    "player={} guid={} spell={}",
+                    _player->GetName(),
+                    _player->GetGUID().ToString(),
+                    spellInfo->Id
+                );
+
+                return;
+            }
+        }
+    }
 
     Spell* spell = new Spell(_player, spellInfo, triggerFlag);
     spell->m_fromClient = true;
