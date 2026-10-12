@@ -1181,6 +1181,13 @@ public:
 
     void ProcessArchive()
     {
+        // 계정 LOCK 테이블을 확인할 수 없으면 미접속 정리를 중단한다.
+        QueryResult accountLockTableCheck = CharacterDatabase.PQuery(
+            "SELECT COUNT(*) FROM appdata.account_character_locks"
+        );
+        if (!accountLockTableCheck)
+            return;
+
         QueryResult result = CharacterDatabase.PQuery(
             "SELECT c.account, c.guid, c.name, c.logout_time, c.level "
             "FROM characters.characters c "
@@ -1189,7 +1196,10 @@ public:
             "AND (c.logout_time <= UNIX_TIMESTAMP(DATE_SUB(NOW(), INTERVAL 6 MONTH)) "
             "OR (c.level < 40 AND c.logout_time <= UNIX_TIMESTAMP(DATE_SUB(NOW(), INTERVAL 1 MONTH)))) "
             "AND c.online = 0 "
-            "AND l.guid IS NULL"
+            "AND l.guid IS NULL "
+            "AND NOT EXISTS ( "
+            "SELECT 1 FROM appdata.account_character_locks account_lock "
+            "WHERE account_lock.account_id = c.account AND account_lock.is_active = 1)"
         );
 
         if (!result)
@@ -1207,6 +1217,17 @@ public:
             uint32 now     = uint32(time(nullptr));
             char const* archiveType = level < 40 ? "under40_1month" : "inactive_6months";
 
+            // 대상 조회 후 LOCK을 구매한 계정도 정리에서 제외한다.
+            QueryResult accountLockCheck = CharacterDatabase.PQuery(
+                "SELECT COUNT(*) FROM appdata.account_character_locks "
+                "WHERE account_id = {} AND is_active = 1",
+                account
+            );
+            if (!accountLockCheck)
+                return;
+            if (accountLockCheck->Fetch()[0].GetUInt64() != 0)
+                continue;
+
             QueryResult exists = CharacterDatabase.PQuery(
                 "SELECT 1 "
                 "FROM appdata.inactive_character_lock "
@@ -1220,7 +1241,10 @@ public:
             CharacterDatabase.PExecute(
                 "INSERT INTO appdata.inactive_character_lock "
                 "(guid, account_id, name, last_logout, locked_at, active, archive_type) "
-                "VALUES ({}, {}, '{}', {}, {}, 1, '{}') "
+                "SELECT {}, {}, '{}', {}, {}, 1, '{}' "
+                "WHERE NOT EXISTS ( "
+                "SELECT 1 FROM appdata.account_character_locks account_lock "
+                "WHERE account_lock.account_id = {} AND account_lock.is_active = 1) "
                 "ON DUPLICATE KEY UPDATE "
                 "account_id = VALUES(account_id), "
                 "name = VALUES(name), "
@@ -1233,7 +1257,8 @@ public:
                 name,
                 logout,
                 now,
-                archiveType
+                archiveType,
+                account
             );
 
             if (!exists)
@@ -1241,13 +1266,17 @@ public:
                 CharacterDatabase.PExecute(
                     "INSERT INTO appdata.character_archive_log "
                     "(guid, name, account_id, last_logout, archived_at, archive_type) "
-                    "VALUES ({}, '{}', {}, {}, {}, '{}')",
+                    "SELECT {}, '{}', {}, {}, {}, '{}' "
+                    "WHERE NOT EXISTS ( "
+                    "SELECT 1 FROM appdata.account_character_locks account_lock "
+                    "WHERE account_lock.account_id = {} AND account_lock.is_active = 1)",
                     guid,
                     name,
                     account,
                     logout,
                     now,
-                    archiveType
+                    archiveType,
+                    account
                 );
             }
 
