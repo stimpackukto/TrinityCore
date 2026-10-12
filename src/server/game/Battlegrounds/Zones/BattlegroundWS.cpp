@@ -379,10 +379,8 @@ bool BattlegroundWS::ClaimSupplyCrate(Player* player, ObjectGuid crateGuid)
         if (Player* member = ObjectAccessor::FindPlayer(entry.first))
             RemoveSupplySpeed(member);
 
-    _supplyCrateActive = false;
-    _supplyCrateTimer = 0;
-    _supplyCrateDeletePending = true; // delayed deletion: GameObject::Use is still running
-    SpawnBGObject(BG_WS_OBJECT_SUPPLY_CRATE, RESPAWN_ONE_DAY);
+    // Do not consume the crate on a click. It remains reusable by anyone
+    // until the original 30-second despawn timer expires.
 
     _supplyBuffTeam = it->second.Team;
     _supplyBuffType = urand(WSG_SUPPLY_SIEGE, WSG_SUPPLY_REGEN);
