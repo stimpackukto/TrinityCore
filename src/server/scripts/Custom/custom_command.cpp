@@ -126,11 +126,23 @@ public:
 		if (!handler)
 			return false;
 
+		// 보호 LOCK 정보를 읽을 수 없으면 삭제를 진행하지 않는다.
+		QueryResult accountLockTableCheck = CharacterDatabase.PQuery(
+			"SELECT COUNT(*) FROM appdata.account_character_locks");
+		if (!accountLockTableCheck)
+		{
+			handler->SendSysMessage("계정 LOCK 상태를 확인할 수 없어 캐릭터 삭제를 중단했습니다.");
+			return true;
+		}
+
 		QueryResult result = CharacterDatabase.PQuery(
 			"SELECT DISTINCT c.guid, c.account "
 			"FROM appdata.character_archive_log AS archive_log "
 			"INNER JOIN characters.characters AS c ON c.guid = archive_log.guid "
-			"WHERE archive_log.archive_type = '{}'", archiveType);
+			"WHERE archive_log.archive_type = '{}' "
+			"AND NOT EXISTS ( "
+			"SELECT 1 FROM appdata.account_character_locks account_lock "
+			"WHERE account_lock.account_id = c.account AND account_lock.is_active = 1)", archiveType);
 
 		if (!result)
 		{
@@ -141,11 +153,35 @@ public:
 		}
 
 		uint32 deletedCount = 0;
+		uint32 protectedCount = 0;
 		do
 		{
 			Field* fields = result->Fetch();
 			uint32 guidLow = fields[0].GetUInt32();
 			uint32 accountId = fields[1].GetUInt32();
+
+			// 삭제 직전의 계정 LOCK / 계정 귀속 / 정리 유형을 재확인한다.
+			QueryResult deleteAllowed = CharacterDatabase.PQuery(
+				"SELECT COUNT(*) FROM characters.characters c "
+				"INNER JOIN appdata.character_archive_log archive_log ON archive_log.guid = c.guid "
+				"WHERE c.guid = {} AND c.account = {} AND archive_log.archive_type = '{}' "
+				"AND NOT EXISTS ( "
+				"SELECT 1 FROM appdata.account_character_locks account_lock "
+				"WHERE account_lock.account_id = c.account AND account_lock.is_active = 1)",
+				guidLow, accountId, archiveType);
+
+			if (!deleteAllowed)
+			{
+				handler->SendSysMessage(
+					Trinity::StringFormat("계정 LOCK 재검증에 실패해 삭제를 중단했습니다. 이미 삭제: {}명", deletedCount).c_str());
+				return true;
+			}
+			if (deleteAllowed->Fetch()[0].GetUInt64() == 0)
+			{
+				++protectedCount;
+				continue;
+			}
+
 			ObjectGuid playerGuid = ObjectGuid::Create<HighGuid::Player>(guidLow);
 
 			if (Player* player = ObjectAccessor::FindConnectedPlayer(playerGuid))
@@ -157,7 +193,7 @@ public:
 		} while (result->NextRow());
 
 		handler->SendSysMessage(
-			Trinity::StringFormat("{} 유형의 캐릭터 {}명을 삭제했습니다.", archiveLabel, deletedCount).c_str()
+			Trinity::StringFormat("{} 유형의 캐릭터 {}명을 삭제했습니다. 보호 또는 상태 변경으로 제외: {}명", archiveLabel, deletedCount, protectedCount).c_str()
 		);
 
 		return true;
