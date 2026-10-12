@@ -197,7 +197,7 @@ namespace GearScore
  * ============================================================ */
 static constexpr uint32 FACTION_ASHEN_VERDICT_1 = 1156;
 
-static bool HasAshenVerdictNeutralOrHigher(Player* player)
+[[maybe_unused]] static bool HasAshenVerdictNeutralOrHigher(Player* player)
 {
     if (!player)
         return false;
@@ -222,7 +222,7 @@ static bool HasCallOfTheCrusade(Player const* p)
                  p->HasAchieved(kAchCallOfTheCrusade25));
 }
 
-static void KickToFailSpot(Player* p, uint32 fromMap, std::string const& msg)
+[[maybe_unused]] static void KickToFailSpot(Player* p, uint32 fromMap, std::string const& msg)
 {
     if (!p) return;
     ChatHandler(p->GetSession()).SendSysMessage(msg.c_str());
@@ -244,7 +244,7 @@ static uint32 GetTargetGuildId(Player* player)
 
 
 //길드 초대
-static void SendGuildInvitePopup(Player* player, uint32 guildId, char const* notice)
+static void SendGuildInvitePopup(Player* player, uint32 guildId, [[maybe_unused]] char const* notice)
     {
         if (!player || !player->GetSession())
             return;
@@ -451,7 +451,7 @@ public:
 	}
 
 	/* XP 지급 훅 */
-    void OnGiveXP(Player* player, uint32& amount, Unit* victim) override
+    void OnGiveXP(Player* player, uint32& amount, [[maybe_unused]] Unit* victim) override
     {
         uint32 accountId = player->GetSession()->GetAccountId();
 
@@ -597,7 +597,7 @@ public:
 		}
 	}
 
-	void OnLootItem(Player* looter, ObjectGuid const& lootGuid, uint32 itemId, uint32 count) override
+	void OnLootItem(Player* looter, ObjectGuid const& lootGuid, uint32 itemId, [[maybe_unused]] uint32 count) override
 	{
 		if (!looter)
 			return;
@@ -701,7 +701,7 @@ public:
 		CharacterDatabase.DirectExecute(q.c_str());
 	}
 
-	bool OnPlayerSellItem(Player* player, Creature* vendor, Item* item, uint32& count, uint32& money) override
+	bool OnPlayerSellItem(Player* player, [[maybe_unused]] Creature* vendor, Item* item, [[maybe_unused]] uint32& count, [[maybe_unused]] uint32& money) override
 	{
 		if (!player || !item)
 			return false;
@@ -817,7 +817,7 @@ class item_mail : public ItemScript
 public:
     item_mail() : ItemScript("item_mail") { }
 
-    bool OnUse(Player* player, Item* item, SpellCastTargets const& targets)
+    bool OnUse(Player* player, Item* item, [[maybe_unused]] SpellCastTargets const& targets)
     {
 		player->PlayerTalkClass->ClearMenus();
 		if (player->HasItemCount(item->GetEntry(), 1))
@@ -834,7 +834,7 @@ class item_buff : public ItemScript
 public:
     item_buff() : ItemScript("item_buff") { }
 
-    bool OnUse(Player* player, Item* item, SpellCastTargets const& targets)
+    bool OnUse(Player* player, Item* item, [[maybe_unused]] SpellCastTargets const& targets)
     {
 		player->PlayerTalkClass->ClearMenus();
 		uint32 mapid = player->GetMapId();
@@ -2132,7 +2132,7 @@ public:
             return;
 
         std::string hash = GetHash(msg);
-        uint32 guid = player->GetGUID().GetCounter();
+        [[maybe_unused]] uint32 guid = player->GetGUID().GetCounter();
 		uint32 accountId = player->GetSession()->GetAccountId();
 
         // 🔥 기존 공지 확인
@@ -3041,7 +3041,7 @@ public:
 #include "DBCStores.h"
 #include "ReputationMgr.h"
 
-static constexpr uint32 ITEM_ASHEN_VERDICT_EXALTED = 1138;
+[[maybe_unused]] static constexpr uint32 ITEM_ASHEN_VERDICT_EXALTED = 1138;
 static constexpr uint32 FACTION_ASHEN_VERDICT = 1156;
 static constexpr int32 REPUTATION_EXALTED_MAX = 42999;
 
