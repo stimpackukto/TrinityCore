@@ -59,6 +59,7 @@ namespace
     static constexpr Difficulty TREASURE_DIFFICULTY = RAID_DIFFICULTY_10MAN_NORMAL;
     static constexpr uint32 TREASURE_PHASE_MASK = 0x40000000;
     static constexpr uint32 TREASURE_UPDATE_INTERVAL_MS = 250;
+    static constexpr bool TREASURE_HUNT_PAUSED = true; // Keep the event disabled until explicitly re-enabled in code.
     static constexpr uint32 TREASURE_DISGUISE_DURATION_SECONDS = 30;
     static constexpr uint32 TREASURE_DISGUISE_COOLDOWN_SECONDS = 90;
     static constexpr uint32 TREASURE_CHEST_ENTRY = 900410;
@@ -242,7 +243,7 @@ namespace
 
             if (_eventState == TREASURE_EVENT_IDLE)
             {
-                if (_config.enabled && _nextStartTime && now >= _nextStartTime)
+                if (!TREASURE_HUNT_PAUSED && _config.enabled && _nextStartTime && now >= _nextStartTime)
                     StartEvent();
 
                 return;
@@ -593,6 +594,12 @@ namespace
 
             if (!player || !player->GetSession())
                 return false;
+
+            if (TREASURE_HUNT_PAUSED)
+            {
+                SendJoinFail(player, "루비 성소 보물찾기는 현재 점검 중이며 참여할 수 없습니다.");
+                return false;
+            }
 
             if (!CustomScourgeDungeonMode::IsEnabled(player))
             {
@@ -1315,12 +1322,12 @@ namespace
             );
 
             time_t now = GameTime::GetGameTime();
-            _nextStartTime = now + std::max<uint32>(1, _config.firstDelaySeconds);
+            _nextStartTime = TREASURE_HUNT_PAUSED ? 0 : now + std::max<uint32>(1, _config.firstDelaySeconds);
 
             TC_LOG_INFO(
                 "custom.treasure",
                 "Treasure Hunt manager initialized: enabled={}, firstDelay={}s, interval={}m, duration={}m, maxPlayers={}",
-                _config.enabled ? 1 : 0,
+                (_config.enabled && !TREASURE_HUNT_PAUSED) ? 1 : 0,
                 _config.firstDelaySeconds,
                 _config.intervalMinutes,
                 _config.durationMinutes,
@@ -1668,6 +1675,12 @@ namespace
 
         bool StartEvent()
         {
+            if (TREASURE_HUNT_PAUSED)
+            {
+                _nextStartTime = 0;
+                return false;
+            }
+
             if (_eventState != TREASURE_EVENT_IDLE)
                 return false;
 
