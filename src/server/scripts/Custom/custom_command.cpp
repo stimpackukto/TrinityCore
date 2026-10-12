@@ -70,7 +70,7 @@
 
 // ============================================================================
 // Custom Update - 2026-07-13
-// appdata.character_archive_log 등록 캐릭터 일괄 영구 삭제 명령어 추가
+// appdata.character_archive_log 등록 캐릭터 영구 삭제 명령어 (1개월/6개월 유형 구분)
 // ============================================================================
 
 using namespace Trinity::ChatCommands;
@@ -104,18 +104,24 @@ public:
 			{ "customremove", HandleCustomTitleRemoveCommand, rbac::RBAC_PERM_COMMAND_SEND_MESSAGE, Console::Yes },
 		};
 
+        static ChatCommandTable archiveDeleteCommandTable =
+        {
+            { "1month", HandleArchiveDelete1MonthCommand, rbac::RBAC_PERM_COMMAND_SEND_MESSAGE, Console::Yes },
+            { "6months", HandleArchiveDelete6MonthsCommand, rbac::RBAC_PERM_COMMAND_SEND_MESSAGE, Console::Yes },
+        };
+
         static ChatCommandTable commandTable =
         {
             { "send", sendCommandTable },
 			{ "title", titleCommandTable },
-			{ "archivedelete", HandleArchiveDeleteCommand, rbac::RBAC_PERM_COMMAND_SEND_MESSAGE, Console::Yes },
+			{ "archivedelete", archiveDeleteCommandTable },
         };
         return commandTable;
     }
 
-	// 사용법: .archivedelete
-	// appdata.character_archive_log에 등록되어 있고 현재 존재하는 캐릭터를 영구 삭제한다.
-	static bool HandleArchiveDeleteCommand(ChatHandler* handler)
+	// 사용법: .archivedelete 1month / .archivedelete 6months
+	// appdata.character_archive_log의 archive_type별로 현재 존재하는 캐릭터를 영구 삭제한다.
+	static bool HandleArchiveDeleteByType(ChatHandler* handler, char const* archiveType, char const* archiveLabel)
 	{
 		if (!handler)
 			return false;
@@ -123,11 +129,14 @@ public:
 		QueryResult result = CharacterDatabase.PQuery(
 			"SELECT DISTINCT c.guid, c.account "
 			"FROM appdata.character_archive_log AS archive_log "
-			"INNER JOIN characters.characters AS c ON c.guid = archive_log.guid");
+			"INNER JOIN characters.characters AS c ON c.guid = archive_log.guid "
+			"WHERE archive_log.archive_type = '{}'", archiveType);
 
 		if (!result)
 		{
-			handler->SendSysMessage("character_archive_log에 삭제할 캐릭터가 없습니다.");
+			handler->SendSysMessage(
+				Trinity::StringFormat("{} 유형에 삭제할 캐릭터가 없습니다.", archiveLabel).c_str()
+			);
 			return true;
 		}
 
@@ -148,10 +157,20 @@ public:
 		} while (result->NextRow());
 
 		handler->SendSysMessage(
-			Trinity::StringFormat("character_archive_log 등록 캐릭터 {}명을 삭제했습니다.", deletedCount).c_str()
+			Trinity::StringFormat("{} 유형의 캐릭터 {}명을 삭제했습니다.", archiveLabel, deletedCount).c_str()
 		);
 
 		return true;
+	}
+
+	static bool HandleArchiveDelete1MonthCommand(ChatHandler* handler)
+	{
+		return HandleArchiveDeleteByType(handler, "under40_1month", "1개월 미접속 (40레벨 미만)");
+	}
+
+	static bool HandleArchiveDelete6MonthsCommand(ChatHandler* handler)
+	{
+		return HandleArchiveDeleteByType(handler, "inactive_6months", "6개월 미접속");
 	}
 
 	// global announce
