@@ -1182,7 +1182,7 @@ public:
     void ProcessArchive()
     {
         QueryResult result = CharacterDatabase.PQuery(
-            "SELECT c.account, c.guid, c.name, c.logout_time "
+            "SELECT c.account, c.guid, c.name, c.logout_time, c.level "
             "FROM characters.characters c "
             "LEFT JOIN appdata.character_archive_log l ON l.guid = c.guid "
             "WHERE c.logout_time > 0 "
@@ -1203,7 +1203,9 @@ public:
             uint32 guid    = fields[1].GetUInt32();
             std::string name = fields[2].GetString();
             uint32 logout  = fields[3].GetUInt32();
+            uint32 level   = fields[4].GetUInt32();
             uint32 now     = uint32(time(nullptr));
+            char const* archiveType = level < 40 ? "under40_1month" : "inactive_6months";
 
             QueryResult exists = CharacterDatabase.PQuery(
                 "SELECT 1 "
@@ -1217,32 +1219,35 @@ public:
 
             CharacterDatabase.PExecute(
                 "INSERT INTO appdata.inactive_character_lock "
-                "(guid, account_id, name, last_logout, locked_at, active) "
-                "VALUES ({}, {}, '{}', {}, {}, 1) "
+                "(guid, account_id, name, last_logout, locked_at, active, archive_type) "
+                "VALUES ({}, {}, '{}', {}, {}, 1, '{}') "
                 "ON DUPLICATE KEY UPDATE "
                 "account_id = VALUES(account_id), "
                 "name = VALUES(name), "
                 "last_logout = VALUES(last_logout), "
                 "locked_at = VALUES(locked_at), "
-                "active = 1",
+                "active = 1, "
+                "archive_type = VALUES(archive_type)",
                 guid,
                 account,
                 name,
                 logout,
-                now
+                now,
+                archiveType
             );
 
             if (!exists)
             {
                 CharacterDatabase.PExecute(
                     "INSERT INTO appdata.character_archive_log "
-                    "(guid, name, account_id, last_logout, archived_at) "
-                    "VALUES ({}, '{}', {}, {}, {})",
+                    "(guid, name, account_id, last_logout, archived_at, archive_type) "
+                    "VALUES ({}, '{}', {}, {}, {}, '{}')",
                     guid,
                     name,
                     account,
                     logout,
-                    now
+                    now,
+                    archiveType
                 );
             }
 
