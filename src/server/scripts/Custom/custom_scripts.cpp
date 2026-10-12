@@ -1131,7 +1131,7 @@ public:
     }
 };
 
-//6개월 이상 미접속 관리
+// 40레벨 미만 1개월 / 전체 레벨 6개월 이상 미접속 관리
 #include "ScriptMgr.h"
 #include "TaskScheduler.h"
 #include "DatabaseEnv.h"
@@ -1186,7 +1186,8 @@ public:
             "FROM characters.characters c "
             "LEFT JOIN appdata.character_archive_log l ON l.guid = c.guid "
             "WHERE c.logout_time > 0 "
-            "AND c.logout_time <= UNIX_TIMESTAMP(DATE_SUB(NOW(), INTERVAL 6 MONTH)) "
+            "AND (c.logout_time <= UNIX_TIMESTAMP(DATE_SUB(NOW(), INTERVAL 6 MONTH)) "
+            "OR (c.level < 40 AND c.logout_time <= UNIX_TIMESTAMP(DATE_SUB(NOW(), INTERVAL 1 MONTH)))) "
             "AND c.online = 0 "
             "AND l.guid IS NULL"
         );
@@ -3829,7 +3830,7 @@ void AddSC_custom_scripts()
 	//로그인카운트
 	new account_daily_ingame();
 
-	//6개월이상 미접속 케릭터
+	// 40레벨 미만 1개월 / 전체 레벨 6개월 이상 미접속 캐릭터
     new inactive_character_archive();
     new inactive_character_lock_player();
 
