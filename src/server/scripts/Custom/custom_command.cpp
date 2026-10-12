@@ -353,9 +353,9 @@ public:
 			return true;
 		}
 
-		constexpr uint32 kWintergraspZoneId = 4197;
+		[[maybe_unused]] constexpr uint32 kWintergraspZoneId = 4197;
 
-		auto IsOwarGiftExcludedPlayer = [](Player* plr) -> bool
+		[[maybe_unused]] auto IsOwarGiftExcludedPlayer = [](Player* plr) -> bool
 		{
 			if (!plr)
 				return true;
@@ -596,7 +596,7 @@ static bool HandleDeliveryGiftCommand(ChatHandler* handler)
     for (auto const& kv : players)
     {
 		uint32 index = urand(0, buffs.size() - 1);
-		uint32 selectedSpell = buffs[index];
+		[[maybe_unused]] uint32 selectedSpell = buffs[index];
 
         Player* plr = kv.second;
         if (!plr) continue;
