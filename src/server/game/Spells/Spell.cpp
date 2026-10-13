@@ -5283,7 +5283,14 @@ SpellCastResult Spell::CheckCast(bool strict, uint32* param1 /*= nullptr*/, uint
             {
                 // Cannot be used in this stance/form
                 SpellCastResult shapeError = m_spellInfo->CheckShapeshift(unitCaster->GetShapeshiftForm());
-                if (shapeError != SPELL_CAST_OK)
+                // 커스텀 돌진을 배운 드루이드는 야성 폼을 유지한 채 돌진할 수 있다.
+                // 기본 주문의 요구 태세 및 다른 주문들의 검사 조건은 변경하지 않는다.
+                bool const allowFeralCharge = unitCaster->GetTypeId() == TYPEID_PLAYER &&
+                    unitCaster->GetClass() == CLASS_DRUID && unitCaster->IsInFeralForm() &&
+                    (m_spellInfo->HasEffect(SPELL_EFFECT_CHARGE) ||
+                        m_spellInfo->HasEffect(SPELL_EFFECT_CHARGE_DEST)) &&
+                    unitCaster->ToPlayer()->HasActiveSpell(m_spellInfo->Id);
+                if (shapeError != SPELL_CAST_OK && !allowFeralCharge)
                     return shapeError;
 
                 if (m_spellInfo->HasAttribute(SPELL_ATTR0_ONLY_STEALTHED) && !(unitCaster->HasStealthAura()))
