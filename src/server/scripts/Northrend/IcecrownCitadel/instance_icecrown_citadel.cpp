@@ -200,7 +200,7 @@ class instance_icecrown_citadel : public InstanceMapScript
 
             void OnPlayerLeave(Player* player) override
             {
-                DoRemoveAurasDueToSpellOnPlayer(player, TeamInInstance == ALLIANCE ? SPELL_STRENGHT_OF_WRYNN : SPELL_HELLSCREAMS_WARSONG, true, true);
+                // ICC 버프(73822/73828)는 맵을 벗어나도 지속시간 동안 유지한다.
 
 				uint32 phaseMask = player->GetPhaseMask();
 				phaseMask &= ~16384; // 평판작업모드 페이즈 제거
