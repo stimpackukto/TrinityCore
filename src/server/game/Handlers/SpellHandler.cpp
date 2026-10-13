@@ -58,12 +58,10 @@ namespace
 
     bool IsRuneChargeSpell(uint32 spellId)
     {
-        return spellId == 100 || spellId == 6178 || spellId == 11578;
-    }
-
-    bool HasRuneChargeSpell(Player const* player)
-    {
-        return player->HasActiveSpell(100) || player->HasActiveSpell(6178) || player->HasActiveSpell(11578);
+        // 기본/커스텀 스펠 ID에 의존하지 않고 실제 돌진 효과로 판별한다.
+        SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(spellId);
+        return spellInfo && (spellInfo->HasEffect(SPELL_EFFECT_CHARGE) ||
+            spellInfo->HasEffect(SPELL_EFFECT_CHARGE_DEST));
     }
 }
 
@@ -543,10 +541,10 @@ void WorldSession::HandleCancelAuraOpcode(WorldPackets::Spells::CancelAura& canc
     if (!spellInfo->IsPositive() || spellInfo->IsPassive())
         return;
 
-    // 드루이드가 전승룬 돌진을 보유한 상태에서 야성 폼을 해제한 시각과 주문을 잠시 보관한다.
-    // 다음 주문이 돌진이 아니거나 1.5초가 지나면 복구하지 않는다.
+    // 드루이드 야성 폼을 해제하면 잠시 기억한다. 다음 주문이 돌진이 아닐 경우 복구하지 않는다.
+    // 커스텀 돌진의 ID가 기본 전사 주문과 달라도 정상 작동해야 한다.
     if (_player->GetClass() == CLASS_DRUID && _player->IsInFeralForm() &&
-        HasRuneChargeSpell(_player) && spellInfo->HasAura(SPELL_AURA_MOD_SHAPESHIFT) &&
+        spellInfo->HasAura(SPELL_AURA_MOD_SHAPESHIFT) &&
         _player->HasAura(cancelAura.SpellID))
     {
         auto now = std::chrono::steady_clock::now();
