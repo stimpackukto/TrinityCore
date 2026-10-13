@@ -4962,6 +4962,12 @@ void SpellMgr::LoadSpellInfoCorrections()
 		spellInfo->AttributesEx4 = 0x0;        // 9열
 		spellInfo->AttributesEx5 = 0x0;        // 10열
 		spellInfo->AttributesEx6 = 0x0;        // 11열
+
+		// ICC 진영 버프: 맵 변경/이동으로 제거되지 않고 원래 지속시간까지 유지
+		spellInfo->AuraInterruptFlags &= ~(AURA_INTERRUPT_FLAG_CHANGE_MAP | AURA_INTERRUPT_FLAG_MOVE | AURA_INTERRUPT_FLAG_TURNING);
+		// 투기장 맵 입장/퇴장 시 일반 버프 일괄 제거 대상에서도 제외
+		spellInfo->AttributesEx4 |= SPELL_ATTR4_DONT_REMOVE_IN_ARENA;
+		spellInfo->AttributesEx5 &= ~SPELL_ATTR5_REMOVE_ON_ARENA_ENTER;
     });
 
 	ApplySpellFix({ 58549 }, [](SpellInfo* spellInfo)
