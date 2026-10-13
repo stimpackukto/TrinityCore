@@ -39,6 +39,31 @@
 #include "World.h"
 #include "WorldPacket.h"
 #include "SpellHistory.h"
+#include <chrono>
+#include <unordered_map>
+
+// 전승룬으로 습득한 전사 돌진을 드루이드 야성 폼에서 사용할 때,
+// 3.3.5a 클라이언트가 먼저 보내는 폼 해제 요청을 돌진 시전에 한해 복구한다.
+namespace
+{
+    struct PendingRuneChargeForm
+    {
+        uint32 formSpellId;
+        std::chrono::steady_clock::time_point cancelledAt;
+    };
+
+    std::unordered_map<uint32, PendingRuneChargeForm> pendingRuneChargeForms;
+
+    bool IsRuneChargeSpell(uint32 spellId)
+    {
+        return spellId == 100 || spellId == 6178 || spellId == 11578;
+    }
+
+    bool HasRuneChargeSpell(Player const* player)
+    {
+        return player->HasActiveSpell(100) || player->HasActiveSpell(6178) || player->HasActiveSpell(11578);
+    }
+}
 
 void WorldSession::HandleClientCastFlags(WorldPacket& recvPacket, uint8 castFlags, SpellCastTargets& targets)
 {
@@ -352,6 +377,23 @@ void WorldSession::HandleCastSpellOpcode(WorldPacket& recvPacket)
     targets.Read(recvPacket, _player);
     HandleClientCastFlags(recvPacket, castFlags, targets);
 
+    // 클라이언트가 돌진 직전에 야성 폼을 자동 해제한 경우에만 원래 폼을 복구한다.
+    // 수동 폼 해제나 다른 주문 시전에는 관여하지 않는다.
+    if (_player->GetClass() == CLASS_DRUID)
+    {
+        auto pending = pendingRuneChargeForms.find(_player->GetGUID().GetCounter());
+        if (pending != pendingRuneChargeForms.end())
+        {
+            uint32 formSpellId = pending->second.formSpellId;
+            auto elapsed = std::chrono::steady_clock::now() - pending->second.cancelledAt;
+            pendingRuneChargeForms.erase(pending);
+
+            if (IsRuneChargeSpell(spellId) && elapsed <= std::chrono::milliseconds(1500) &&
+                _player->IsAlive() && _player->GetShapeshiftForm() == FORM_NONE && _player->HasActiveSpell(spellId))
+                _player->CastSpell(_player, formSpellId, true);
+        }
+    }
+
     // not have spell in spellbook
     if (!_player->HasActiveSpell(spellId))
     {
@@ -492,6 +534,23 @@ void WorldSession::HandleCancelAuraOpcode(WorldPackets::Spells::CancelAura& canc
     // don't allow cancelling passive auras (some of them are visible)
     if (!spellInfo->IsPositive() || spellInfo->IsPassive())
         return;
+
+    // 드루이드가 전승룬 돌진을 보유한 상태에서 야성 폼을 해제한 시각과 주문을 잠시 보관한다.
+    // 다음 주문이 돌진이 아니거나 1.5초가 지나면 복구하지 않는다.
+    if (_player->GetClass() == CLASS_DRUID && _player->IsInFeralForm() &&
+        HasRuneChargeSpell(_player) && spellInfo->HasAura(SPELL_AURA_MOD_SHAPESHIFT) &&
+        _player->HasAura(cancelAura.SpellID))
+    {
+        auto now = std::chrono::steady_clock::now();
+        for (auto it = pendingRuneChargeForms.begin(); it != pendingRuneChargeForms.end(); )
+        {
+            if (now - it->second.cancelledAt > std::chrono::seconds(3))
+                it = pendingRuneChargeForms.erase(it);
+            else
+                ++it;
+        }
+        pendingRuneChargeForms[_player->GetGUID().GetCounter()] = { cancelAura.SpellID, now };
+    }
 
     // maybe should only remove one buff when there are multiple?
     _player->RemoveOwnedAura(cancelAura.SpellID, ObjectGuid::Empty, 0, AURA_REMOVE_BY_CANCEL);
