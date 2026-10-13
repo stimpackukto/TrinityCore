@@ -185,7 +185,7 @@ class instance_icecrown_citadel : public InstanceMapScript
                 packet.Worldstates.emplace_back(WORLDSTATE_ATTEMPTS_MAX, MaxHeroicAttempts);
             }
 
-            void OnPlayerEnter(Player* player) override
+            void OnPlayerEnter([[maybe_unused]] Player* player) override
             {
                 uint8 spawnGroupId = TeamInInstance == ALLIANCE ? SPAWN_GROUP_ALLIANCE_ROS : SPAWN_GROUP_HORDE_ROS;
                 if (!instance->IsSpawnGroupActive(spawnGroupId))
