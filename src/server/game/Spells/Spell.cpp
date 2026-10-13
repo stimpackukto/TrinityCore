@@ -5290,7 +5290,14 @@ SpellCastResult Spell::CheckCast(bool strict, uint32* param1 /*= nullptr*/, uint
                     (m_spellInfo->HasEffect(SPELL_EFFECT_CHARGE) ||
                         m_spellInfo->HasEffect(SPELL_EFFECT_CHARGE_DEST)) &&
                     unitCaster->ToPlayer()->HasActiveSpell(m_spellInfo->Id);
-                if (shapeError != SPELL_CAST_OK && !allowFeralCharge)
+                // 전승룬 기술은 기존 돌진과 동일하게 변신 상태에서 시전 허용.
+                // 직업/주문 전체가 아닌 등록된 네 가지 스펠 ID에만 적용한다.
+                bool const allowRuneFormSpell = unitCaster->GetTypeId() == TYPEID_PLAYER &&
+                    unitCaster->GetShapeshiftForm() != FORM_NONE &&
+                    unitCaster->ToPlayer()->HasActiveSpell(m_spellInfo->Id) &&
+                    (m_spellInfo->Id == 48066 || m_spellInfo->Id == 2825 ||
+                        m_spellInfo->Id == 32182 || m_spellInfo->Id == 1953);
+                if (shapeError != SPELL_CAST_OK && !allowFeralCharge && !allowRuneFormSpell)
                     return shapeError;
 
                 if (m_spellInfo->HasAttribute(SPELL_ATTR0_ONLY_STEALTHED) && !(unitCaster->HasStealthAura()))
