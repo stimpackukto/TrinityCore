@@ -40,6 +40,7 @@
 #include "WorldPacket.h"
 #include "SpellHistory.h"
 #include <chrono>
+#include <mutex>
 #include <unordered_map>
 
 // 전승룬으로 습득한 전사 돌진을 드루이드 야성 폼에서 사용할 때,
@@ -53,6 +54,7 @@ namespace
     };
 
     std::unordered_map<uint32, PendingRuneChargeForm> pendingRuneChargeForms;
+    std::mutex pendingRuneChargeFormsMutex;
 
     bool IsRuneChargeSpell(uint32 spellId)
     {
@@ -381,17 +383,23 @@ void WorldSession::HandleCastSpellOpcode(WorldPacket& recvPacket)
     // 수동 폼 해제나 다른 주문 시전에는 관여하지 않는다.
     if (_player->GetClass() == CLASS_DRUID)
     {
-        auto pending = pendingRuneChargeForms.find(_player->GetGUID().GetCounter());
-        if (pending != pendingRuneChargeForms.end())
+        uint32 formSpellId = 0;
         {
-            uint32 formSpellId = pending->second.formSpellId;
-            auto elapsed = std::chrono::steady_clock::now() - pending->second.cancelledAt;
-            pendingRuneChargeForms.erase(pending);
+            std::lock_guard<std::mutex> lock(pendingRuneChargeFormsMutex);
+            auto pending = pendingRuneChargeForms.find(_player->GetGUID().GetCounter());
+            if (pending != pendingRuneChargeForms.end())
+            {
+                if (IsRuneChargeSpell(spellId) &&
+                    std::chrono::steady_clock::now() - pending->second.cancelledAt <= std::chrono::milliseconds(1500))
+                    formSpellId = pending->second.formSpellId;
 
-            if (IsRuneChargeSpell(spellId) && elapsed <= std::chrono::milliseconds(1500) &&
-                _player->IsAlive() && _player->GetShapeshiftForm() == FORM_NONE && _player->HasActiveSpell(spellId))
-                _player->CastSpell(_player, formSpellId, true);
+                pendingRuneChargeForms.erase(pending);
+            }
         }
+
+        if (formSpellId && _player->IsAlive() && _player->GetShapeshiftForm() == FORM_NONE &&
+            _player->HasActiveSpell(spellId))
+            _player->CastSpell(_player, formSpellId, true);
     }
 
     // not have spell in spellbook
@@ -542,6 +550,7 @@ void WorldSession::HandleCancelAuraOpcode(WorldPackets::Spells::CancelAura& canc
         _player->HasAura(cancelAura.SpellID))
     {
         auto now = std::chrono::steady_clock::now();
+        std::lock_guard<std::mutex> lock(pendingRuneChargeFormsMutex);
         for (auto it = pendingRuneChargeForms.begin(); it != pendingRuneChargeForms.end(); )
         {
             if (now - it->second.cancelledAt > std::chrono::seconds(3))
