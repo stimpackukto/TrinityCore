@@ -43,8 +43,8 @@
 #include <mutex>
 #include <unordered_map>
 
-// 전승룬으로 습득한 전사 돌진을 드루이드 야성 폼에서 사용할 때,
-// 3.3.5a 클라이언트가 먼저 보내는 폼 해제 요청을 돌진 시전에 한해 복구한다.
+// 전승룬 돌진, 보호막, 피의 욕망/영웅심, 점멸을 변신 상태에서 사용할 때
+// 3.3.5a 클라이언트가 미리 보낸 폼 해제 요청을 해당 주문 시전에 한해 복구한다.
 namespace
 {
     struct PendingRuneChargeForm
@@ -62,6 +62,15 @@ namespace
         SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(spellId);
         return spellInfo && (spellInfo->HasEffect(SPELL_EFFECT_CHARGE) ||
             spellInfo->HasEffect(SPELL_EFFECT_CHARGE_DEST));
+    }
+
+    bool IsRuneFormPreservingSpell(uint32 spellId)
+    {
+        // 전승룬: 사제 보호막, 호드 피의 욕망, 얼라이언스 영웅심, 마법사 점멸
+        // 기존의 커스텀 돌진 효과 판별도 그대로 유지한다.
+        return spellId == 48066 || spellId == 2825 ||
+            spellId == 32182 || spellId == 1953 ||
+            IsRuneChargeSpell(spellId);
     }
 }
 
@@ -377,9 +386,10 @@ void WorldSession::HandleCastSpellOpcode(WorldPacket& recvPacket)
     targets.Read(recvPacket, _player);
     HandleClientCastFlags(recvPacket, castFlags, targets);
 
-    // 클라이언트가 돌진 직전에 야성 폼을 자동 해제한 경우에만 원래 폼을 복구한다.
-    // 수동 폼 해제나 다른 주문 시전에는 관여하지 않는다.
-    if (_player->GetClass() == CLASS_DRUID)
+    // 변신 폼에서 전승룬 기술 시전 직전에 자동 해제된 경우 원래 폼을 복구한다.
+    // 복구 대상은 지정된 전승룬 주문과 돌진 효과를 가진 주문으로 한정한다.
+    if (_player->GetClass() == CLASS_DRUID || _player->GetShapeshiftForm() != FORM_NONE ||
+        IsRuneFormPreservingSpell(spellId))
     {
         uint32 formSpellId = 0;
         {
@@ -387,7 +397,7 @@ void WorldSession::HandleCastSpellOpcode(WorldPacket& recvPacket)
             auto pending = pendingRuneChargeForms.find(_player->GetGUID().GetCounter());
             if (pending != pendingRuneChargeForms.end())
             {
-                if (IsRuneChargeSpell(spellId) &&
+                if (IsRuneFormPreservingSpell(spellId) &&
                     std::chrono::steady_clock::now() - pending->second.cancelledAt <= std::chrono::milliseconds(1500))
                     formSpellId = pending->second.formSpellId;
 
@@ -541,9 +551,9 @@ void WorldSession::HandleCancelAuraOpcode(WorldPackets::Spells::CancelAura& canc
     if (!spellInfo->IsPositive() || spellInfo->IsPassive())
         return;
 
-    // 드루이드 야성 폼을 해제하면 잠시 기억한다. 다음 주문이 돌진이 아닐 경우 복구하지 않는다.
-    // 커스텀 돌진의 ID가 기본 전사 주문과 달라도 정상 작동해야 한다.
-    if (_player->GetClass() == CLASS_DRUID && _player->IsInFeralForm() &&
+    // 변신 폼 해제 시 잠시 기록하고, 다음 주문이 지정된 전승룬 기술이 아니면 복구하지 않는다.
+    // 드루이드 야성/조화/회복 폼 및 그 외 직업의 변신 폼도 같은 방식으로 처리한다.
+    if (_player->GetShapeshiftForm() != FORM_NONE &&
         spellInfo->HasAura(SPELL_AURA_MOD_SHAPESHIFT) &&
         _player->HasAura(cancelAura.SpellID))
     {
