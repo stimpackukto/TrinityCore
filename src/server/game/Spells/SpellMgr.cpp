@@ -5355,7 +5355,22 @@ void SpellMgr::LoadSpellInfoCorrections()
 		spellInfo->_GetEffect(EFFECT_2).TargetB = SpellImplicitTargetInfo();
 	});
 
-		// Custom Update - 2026-07-27
+		// Custom Update - 2026-10-13
+	// 전승 룬 등으로 습득한 돌진(1~3등급): 드루이드 야성 폼에서 돌진해도 폼 유지
+	// 기존 전사 태세 허용값은 그대로 두고 곰/광포한 곰/표범 폼만 추가 허용
+	ApplySpellFix({ 100, 6178, 11578 }, [](SpellInfo* spellInfo)
+	{
+		uint64 const feralFormMask =
+			(UI64LIT(1) << (FORM_BEAR - 1)) |
+			(UI64LIT(1) << (FORM_DIREBEAR - 1)) |
+			(UI64LIT(1) << (FORM_CAT - 1));
+
+		spellInfo->Stances |= feralFormMask;
+		spellInfo->StancesNot &= ~feralFormMask;
+		spellInfo->Attributes &= ~SPELL_ATTR0_NOT_SHAPESHIFT;
+	});
+
+	// Custom Update - 2026-07-27
 	// 전승 룬 점멸
 	// 1953 - 점멸
 	// - 일반 상태에서 사용 가능
