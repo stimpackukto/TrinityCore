@@ -67,10 +67,9 @@ namespace
     bool IsRuneFormPreservingSpell(uint32 spellId)
     {
         // 전승룬: 사제 보호막, 호드 피의 욕망, 얼라이언스 영웅심, 마법사 점멸
-        // 기존의 커스텀 돌진 효과 판별도 그대로 유지한다.
+        // 드루이드 돌진 폼 복구 여부는 기존 IsRuneChargeSpell로 별도 판별한다.
         return spellId == 48066 || spellId == 2825 ||
-            spellId == 32182 || spellId == 1953 ||
-            IsRuneChargeSpell(spellId);
+            spellId == 32182 || spellId == 1953;
     }
 }
 
@@ -388,8 +387,7 @@ void WorldSession::HandleCastSpellOpcode(WorldPacket& recvPacket)
 
     // 변신 폼에서 전승룬 기술 시전 직전에 자동 해제된 경우 원래 폼을 복구한다.
     // 복구 대상은 지정된 전승룬 주문과 돌진 효과를 가진 주문으로 한정한다.
-    if (_player->GetClass() == CLASS_DRUID || _player->GetShapeshiftForm() != FORM_NONE ||
-        IsRuneFormPreservingSpell(spellId))
+    if (_player->GetClass() == CLASS_DRUID || IsRuneFormPreservingSpell(spellId))
     {
         uint32 formSpellId = 0;
         {
@@ -397,7 +395,8 @@ void WorldSession::HandleCastSpellOpcode(WorldPacket& recvPacket)
             auto pending = pendingRuneChargeForms.find(_player->GetGUID().GetCounter());
             if (pending != pendingRuneChargeForms.end())
             {
-                if (IsRuneFormPreservingSpell(spellId) &&
+                if ((IsRuneFormPreservingSpell(spellId) ||
+                    (_player->GetClass() == CLASS_DRUID && IsRuneChargeSpell(spellId))) &&
                     std::chrono::steady_clock::now() - pending->second.cancelledAt <= std::chrono::milliseconds(1500))
                     formSpellId = pending->second.formSpellId;
 
