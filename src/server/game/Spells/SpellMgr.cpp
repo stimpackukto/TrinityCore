@@ -5370,6 +5370,13 @@ void SpellMgr::LoadSpellInfoCorrections()
 	// - 그 외 변신 상태에서는 사용 불가
 	ApplySpellFix({ 1953 }, [](SpellInfo* spellInfo)
 	{
+		// 전승 룬으로 질주와 점멸을 함께 습득해도 재사용 대기시간을 공유하지 않음.
+		// 카테고리 쿨타임은 점멸 고유 쿨타임으로 옮겨 기존 대기시간을 유지.
+		if (spellInfo->CategoryRecoveryTime > spellInfo->RecoveryTime)
+			spellInfo->RecoveryTime = spellInfo->CategoryRecoveryTime;
+		spellInfo->CategoryRecoveryTime = 0;
+		spellInfo->CategoryEntry = nullptr;
+
 		uint64 const bearFormMask =
 			(UI64LIT(1) << (FORM_BEAR - 1)) |
 			(UI64LIT(1) << (FORM_DIREBEAR - 1));
