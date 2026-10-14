@@ -5361,6 +5361,16 @@ void SpellMgr::LoadSpellInfoCorrections()
 		spellInfo->_GetEffect(EFFECT_2).TargetB = SpellImplicitTargetInfo();
 	});
 
+	// 드루이드 질주 (1~3랭크): 점멸과 카테고리 쿨타임을 공유하지 않도록 분리
+	ApplySpellFix({ 1850, 9821, 33357 }, [](SpellInfo* spellInfo)
+	{
+		// 기존 재사용 대기시간은 고유 쿨타임으로 유지
+		if (spellInfo->CategoryRecoveryTime > spellInfo->RecoveryTime)
+			spellInfo->RecoveryTime = spellInfo->CategoryRecoveryTime;
+		spellInfo->CategoryRecoveryTime = 0;
+		spellInfo->CategoryEntry = nullptr;
+	});
+
 		// Custom Update - 2026-07-27
 	// 전승 룬 점멸
 	// 1953 - 점멸
