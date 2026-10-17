@@ -103,7 +103,7 @@ static std::set<uint32> NorthrendDungeons =
 };
 
 
-static std::string GetTodayDateString()
+[[maybe_unused]] static std::string GetTodayDateString()
 {
     std::time_t now = std::time(nullptr);
     std::tm* tm = std::localtime(&now);
@@ -114,7 +114,7 @@ static std::string GetTodayDateString()
 }
 namespace
 {
-    static constexpr bool CHECK_DATE_RANGE = true;
+    [[maybe_unused]] static constexpr bool CHECK_DATE_RANGE = true;
 
     // item_entry -> goal_type (화이트리스트)
     static bool GetGoalTypeFromWhitelist(uint32 itemEntry, std::string& outGoalType)
@@ -158,7 +158,7 @@ namespace
         return outGoalId > 0;
     }
 
-    static void AddServerProgress(uint32 goalId, uint32 amount)
+    static void AddServerProgress([[maybe_unused]] uint32 goalId, [[maybe_unused]] uint32 amount)
     {
      /*   CharacterDatabase.PExecute(
             "UPDATE appdata.weekly_server_goals "
@@ -169,7 +169,7 @@ namespace
         ); */
     }
 
-    static void AddPersonalContribution(uint32 goalId, uint32 accountId, uint32 addAmount, uint32 minPersonal)
+    static void AddPersonalContribution([[maybe_unused]] uint32 goalId, [[maybe_unused]] uint32 accountId, [[maybe_unused]] uint32 addAmount, [[maybe_unused]] uint32 minPersonal)
     {
         // 중요: weekly_goal_contributions에 UNIQUE(goal_id, account_id) 필요
     /*    CharacterDatabase.PExecute(
@@ -339,7 +339,7 @@ class DeliveryVendorScript : public PlayerScript
 public:
     DeliveryVendorScript() : PlayerScript("DeliveryVendorScript") { }
 
-    bool OnPlayerSellItem(Player* player, Creature* vendor, Item* item, uint32& count, uint32& money) override
+    bool OnPlayerSellItem(Player* player, Creature* vendor, Item* item, uint32& count, [[maybe_unused]] uint32& money) override
     {
         if (!player || !vendor || !item || count == 0)
             return false;
@@ -684,7 +684,7 @@ public:
 		AddDailyProgress(killer, "world_pvp", 1);
 	}
 
-	void OnLootItem(Player* looter, ObjectGuid const& lootGuid, uint32 itemId, uint32 count) override
+	void OnLootItem(Player* looter, [[maybe_unused]] ObjectGuid const& lootGuid, uint32 itemId, [[maybe_unused]] uint32 count) override
 	{
 		if (!looter)
 			return;
@@ -734,7 +734,7 @@ class WeeklyAuctionGoalScript : public AuctionHouseScript
 public:
     WeeklyAuctionGoalScript() : AuctionHouseScript("WeeklyAuctionGoalScript") { }
 
-    void OnAuctionAdd(AuctionHouseObject* ah, AuctionEntry* entry) override
+    void OnAuctionAdd([[maybe_unused]] AuctionHouseObject* ah, AuctionEntry* entry) override
     {
         if (!entry)
             return;
@@ -768,7 +768,7 @@ public:
         }
     }
 
-   void OnAuctionWon(Player* player, uint32 itemEntry, uint32 itemCount) override
+   void OnAuctionWon(Player* player, [[maybe_unused]] uint32 itemEntry, [[maybe_unused]] uint32 itemCount) override
     {
         uint32 goalId = 0;
         uint32 minPersonal = 0;
