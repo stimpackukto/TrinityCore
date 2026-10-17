@@ -67,6 +67,44 @@
 
 extern SpellEffectHandlerFn SpellEffectHandlers[TOTAL_SPELL_EFFECTS];
 
+// 전승 룬 악마의 마법진: 마나가 없는 직업은 자신의 전투 자원을 사용한다.
+// 분노와 룬마력은 서버 내부에서 화면 표시값의 10배 단위로 저장된다.
+namespace
+{
+    bool GetLegacyRuneDemonicCirclePower(Unit const* caster, uint32 spellId, Powers& powerType, int32& powerCost)
+    {
+        if (!caster || (spellId != 48018 && spellId != 48020))
+            return false;
+
+        Player const* player = caster->ToPlayer();
+        if (!player)
+            return false;
+
+        switch (player->GetClass())
+        {
+            case CLASS_WARRIOR:
+                powerType = POWER_RAGE;
+                break;
+            case CLASS_ROGUE:
+                powerType = POWER_ENERGY;
+                break;
+            case CLASS_DEATH_KNIGHT:
+                powerType = POWER_RUNIC_POWER;
+                break;
+            default:
+                return false;
+        }
+
+        // 소환: 최대 자원의 15%, 순간이동: 기력 10 / 분노·룬마력 10.
+        if (spellId == 48018)
+            powerCost = std::max<int32>(1, int32(caster->GetMaxPower(powerType)) * 15 / 100);
+        else
+            powerCost = powerType == POWER_ENERGY ? 10 : 100;
+
+        return true;
+    }
+}
+
 SpellDestination::SpellDestination()
 {
     _position.Relocate(0, 0, 0, 0);
@@ -3136,6 +3174,15 @@ SpellCastResult Spell::prepare(SpellCastTargets const& targets, AuraEffect const
     // Fill cost data (do not use power for item casts)
     m_powerCost = m_CastItem ? 0 : m_spellInfo->CalcPowerCost(m_caster, m_spellSchoolMask, this);
 
+    // 전승 룬 마법진: 전사/도적/죽음의 기사는 마나 대신 자신의 전투 자원을 소모한다.
+    if (!m_CastItem)
+    {
+        Powers runePowerType = POWER_MANA;
+        int32 runePowerCost = 0;
+        if (GetLegacyRuneDemonicCirclePower(m_caster->ToUnit(), m_spellInfo->Id, runePowerType, runePowerCost))
+            m_powerCost = runePowerCost;
+    }
+
 	// [BUG COMPAT - WotLK] Spark of Hope tooltip bug replication:
     // - Client may show ENERGY cost as 0 due to flat cost reduction.
     // - To match that WotLK-era behavior, apply Spark of Hope (65010) flat reduction to ENERGY too.
@@ -4853,6 +4900,9 @@ void Spell::TakePower()
     }
 
     Powers powerType = Powers(m_spellInfo->PowerType);
+    int32 runePowerCost = 0;
+    GetLegacyRuneDemonicCirclePower(unitCaster, m_spellInfo->Id, powerType, runePowerCost);
+
     bool hit = true;
     if (unitCaster->GetTypeId() == TYPEID_PLAYER)
     {
@@ -6690,6 +6740,12 @@ SpellCastResult Spell::CheckPower() const
     // item cast not used power
     if (m_CastItem)
         return SPELL_CAST_OK;
+
+    // 전승 룬 마법진: 시전자의 분노/기력/룬마력으로 시전 가능 여부를 확인한다.
+    Powers runePowerType = POWER_MANA;
+    int32 runePowerCost = 0;
+    if (GetLegacyRuneDemonicCirclePower(unitCaster, m_spellInfo->Id, runePowerType, runePowerCost))
+        return int32(unitCaster->GetPower(runePowerType)) < m_powerCost ? SPELL_FAILED_NO_POWER : SPELL_CAST_OK;
 
     // health as power used - need check health amount
     if (m_spellInfo->PowerType == POWER_HEALTH)
