@@ -254,7 +254,7 @@ public:
 
 
 //가젯잔 이동포털
-static constexpr uint32 GO_GADGETZAN_CRYSTAL_ENTRY = 244606;
+[[maybe_unused]] static constexpr uint32 GO_GADGETZAN_CRYSTAL_ENTRY = 244606;
 static constexpr uint32 SPELL_GADGETZAN_TELEPORT = 23441;
 
 static constexpr float GADGETZAN_CRYSTAL_RADIUS = 1.8f;
