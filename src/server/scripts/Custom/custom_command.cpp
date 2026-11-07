@@ -70,7 +70,7 @@
 
 // ============================================================================
 // Custom Update - 2026-07-13
-// appdata.character_archive_log 등록 캐릭터 영구 삭제 명령어 (1개월/2년 유형 구분)
+// appdata.character_archive_log 등록 캐릭터 영구 삭제 명령어 (6개월/2년 유형 구분)
 // ============================================================================
 
 using namespace Trinity::ChatCommands;
@@ -106,7 +106,7 @@ public:
 
         static ChatCommandTable archiveDeleteCommandTable =
         {
-            { "1month", HandleArchiveDelete1MonthCommand, rbac::RBAC_PERM_COMMAND_SEND_MESSAGE, Console::Yes },
+            { "6months", HandleArchiveDelete6MonthsCommand, rbac::RBAC_PERM_COMMAND_SEND_MESSAGE, Console::Yes },
             { "2years", HandleArchiveDelete2YearsCommand, rbac::RBAC_PERM_COMMAND_SEND_MESSAGE, Console::Yes },
         };
 
@@ -119,7 +119,7 @@ public:
         return commandTable;
     }
 
-	// 사용법: .archivedelete 1month / .archivedelete 2years
+	// 사용법: .archivedelete 6months / .archivedelete 2years
 	// appdata.character_archive_log의 archive_type별로 현재 존재하는 캐릭터를 영구 삭제한다.
 	static bool HandleArchiveDeleteByType(ChatHandler* handler, char const* archiveType, char const* archiveLabel)
 	{
@@ -140,6 +140,8 @@ public:
 			"FROM appdata.character_archive_log AS archive_log "
 			"INNER JOIN characters.characters AS c ON c.guid = archive_log.guid "
 			"WHERE archive_log.archive_type = '{}' "
+			"AND (archive_log.archive_type <> 'under40_1month' OR "
+			"     (c.level < 40 AND c.logout_time > 0 AND c.logout_time <= UNIX_TIMESTAMP(DATE_SUB(NOW(), INTERVAL 6 MONTH)))) "
 			"AND (archive_log.archive_type <> 'inactive_6months' OR "
 			"     (c.logout_time > 0 AND c.logout_time <= UNIX_TIMESTAMP(DATE_SUB(NOW(), INTERVAL 2 YEAR)))) "
 			"AND NOT EXISTS ( "
@@ -167,7 +169,9 @@ public:
 				"SELECT COUNT(*) FROM characters.characters c "
 				"INNER JOIN appdata.character_archive_log archive_log ON archive_log.guid = c.guid "
 				"WHERE c.guid = {} AND c.account = {} AND archive_log.archive_type = '{}' "
-				"AND (archive_log.archive_type <> 'inactive_6months' OR "
+				"AND (archive_log.archive_type <> 'under40_1month' OR "
+			"     (c.level < 40 AND c.logout_time > 0 AND c.logout_time <= UNIX_TIMESTAMP(DATE_SUB(NOW(), INTERVAL 6 MONTH)))) "
+			"AND (archive_log.archive_type <> 'inactive_6months' OR "
 				"     (c.logout_time > 0 AND c.logout_time <= UNIX_TIMESTAMP(DATE_SUB(NOW(), INTERVAL 2 YEAR)))) "
 				"AND NOT EXISTS ( "
 				"SELECT 1 FROM appdata.account_character_locks account_lock "
@@ -203,9 +207,9 @@ public:
 		return true;
 	}
 
-	static bool HandleArchiveDelete1MonthCommand(ChatHandler* handler)
+	static bool HandleArchiveDelete6MonthsCommand(ChatHandler* handler)
 	{
-		return HandleArchiveDeleteByType(handler, "under40_1month", "1개월 미접속 (40레벨 미만)");
+		return HandleArchiveDeleteByType(handler, "under40_1month", "6개월 미접속 (40레벨 미만)");
 	}
 
 	static bool HandleArchiveDelete2YearsCommand(ChatHandler* handler)
