@@ -1131,7 +1131,7 @@ public:
     }
 };
 
-// 40레벨 미만 1개월 / 전체 레벨 6개월 이상 미접속 관리
+// 40레벨 미만 1개월 / 전체 레벨 2년 이상 미접속 관리
 #include "ScriptMgr.h"
 #include "TaskScheduler.h"
 #include "DatabaseEnv.h"
@@ -1193,7 +1193,7 @@ public:
             "FROM characters.characters c "
             "LEFT JOIN appdata.character_archive_log l ON l.guid = c.guid "
             "WHERE c.logout_time > 0 "
-            "AND (c.logout_time <= UNIX_TIMESTAMP(DATE_SUB(NOW(), INTERVAL 6 MONTH)) "
+            "AND (c.logout_time <= UNIX_TIMESTAMP(DATE_SUB(NOW(), INTERVAL 2 YEAR)) "
             "OR (c.level < 40 AND c.logout_time <= UNIX_TIMESTAMP(DATE_SUB(NOW(), INTERVAL 1 MONTH)))) "
             "AND c.online = 0 "
             "AND l.guid IS NULL "
@@ -1215,7 +1215,7 @@ public:
             uint32 logout  = fields[3].GetUInt32();
             uint32 level   = fields[4].GetUInt32();
             uint32 now     = uint32(time(nullptr));
-            char const* archiveType = level < 40 ? "under40_1month" : "inactive_6months";
+            char const* archiveType = level < 40 ? "under40_1month" : "inactive_6months"; // Legacy DB identifier; eligibility is now 2 years.
 
             // 대상 조회 후 LOCK을 구매한 계정도 정리에서 제외한다.
             QueryResult accountLockCheck = CharacterDatabase.PQuery(
@@ -3864,7 +3864,7 @@ void AddSC_custom_scripts()
 	//로그인카운트
 	new account_daily_ingame();
 
-	// 40레벨 미만 1개월 / 전체 레벨 6개월 이상 미접속 캐릭터
+	// 40레벨 미만 1개월 / 전체 레벨 2년 이상 미접속 캐릭터
     new inactive_character_archive();
     new inactive_character_lock_player();
 
