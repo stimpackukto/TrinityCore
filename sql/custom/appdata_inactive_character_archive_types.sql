@@ -1,6 +1,6 @@
 -- Apply ONCE to appdata BEFORE deploying the updated TrinityCore worldserver.
 -- Existing archive and lock records receive the legacy six-month category by default.
--- Archive categories: under40_1month (level 1-39, inactive >= 1 month);
+-- Archive categories: under40_1month (legacy DB identifier; level 1-39, inactive >= 6 months);
 -- inactive_6months (legacy DB identifier; level 40+, inactive >= 2 years, or legacy records).
 -- This migration does not delete or unlock any character.
 
