@@ -4507,6 +4507,17 @@ namespace
             return true;
         }
 
+        // STIMPACK Custom: In-game armory is disabled. Purchases must be made on the website.
+        // Intercept OPEN / SEARCH / BUY before any item lookup, point deduction or delivery.
+        if (payload == LEGACY_RUNE_ARMORY_OPEN_COMMAND ||
+            payload.compare(0, LEGACY_RUNE_ARMORY_SEARCH_PREFIX.size(), LEGACY_RUNE_ARMORY_SEARCH_PREFIX) == 0 ||
+            payload.compare(0, LEGACY_RUNE_ARMORY_BUY_PREFIX.size(), LEGACY_RUNE_ARMORY_BUY_PREFIX) == 0)
+        {
+            player->GetSession()->SendNotification("무기고 이용이 종료되었습니다. 아이템은 홈페이지에서 구매하세요.");
+            SendLegacyRuneArmoryFail(player, "홈페이지에서 구매하세요.");
+            return true;
+        }
+
         if (payload == LEGACY_RUNE_ARMORY_OPEN_COMMAND)
         {
             HandleLegacyRuneArmoryOpen(player);
