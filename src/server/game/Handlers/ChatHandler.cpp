@@ -434,6 +434,17 @@ void WorldSession::HandleMessagechatOpcode(WorldPacket& recvData)
     if (msg.size() > 255)
         return;
 
+    // STIMPACK: Disable the LegacyRune in-game armory; purchases are available on the website only.
+    // Block all ARMORY requests before they reach addon command processing or chat delivery.
+    if (type == CHAT_MSG_WHISPER && lang == LANG_ADDON &&
+        msg.compare(0, 6, "LRUNE\t") == 0 &&
+        msg.compare(6, 7, "ARMORY:") == 0)
+    {
+        SendNotification("무기고 이용이 종료되었습니다. 아이템은 홈페이지에서 구매하세요.");
+        sender->WhisperAddon("LRUNE\tARMORY:FAIL:홈페이지에서 구매하세요.", sender);
+        return;
+    }
+
 	/// 🔥 GM 인터셉트 + 티켓 조건
 	if (msg.rfind("gm ", 0) == 0)
 	{
