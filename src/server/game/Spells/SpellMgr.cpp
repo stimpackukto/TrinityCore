@@ -5375,7 +5375,7 @@ void SpellMgr::LoadSpellInfoCorrections()
 		if (spellInfo->CategoryRecoveryTime > spellInfo->RecoveryTime)
 			spellInfo->RecoveryTime = spellInfo->CategoryRecoveryTime;
 		spellInfo->CategoryRecoveryTime = 0;
-		spellInfo->CategoryEntry = nullptr;
+		spellInfo->CategoryEntry = 0;
 
 		uint64 const bearFormMask =
 			(UI64LIT(1) << (FORM_BEAR - 1)) |
